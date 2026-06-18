@@ -1,0 +1,248 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownsExisting() {
+      return signedIn() && resource.data.createdBy == request.auth.uid;
+    }
+
+    function ownsIncoming() {
+      return signedIn() && request.resource.data.createdBy == request.auth.uid;
+    }
+
+    function keepsOwner() {
+      return request.resource.data.createdBy == resource.data.createdBy;
+    }
+
+    function hasOnly(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function nonEmptyString(field, max) {
+      return request.resource.data[field] is string
+        && request.resource.data[field].size() > 0
+        && request.resource.data[field].size() <= max;
+    }
+
+    function optionalString(field, max) {
+      return !(field in request.resource.data)
+        || (request.resource.data[field] is string && request.resource.data[field].size() <= max);
+    }
+
+    function optionalNullableString(field, max) {
+      return !(field in request.resource.data)
+        || request.resource.data[field] == null
+        || (request.resource.data[field] is string && request.resource.data[field].size() <= max);
+    }
+
+    function optionalNumber(field, min, max) {
+      return !(field in request.resource.data)
+        || (request.resource.data[field] is number
+          && request.resource.data[field] >= min
+          && request.resource.data[field] <= max);
+    }
+
+    function isoDate(field) {
+      return request.resource.data[field] is string
+        && request.resource.data[field].matches("^\\d{4}-\\d{2}-\\d{2}$");
+    }
+
+    function optionalIsoDate(field) {
+      return !(field in request.resource.data)
+        || request.resource.data[field] == null
+        || (request.resource.data[field] is string
+          && request.resource.data[field].matches("^\\d{4}-\\d{2}-\\d{2}$"));
+    }
+
+    function optionalIsoDateTime(field) {
+      return !(field in request.resource.data)
+        || request.resource.data[field] == null
+        || (request.resource.data[field] is string
+          && request.resource.data[field].matches("^\\d{4}-\\d{2}-\\d{2}T.*"));
+    }
+
+    function isCustomer() {
+      return hasOnly(['name', 'phone', 'city', 'source', 'store_provider', 'store_customer_id', 'createdAt', 'updatedAt', 'createdBy'])
+        && nonEmptyString('name', 80)
+        && nonEmptyString('phone', 24)
+        && optionalString('city', 80)
+        && optionalString('source', 20)
+        && optionalString('store_provider', 40)
+        && optionalNullableString('store_customer_id', 80)
+        && optionalIsoDateTime('createdAt')
+        && optionalIsoDateTime('updatedAt')
+        && ownsIncoming();
+    }
+
+    function isProduct() {
+      return hasOnly(['name', 'interval_months', 'category', 'sku', 'remind_text', 'source', 'product_type', 'createdAt', 'updatedAt', 'createdBy'])
+        && nonEmptyString('name', 80)
+        && request.resource.data.interval_months is number
+        && request.resource.data.interval_months >= 1
+        && request.resource.data.interval_months <= 60
+        && optionalString('category', 80)
+        && optionalString('sku', 80)
+        && optionalString('remind_text', 800)
+        && optionalString('source', 20)
+        && optionalString('product_type', 40)
+        && optionalIsoDateTime('createdAt')
+        && optionalIsoDateTime('updatedAt')
+        && ownsIncoming();
+    }
+
+    function isInstallation() {
+      return hasOnly([
+          'customer_id', 'customer_name', 'customer_phone',
+          'product_id', 'product_name', 'product_sku',
+          'install_date', 'next_maintenance',
+          'remind_count', 'next_remind_type',
+          'label', 'status', 'completed_date', 'last_remind_at', 'last_remind_attempt_at',
+          'source', 'store_order_id', 'store_order_number', 'order_item_type',
+          'createdAt', 'updatedAt', 'createdBy'
+        ])
+        && nonEmptyString('customer_id', 80)
+        && nonEmptyString('customer_name', 80)
+        && nonEmptyString('customer_phone', 24)
+        && nonEmptyString('product_id', 80)
+        && nonEmptyString('product_name', 80)
+        && optionalString('product_sku', 80)
+        && isoDate('install_date')
+        && isoDate('next_maintenance')
+        && request.resource.data.remind_count is number
+        && request.resource.data.remind_count >= 0
+        && request.resource.data.remind_count <= 3
+        && (request.resource.data.next_remind_type == null
+          || request.resource.data.next_remind_type in ['first', 'second', 'last'])
+        && optionalString('label', 120)
+        && request.resource.data.status in ['pending_installation', 'pending_external_service', 'active', 'completed', 'cancelled']
+        && optionalIsoDate('completed_date')
+        && optionalIsoDateTime('last_remind_at')
+        && optionalIsoDateTime('last_remind_attempt_at')
+        && optionalString('source', 20)
+        && optionalString('store_order_id', 80)
+        && optionalString('store_order_number', 80)
+        && optionalString('order_item_type', 40)
+        && optionalIsoDateTime('createdAt')
+        && optionalIsoDateTime('updatedAt')
+        && ownsIncoming();
+    }
+
+    function isTechnician() {
+      return hasOnly(['name', 'phone', 'specialty', 'max_daily', 'createdAt', 'updatedAt', 'createdBy'])
+        && nonEmptyString('name', 80)
+        && nonEmptyString('phone', 24)
+        && optionalString('specialty', 80)
+        && request.resource.data.max_daily is number
+        && request.resource.data.max_daily >= 1
+        && request.resource.data.max_daily <= 40
+        && optionalIsoDateTime('createdAt')
+        && optionalIsoDateTime('updatedAt')
+        && ownsIncoming();
+    }
+
+    function isBooking() {
+      return hasOnly([
+          'installation_id', 'customer_id', 'customer_name', 'customer_phone',
+          'product_id', 'product_name',
+          'technician_id', 'tech_name',
+          'date', 'scheduled_time', 'status',
+          'booking_type', 'source', 'store_order_id', 'store_order_number', 'completed_at',
+          'createdAt', 'updatedAt', 'createdBy'
+        ])
+        && optionalString('installation_id', 80)
+        && nonEmptyString('customer_id', 80)
+        && nonEmptyString('customer_name', 80)
+        && optionalString('customer_phone', 24)
+        && nonEmptyString('product_id', 80)
+        && nonEmptyString('product_name', 80)
+        && nonEmptyString('technician_id', 80)
+        && nonEmptyString('tech_name', 80)
+        && isoDate('date')
+        && nonEmptyString('scheduled_time', 20)
+        && request.resource.data.status in ['confirmed', 'completed', 'cancelled']
+        && optionalString('booking_type', 40)
+        && optionalString('source', 20)
+        && optionalString('store_order_id', 80)
+        && optionalString('store_order_number', 80)
+        && optionalIsoDateTime('completed_at')
+        && optionalIsoDateTime('createdAt')
+        && optionalIsoDateTime('updatedAt')
+        && ownsIncoming();
+    }
+
+    function isSettings(userId) {
+      return request.auth.uid == userId
+        && hasOnly(['techs', 'jobs_per_tech', 'response_rate', 'maxDaily', 'createdBy', 'updatedAt'])
+        && request.resource.data.createdBy == userId
+        && optionalNumber('techs', 1, 500)
+        && optionalNumber('jobs_per_tech', 1, 100)
+        && optionalNumber('response_rate', 0, 100)
+        && optionalNumber('maxDaily', 1, 1000)
+        && optionalIsoDateTime('updatedAt');
+    }
+
+    match /customers/{id} {
+      allow read: if ownsExisting();
+      allow create: if signedIn() && isCustomer();
+      allow update: if ownsExisting() && keepsOwner() && isCustomer();
+      allow delete: if ownsExisting();
+    }
+
+    match /products/{id} {
+      allow read: if ownsExisting();
+      allow create: if signedIn() && isProduct();
+      allow update: if ownsExisting() && keepsOwner() && isProduct();
+      allow delete: if ownsExisting();
+    }
+
+    match /installations/{id} {
+      allow read: if ownsExisting();
+      allow create: if signedIn() && isInstallation();
+      allow update: if ownsExisting() && keepsOwner() && isInstallation();
+      allow delete: if ownsExisting();
+    }
+
+    match /technicians/{id} {
+      allow read: if ownsExisting();
+      allow create: if signedIn() && isTechnician();
+      allow update: if ownsExisting() && keepsOwner() && isTechnician();
+      allow delete: if ownsExisting();
+    }
+
+    match /bookings/{id} {
+      allow read: if ownsExisting();
+      allow create: if signedIn() && isBooking();
+      allow update: if ownsExisting() && keepsOwner() && isBooking();
+      allow delete: if ownsExisting();
+    }
+
+    match /reminders/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /technician_notifications/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /settings/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn() && isSettings(userId);
+      allow delete: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /store_orders/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /store_webhook_events/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+  }
+}

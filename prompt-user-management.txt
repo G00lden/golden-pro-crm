@@ -1,0 +1,77 @@
+You are completing the Golden Pro CRM (https://crm.breexe-pro.com). The app runs on Node.js/Express/React (TypeScript) with SQLite (data/golden-crm.db). 
+
+## Current state
+- Firebase Auth is configured in the app (Firebase client SDK in `src/firebase.ts`, Firebase Admin SDK in `server/firebaseAdmin.ts`)
+- The app has a `localAuthEnabled` mode for demo, but we want REAL Google Sign-In
+- Data provider is SQLite (NOT Firestore)
+- Project location: C:\Users\owner\Documents\Codex\2026-04-25\files-mentioned-by-the-user-golden-2
+
+## What needs to be done
+
+### 1. Fix Firebase Auth in Firebase Console
+- Go to https://console.firebase.google.com/project/gen-lang-client-0272797164/authentication
+- Enable **Sign-in providers**: Google (and optionally Email/Password)
+- Add `crm.breexe-pro.com` to **Authorized domains** in Authentication → Settings
+
+### 2. Add User Management Dashboard with Roles & Permissions
+Build a complete user management system in the CRM:
+
+#### Backend (server/)
+- Create `server/userManagement.ts` with Express routes:
+  - `GET /api/admin/users` — list all users (admin only)
+  - `POST /api/admin/users` — create user with role
+  - `PUT /api/admin/users/:id` — update user role/permissions  
+  - `DELETE /api/admin/users/:id` — delete user
+  - `POST /api/admin/users/:id/deactivate` — suspend user
+- Add roles table to SQLite (`server/db.ts`):
+  ```sql
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    uid TEXT UNIQUE,  -- Firebase UID
+    name TEXT NOT NULL DEFAULT '',
+    email TEXT,
+    phone TEXT DEFAULT '',
+    role TEXT DEFAULT 'user',  -- 'admin', 'manager', 'technician', 'user'
+    permissions TEXT DEFAULT '{}',  -- JSON object for granular permissions
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  ```
+- Add permission check middleware: `requireRole(roles: string[])` and `requirePermission(permission: string)`
+- Update `auth.ts`: After Firebase token verification, lookup the user in the local DB to get their role
+
+#### Frontend (src/)
+- Create `src/pages/AdminUsers.tsx` — user management page with:
+  - Table of all users (name, email, role, status, last login)
+  - Add user form (name, email, role dropdown)
+  - Edit user role (dropdown: admin/manager/technician/user)
+  - Deactivate/Activate toggle
+  - Search/filter
+- Create `src/components/UserRoleBadge.tsx` — colored badge showing role
+- Add route `/admin/users` in `src/App.tsx` (protected for admin role only)
+- Add "User Management" link in sidebar/nav (visible to admins only)
+- Add permission-based UI hiding (e.g., hide delete buttons for non-admins)
+
+### 3. Handle new user registration
+- When a new user signs in with Google for the first time, auto-create their record in the local `users` table with role='user' and default permissions
+- Admin can then promote them to manager/technician
+
+### 4. Seed default admin
+- If no admin user exists, the first user to sign in becomes admin automatically
+- Or create a seed script that makes the Firebase owner admin
+
+## Key files to modify
+- `server/firebaseAdmin.ts` — already set up for Firebase Admin SDK
+- `server/auth.ts` — add role lookup after Firebase verification
+- `server.ts` — register new routes
+- `src/firebase.ts` — already has Google sign-in (signInWithRedirect)
+- `src/App.tsx` — add route for admin panel
+- `src/api.ts` — add API functions for user management
+- `server/db.ts` — add users table
+
+## Environment
+- Windows, Node.js v24.14.1
+- Run with: cd project && npx tsx server.ts
+- SQLite at: data/golden-crm.db
+- App: http://localhost:3000 in dev, https://crm.breexe-pro.com in production

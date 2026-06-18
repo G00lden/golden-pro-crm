@@ -1,0 +1,108 @@
+{
+  "entities": {
+    "Customer": {
+      "title": "Customer",
+      "description": "A client of Golden Pro",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Full name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "city": { "type": "string", "description": "City of residence" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["name", "phone", "createdBy"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Maintenance product",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "interval_months": { "type": "number" },
+        "category": { "type": "string" },
+        "sku": { "type": "string" },
+        "remind_text": { "type": "string" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["name", "interval_months", "createdBy"]
+    },
+    "Installation": {
+      "title": "Installation",
+      "description": "A product installation for a customer",
+      "type": "object",
+      "properties": {
+        "customer_id": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "customer_phone": { "type": "string" },
+        "product_id": { "type": "string" },
+        "product_name": { "type": "string" },
+        "install_date": { "type": "string", "format": "date" },
+        "next_maintenance": { "type": "string", "format": "date" },
+        "remind_count": { "type": "number" },
+        "next_remind_type": { "type": "string", "enum": ["first", "second", "last"] },
+        "label": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "completed", "cancelled"] },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["customer_id", "product_id", "install_date", "next_maintenance", "createdBy"]
+    },
+    "Technician": {
+      "title": "Technician",
+      "description": "Service technician",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "specialty": { "type": "string" },
+        "max_daily": { "type": "number" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["name", "phone", "createdBy"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Maintenance visit booking",
+      "type": "object",
+      "properties": {
+        "customer_id": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "customer_phone": { "type": "string" },
+        "product_id": { "type": "string" },
+        "product_name": { "type": "string" },
+        "technician_id": { "type": "string" },
+        "tech_name": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "scheduled_time": { "type": "string" },
+        "status": { "type": "string", "enum": ["confirmed", "completed", "cancelled"] },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["customer_id", "product_id", "date", "status", "createdBy"]
+    },
+    "Reminder": {
+      "title": "Reminder",
+      "description": "Sent message log",
+      "type": "object",
+      "properties": {
+        "customer_id": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "customer_phone": { "type": "string" },
+        "product_name": { "type": "string" },
+        "message": { "type": "string" },
+        "reminder_type": { "type": "string" },
+        "status": { "type": "string" },
+        "sent_at": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["customer_id", "message", "sent_at", "createdBy"]
+    }
+  },
+  "firestore": {
+    "/customers/{customerId}": { "schema": "Customer", "description": "Customer records" },
+    "/products/{productId}": { "schema": "Product", "description": "Product catalog" },
+    "/installations/{installationId}": { "schema": "Installation", "description": "Installation records" },
+    "/technicians/{technicianId}": { "schema": "Technician", "description": "Technician records" },
+    "/bookings/{bookingId}": { "schema": "Booking", "description": "Booking records" },
+    "/reminders/{reminderId}": { "schema": "Reminder", "description": "Reminder logs" }
+  }
+}

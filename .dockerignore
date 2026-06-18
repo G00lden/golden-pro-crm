@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+.env
+.env.*
+!.env.example
+.runtime
+.wa-session
+.npm-cache
+.tools
+service-account*.json
+firebase-service-account*.json
+*.log

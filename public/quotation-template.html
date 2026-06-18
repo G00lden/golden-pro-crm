@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>نظام عروض الأسعار - جولدن برو</title>
+<style>
+:root{
+  --blue:#417898;
+  --blue-dark:#2d5570;
+  --blue-deep:#17364d;
+  --gold:#DFBA77;
+  --gold-dark:#b99049;
+  --bg:#eef2f5;
+  --card:#ffffff;
+  --text:#1f2937;
+  --muted:#6b7280;
+  --border:#e5e7eb;
+  --danger:#dc2626;
+  --shadow:0 10px 32px rgba(23,54,77,.10);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  font-family:Tajawal, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  background:var(--bg);
+  color:var(--text);
+}
+button,input,textarea{font-family:inherit}
+button{cursor:pointer}
+.app-header{
+  position:sticky;top:0;z-index:30;
+  background:linear-gradient(135deg,var(--blue-dark),var(--blue) 62%,#5b9cc4);
+  color:#fff;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;gap:14px;
+  box-shadow:0 4px 16px rgba(23,54,77,.15);
+}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.logo-mark{
+  width:42px;height:42px;border-radius:12px;display:grid;place-items:center;flex:0 0 auto;
+  overflow:hidden;background:#2f789a;border:1px solid rgba(255,255,255,.35);
+}
+.logo-img{width:100%;height:100%;object-fit:cover;display:block}
+.brand h1{margin:0;font-size:17px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand small{display:block;color:#f3d69a;font-size:11px;margin-top:2px}
+.header-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.btn{
+  border:0;border-radius:10px;padding:10px 14px;font-size:13px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  transition:.18s ease;line-height:1;white-space:nowrap;
+}
+.btn:active{transform:translateY(1px)}
+.btn-blue{background:var(--blue);color:#fff}.btn-blue:hover{background:var(--blue-dark)}
+.btn-gold{background:var(--gold);color:var(--blue-deep)}.btn-gold:hover{background:#d2ad68}
+.btn-outline{background:#fff;color:var(--blue-dark);border:1.5px solid rgba(45,85,112,.28)}.btn-outline:hover{border-color:var(--blue);color:var(--blue)}
+.btn-danger{background:#fee2e2;color:var(--danger)}.btn-danger:hover{background:#fecaca}
+.btn-sm{padding:8px 10px;font-size:12px;border-radius:9px}
+.tabs{display:none;background:#fff;border-bottom:1px solid var(--border);position:sticky;top:70px;z-index:25}
+.tabs button{flex:1;background:#fff;border:0;border-bottom:3px solid transparent;color:var(--muted);padding:12px 10px;font-weight:800;font-size:14px}
+.tabs button.active{color:var(--blue-dark);border-bottom-color:var(--gold)}
+.main{max-width:1320px;margin:0 auto;padding:18px 16px;display:grid;grid-template-columns:minmax(340px,410px) minmax(0,1fr);gap:18px;align-items:start}
+.left-col{display:flex;flex-direction:column;gap:14px}
+.panel,.templates-bar,.preview-toolbar{background:var(--card);border:1px solid rgba(229,231,235,.95);border-radius:16px;box-shadow:var(--shadow)}
+.panel{padding:18px}.panel.sticky{position:sticky;top:88px}
+.sec-title{font-size:14px;font-weight:900;color:var(--blue-dark);margin:0 0 12px;padding-bottom:9px;border-bottom:2px solid var(--gold);display:flex;align-items:center;gap:7px}
+.templates-bar{padding:14px}.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{background:#eff6ff;border:1.5px solid #c7dff2;color:var(--blue-dark);padding:8px 12px;border-radius:999px;font-size:12px;font-weight:800}.chip:hover{background:var(--blue);border-color:var(--blue);color:#fff}
+.field-group{margin-bottom:12px}
+.field-group label{display:block;color:var(--muted);font-size:12px;font-weight:900;margin-bottom:5px}
+.field-group input,.field-group textarea,.field-group select{
+  width:100%;border:1.5px solid var(--border);border-radius:10px;background:#fbfcfd;color:var(--text);padding:10px 11px;font-size:14px;outline:none;direction:rtl;
+}
+.field-group input:focus,.field-group textarea:focus,.field-group select:focus,.item-card textarea:focus,.item-card input:focus{background:#fff;border-color:var(--blue);box-shadow:0 0 0 3px rgba(65,120,152,.10)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.items-header{display:flex;align-items:center;justify-content:space-between;margin:16px 0 10px;gap:10px}
+.items-header .sec-title{margin:0;border:0;padding:0}
+.item-card{position:relative;background:#f8fafc;border:1.5px solid var(--border);border-radius:13px;padding:16px 11px 11px;margin-bottom:10px}
+.item-card:hover{border-color:#a6c6dc}
+.item-num{position:absolute;top:-10px;right:12px;background:var(--blue);color:#fff;border-radius:999px;font-size:11px;font-weight:900;padding:2px 9px}
+.del-btn{position:absolute;top:8px;left:8px;width:26px;height:26px;border-radius:8px;border:0;background:#fee2e2;color:var(--danger);font-weight:900}
+.item-card textarea{width:100%;min-height:66px;resize:vertical;border:1.5px solid var(--border);border-radius:10px;background:#fff;padding:10px 12px;font-size:13px;line-height:1.7;outline:none;direction:rtl}
+.item-nums{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.item-nums input{width:100%;text-align:center;border:1.5px solid var(--border);border-radius:10px;background:#fff;padding:9px;font-size:13px;outline:none;direction:ltr}
+.item-total{text-align:center;color:var(--blue-dark);font-size:12px;font-weight:900;margin-top:8px}
+.total-bar{margin-top:12px;background:linear-gradient(135deg,var(--blue-dark),var(--blue));border-radius:13px;padding:12px 14px;color:#fff;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.total-bar .lbl{font-size:12px;opacity:.88}.total-bar .amt{font-size:20px;font-weight:900;color:var(--gold)}
+.action-bar{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.preview-col{min-width:0;display:flex;flex-direction:column;gap:12px}.preview-toolbar{padding:12px 16px;display:flex;justify-content:space-between;align-items:center;gap:10px}.preview-toolbar strong{color:var(--blue-dark);font-size:14px}.preview-hint{color:var(--muted);font-size:12px}
+.preview-wrap{background:#4d5257;border-radius:16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);padding:18px;overflow:auto;min-height:520px}.preview-inner{width:210mm;margin:0 auto;transform-origin:top center}.doc-page{width:210mm;min-height:297mm;background:#fff;margin:0 auto 16px;overflow:hidden;box-shadow:0 14px 35px rgba(0,0,0,.22)}
+.cover{position:relative;display:flex;flex-direction:column;background:linear-gradient(160deg,var(--blue) 0%,var(--blue-dark) 55%,var(--blue-deep) 100%);color:#fff}
+.cover:before{content:"";position:absolute;right:-85px;top:-85px;width:270px;height:270px;border-radius:50%;background:rgba(223,186,119,.12)}
+.cover:after{content:"";position:absolute;left:-75px;bottom:-75px;width:230px;height:230px;border-radius:50%;background:rgba(223,186,119,.18)}
+.cover-top{position:relative;z-index:1;padding:36px 44px 26px;border-bottom:1px solid rgba(223,186,119,.34);display:flex;justify-content:space-between;align-items:center}.cover-name{font-size:22px;font-weight:900}.cover-sub{color:var(--gold);font-size:12px;margin-top:4px}.cover-body{position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:44px 52px;text-align:center}.cover-logo{width:172px;height:172px;border-radius:34px;display:grid;place-items:center;background:#2f789a;overflow:hidden;box-shadow:0 18px 36px rgba(0,0,0,.18);margin-bottom:30px}.cover-title{font-size:31px;font-weight:900;line-height:1.45;margin-bottom:18px;max-width:620px}.cover-badge{border:1px solid rgba(223,186,119,.5);color:var(--gold);border-radius:999px;padding:10px 28px;font-size:15px;font-weight:800}.cover-foot{position:relative;z-index:1;background:rgba(0,0,0,.22);padding:22px 44px;display:flex;align-items:center;justify-content:space-between}.cover-meta div{font-size:12px;margin:6px 0;color:rgba(255,255,255,.86)}.cover-meta strong{color:var(--gold)}.seal{width:72px;height:72px;border-radius:50%;border:2px solid var(--gold);display:grid;place-items:center;color:var(--gold);font-size:8px;font-weight:900;text-align:center;line-height:1.35}
+.quote-page{display:flex;flex-direction:column;padding:26px 36px}.doc-header{display:flex;justify-content:space-between;align-items:center;border-bottom:2.5px solid var(--gold);padding-bottom:14px;margin-bottom:18px}.doc-co{font-size:10px;line-height:1.8;color:var(--muted)}.doc-logo{width:68px;height:68px;border-radius:14px;background:#2f789a;display:grid;place-items:center;overflow:hidden;flex:0 0 auto}.quote-bar{background:linear-gradient(135deg,var(--blue),var(--blue-dark));color:#fff;border-radius:12px;padding:14px 20px;text-align:center;margin-bottom:16px}.quote-title{font-size:16px;font-weight:900;margin-bottom:4px}.quote-sub{font-size:11px;opacity:.88}.items-table{width:100%;border-collapse:collapse;margin-bottom:16px}.items-table th{background:var(--blue);color:#fff;text-align:center;font-size:12px;font-weight:900;padding:10px}.items-table th:first-child{border-radius:0 8px 0 0}.items-table th:last-child{border-radius:8px 0 0 0}.items-table td{font-size:11px;line-height:1.7;vertical-align:top;text-align:center;border-bottom:1px solid var(--border);padding:9px 10px}.items-table .desc{text-align:right}.items-table tr.alt td{background:#f8fafc}.items-table tfoot td{border:0;background:linear-gradient(135deg,var(--blue-dark),var(--blue));color:#fff;font-weight:900;font-size:13px;padding:12px}.block{margin-bottom:14px}.block-title{background:var(--gold);color:var(--blue-deep);font-size:12px;font-weight:900;padding:8px 14px;border-radius:8px;margin-bottom:9px;text-align:center}.pay-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px}.pay-card{border:1.5px solid var(--border);border-radius:10px;padding:10px 13px}.pay-card h4{margin:0 0 5px;color:var(--blue-dark);font-size:11px}.pay-card p{margin:0;color:var(--muted);font-size:10px;line-height:1.7}.iban{background:#f0f9ff;border:1.5px solid #8fc0dd;border-radius:10px;color:var(--blue-dark);padding:9px 13px;font-size:10px;text-align:center;font-weight:900}.notes{list-style:none;margin:0;padding:0}.notes li{position:relative;border-bottom:1px dashed var(--border);color:var(--muted);font-size:10px;line-height:1.65;padding:4px 17px 4px 0}.notes li:before{content:"•";position:absolute;right:0;top:2px;color:var(--gold-dark);font-size:15px}.doc-foot{margin-top:auto;border-top:1px solid var(--border);padding-top:10px;display:flex;justify-content:space-between;align-items:center;gap:12px}.doc-foot p{font-size:9px;line-height:1.8;color:var(--muted);margin:0}.foot-seal{width:56px;height:56px;border:1.5px solid var(--gold);border-radius:50%;display:grid;place-items:center;color:var(--gold-dark);font-weight:900;font-size:7px;text-align:center;line-height:1.35;flex:0 0 auto}.empty-cell{color:#aaa!important;text-align:center!important;padding:28px!important;font-size:12px!important}
+
+.field-group select{appearance:none;background:#fbfcfd;direction:rtl}
+.field-help{font-size:11px;color:var(--muted);line-height:1.6;margin-top:5px}
+.subpanel{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px;margin-top:14px;box-shadow:0 6px 20px rgba(23,54,77,.06)}
+.subpanel .sec-title{margin-bottom:10px}
+.controls-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.controls-grid.three{grid-template-columns:1fr 1fr 1fr}
+.long-textarea{min-height:112px!important;line-height:1.8;white-space:pre-wrap}
+.version-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:9px}
+.version-select{width:100%;border:1.5px solid var(--border);border-radius:10px;background:#fbfcfd;color:var(--text);padding:10px 11px;font-size:13px;outline:none;direction:rtl}
+.version-list-note{font-size:11px;color:var(--muted);line-height:1.7;margin-top:7px}
+.pay-summary{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-bottom:10px}
+.pay-box{border:1.5px solid var(--border);border-radius:10px;padding:9px 10px;background:#fff}
+.pay-box .k{font-size:9px;color:var(--muted);font-weight:900;margin-bottom:4px}.pay-box .v{font-size:13px;color:var(--blue-dark);font-weight:900}
+.bank-box{border:1.5px solid #8fc0dd;background:#f0f9ff;border-radius:10px;padding:10px 13px;font-size:10px;line-height:1.8;color:var(--blue-dark);font-weight:800;margin-top:8px}
+.bank-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 14px}.bank-grid span{color:#5b6b76;font-weight:700}.bank-grid strong{direction:ltr;display:inline-block}
+.term-list{margin:0;padding:0 18px 0 0}.term-list li{font-size:10px;line-height:1.75;color:var(--muted);padding:3px 0;border-bottom:1px dashed var(--border)}
+.payment-note{font-size:10px;line-height:1.7;color:var(--muted);margin:8px 0 0}
+
+.status{font-size:12px;color:rgba(255,255,255,.8)}
+@media(max-width:920px){.main{grid-template-columns:1fr}.panel.sticky{position:relative;top:0}.tabs{display:flex}.preview-col.hidden-mobile,.left-col.hidden-mobile{display:none}.app-header{top:0}.tabs{top:70px}.header-actions .hide-on-mobile{display:none}.preview-wrap{border-radius:0;min-height:calc(100vh - 126px);padding:12px}.main{padding:0}.left-col,.preview-col{padding:12px}.templates-bar,.panel,.preview-toolbar{border-radius:14px}.preview-toolbar{border-radius:0}.row2,.action-bar,.pay-grid{grid-template-columns:1fr}.brand h1{font-size:15px}.logo-mark{width:38px;height:38px}.app-header{padding:12px}}
+@media(max-width:420px){.chip{width:100%;justify-content:center}.btn{padding:9px 10px}.cover-title{font-size:25px}.cover-logo{width:130px;height:130px}.quote-page{padding:22px 26px}.doc-page{margin-bottom:12px}}
+@media print{
+  @page{size:A4;margin:0}
+  *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important;color-adjust:exact!important}
+  body{background:#fff;margin:0}
+  body > *:not(#print-doc){display:none!important}
+  #print-doc{display:block!important}
+  #print-doc .doc-page{width:210mm;min-height:297mm;margin:0;box-shadow:none;page-break-after:always;break-after:page}
+  #print-doc .doc-page:last-child{page-break-after:auto;break-after:auto}
+}
+.pdf-export{position:fixed;left:0;top:0;width:210mm;background:#fff;direction:rtl;z-index:999999;box-shadow:none;}
+.pdf-export .doc-page{width:210mm;min-height:297mm;margin:0;box-shadow:none;page-break-after:always;break-after:page}
+.pdf-export .doc-page:last-child{page-break-after:auto;break-after:auto}
+body.pdf-working{overflow:hidden}
+body.pdf-working:before{content:'جاري تجهيز ملف PDF...';position:fixed;top:12px;left:12px;z-index:1000000;background:#17364d;color:#fff;border-radius:10px;padding:10px 14px;font-weight:800;box-shadow:0 8px 24px rgba(0,0,0,.22)}
+#print-doc{display:none}
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="brand">
+    <div class="logo-mark"><img class="logo-img" src="data:image/webp;base64,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" alt="Golden Pro International"></div>
+    <div><h1>عروض الأسعار</h1><small>Golden Pro International</small></div>
+  </div>
+  <div class="header-actions">
+    <span class="status hide-on-mobile" id="save-status">جاهز</span>
+    <button class="btn btn-outline btn-sm" type="button" id="reset-btn">✕ مسح</button>
+    <button class="btn btn-gold btn-sm" type="button" id="download-top-btn">⬇️ تحميل / حفظ PDF</button>
+    <button class="btn btn-outline btn-sm hide-on-mobile" type="button" id="print-top-btn">🖨️ طباعة</button>
+  </div>
+</header>
+<nav class="tabs" aria-label="تبويبات الجوال">
+  <button class="active" type="button" data-tab="form">📝 النموذج</button>
+  <button type="button" data-tab="preview">👁️ معاينة</button>
+</nav>
+<main class="main">
+  <section class="left-col" id="left-col">
+    <div class="templates-bar">
+      <h2 class="sec-title">⚡ قوالب سريعة</h2>
+      <div class="chips">
+        <button class="chip" type="button" data-template="ac">🌬️ تكييف صحراوي</button>
+        <button class="chip" type="button" data-template="water">💧 تنقية مياه</button>
+        <button class="chip" type="button" data-template="fog">🌫️ نظام ضباب</button>
+        <button class="chip" type="button" data-template="pump">⚙️ مضخة مياه</button>
+        <button class="chip" type="button" data-template="filter">🚿 فلتر شاور</button>
+      </div>
+    </div>
+    <div class="panel sticky">
+      <h2 class="sec-title">📄 بيانات العرض</h2>
+      <div class="row2">
+        <div class="field-group"><label for="qt-num">رقم العرض</label><input id="qt-num" type="text" autocomplete="off" /></div>
+        <div class="field-group"><label for="qt-date">التاريخ</label><input id="qt-date" type="text" autocomplete="off" /></div>
+      </div>
+      <div class="field-group"><label for="qt-client">العميل / الجهة</label><input id="qt-client" type="text" placeholder="شركة الفيصل للمقاولات" autocomplete="off" /></div>
+      <div class="field-group"><label for="qt-subject">موضوع العرض</label><input id="qt-subject" type="text" placeholder="عرض سعر توريد وتركيب..." autocomplete="off" /></div>
+      <div class="items-header"><h2 class="sec-title">📋 البنود</h2><button class="btn btn-blue btn-sm" type="button" id="add-item-btn">+ بند جديد</button></div>
+      <div id="items-container" aria-live="polite"></div>
+      <div class="total-bar"><span class="lbl">الإجمالي شامل الضريبة</span><span class="amt" id="grand-total">0 ر.س</span></div>
+      <div class="action-bar">
+        <button class="btn btn-outline" type="button" id="clear-items-btn">تفريغ البنود</button>
+        <button class="btn btn-gold" type="button" id="download-btn">⬇️ تحميل / حفظ PDF</button>
+        <button class="btn btn-outline" type="button" id="print-btn">🖨️ طباعة</button>
+      </div>
+      <div class="subpanel" id="payment-panel">
+        <h2 class="sec-title">💳 طريقة الدفع</h2>
+        <div class="field-group">
+          <label for="pay-method">طريقة الدفع</label>
+          <select id="pay-method">
+            <option value="تحويل بنكي">تحويل بنكي</option>
+            <option value="كاش / نقداً">كاش / نقداً</option>
+            <option value="شبكة / بطاقة">شبكة / بطاقة</option>
+            <option value="دفعة كاملة مقدماً">دفعة كاملة مقدماً</option>
+            <option value="حسب الاتفاق">حسب الاتفاق</option>
+          </select>
+        </div>
+        <div class="controls-grid">
+          <div class="field-group"><label for="pay-down-percent">نسبة الدفعة الأولى %</label><input id="pay-down-percent" type="number" min="0" max="100" step="1" /></div>
+          <div class="field-group"><label for="pay-final-percent">نسبة الدفعة النهائية %</label><input id="pay-final-percent" type="number" min="0" max="100" step="1" /></div>
+        </div>
+        <div class="field-group"><label for="pay-down-text">وصف الدفعة الأولى</label><input id="pay-down-text" type="text" placeholder="عند اعتماد العرض وبدء التنفيذ" /></div>
+        <div class="field-group"><label for="pay-final-text">وصف الدفعة النهائية</label><input id="pay-final-text" type="text" placeholder="بعد التوريد أو التركيب والتشغيل" /></div>
+        <div class="controls-grid">
+          <div class="field-group"><label for="pay-bank">اسم البنك</label><input id="pay-bank" type="text" placeholder="مثال: مصرف الراجحي" /></div>
+          <div class="field-group"><label for="pay-account">اسم المستفيد</label><input id="pay-account" type="text" placeholder="Golden Pro International" /></div>
+        </div>
+        <div class="field-group"><label for="pay-iban">IBAN / رقم الحساب</label><input id="pay-iban" type="text" dir="ltr" placeholder="SA00 0000 0000 0000 0000 0000" /></div>
+        <div class="field-group"><label for="pay-note">ملاحظة الدفع</label><textarea id="pay-note" class="long-textarea" placeholder="يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب."></textarea></div>
+      </div>
+
+      <div class="subpanel" id="terms-panel">
+        <h2 class="sec-title">📌 الشروط والأحكام</h2>
+        <div class="field-group">
+          <label for="qt-terms">اكتب كل شرط في سطر مستقل</label>
+          <textarea id="qt-terms" class="long-textarea"></textarea>
+          <div class="field-help">كل سطر يظهر كبند مستقل داخل ملف العرض.</div>
+        </div>
+      </div>
+
+      <div class="subpanel" id="versions-panel">
+        <h2 class="sec-title">💾 النسخ المحفوظة</h2>
+        <div class="field-group"><label for="version-name">اسم النسخة</label><input id="version-name" type="text" placeholder="مثال: عرض شركة الفيصل - مكيفات" /></div>
+        <select id="versions-list" class="version-select" aria-label="النسخ المحفوظة"></select>
+        <div class="version-actions">
+          <button class="btn btn-blue btn-sm" type="button" id="save-version-btn">حفظ نسخة</button>
+          <button class="btn btn-outline btn-sm" type="button" id="load-version-btn">فتح</button>
+          <button class="btn btn-danger btn-sm" type="button" id="delete-version-btn">حذف</button>
+        </div>
+        <div class="version-list-note" id="versions-note">تُحفظ النسخ داخل نفس المتصفح على هذا الجهاز.</div>
+      </div>
+    </div>
+  </section>
+  <section class="preview-col hidden-mobile" id="preview-col">
+    <div class="preview-toolbar"><strong>👁️ معاينة العرض</strong><span class="preview-hint">التنسيق مطابق للطباعة على A4</span></div>
+    <div class="preview-wrap" id="preview-wrap"><div class="preview-inner" id="preview-root"></div></div>
+  </section>
+</main>
+<section id="print-doc" aria-hidden="true"></section>
+<script>
+'use strict';
+const COMPANY_LOGO = 'data:image/webp;base64,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';
+const $ = (sel, root=document) => root.querySelector(sel);
+const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+const STORAGE_KEY = 'golden-pro-quotation-v3';
+const LEGACY_STORAGE_KEY = 'golden-pro-quotation-v2';
+const VERSIONS_KEY = 'golden-pro-quotation-versions-v1';
+let state = { num:'', date:'', client:'', subject:'', items:[], payment:{}, terms:'' };
+let idCounter = 0;
+const templates = {
+  ac:{subject:'عرض سعر توريد وتركيب مكيفات تكييف صحراوي',items:[
+    {description:'مكيف مركزي صحراوي روكسل مطور نطاق التبريد واسع\n2 حصان',qty:3,price:5950},
+    {description:'خدمة التركيب وتشمل:\n- رفع المكيف إلى موقع التركيب\n- تفصيل الدكت سابك سمك لتركيب المكيف\n- إضافة عزل ألياف الزجاج\n- إضافة عزل قماش\n- تفصيل قاعدة كرسي للمكيف\n- تركيب الدكت والعزل بسماكة 0.6 مم\n- تركيب المكيف على الدكت وشبكه على المنافذ',qty:3,price:3700},
+    {description:'خدمة تشغيل الوحدات وتشمل:\n- أعمال تركيب مواسير التغذية\n- أعمال تركيب التمديدات الكهربائية\n- أعمال تركيب مواسير الصرف\n- تشغيل وحدة التكييف',qty:3,price:799},
+    {description:'فلتر تنقية جامبو 20 إنش لمعالجة الماء الداخل للمكيف',qty:3,price:299}
+  ]},
+  water:{subject:'عرض سعر توريد وتركيب منظومة تنقية مياه',items:[
+    {description:'منظومة تنقية مياه 7 مراحل RO مع خزان 8 لتر',qty:1,price:1200},
+    {description:'خدمة التركيب والتوصيل بشبكة المياه',qty:1,price:300},
+    {description:'فلاتر استبدال - طقم سنوي كامل',qty:1,price:250}
+  ]},
+  fog:{subject:'عرض سعر توريد وتركيب نظام رذاذ وضباب',items:[
+    {description:'نظام رذاذ ضباب ضغط عالي مع مضخة 70 بار',qty:1,price:4500},
+    {description:'خراطيم ونوزل نحاس بالمتر الطولي',qty:20,price:85},
+    {description:'خدمة التركيب والبرمجة والتشغيل',qty:1,price:800}
+  ]},
+  pump:{subject:'عرض سعر توريد وتركيب مضخة مياه',items:[
+    {description:'مضخة مياه غاطسة 2 حصان',qty:1,price:1800},
+    {description:'أعمال التمديدات وتركيب المضخة والتشغيل',qty:1,price:500}
+  ]},
+  filter:{subject:'عرض سعر توريد فلاتر شاور',items:[
+    {description:'فلتر شاور كروم لتنقية مياه الاستحمام',qty:5,price:180},
+    {description:'فلتر شاور بلاستيك اقتصادي',qty:5,price:95}
+  ]}
+};
+const DEFAULT_PAYMENT = {
+  method:'تحويل بنكي',
+  downPercent:70,
+  finalPercent:30,
+  downText:'عند اعتماد العرض وبدء تنفيذ الطلب.',
+  finalText:'بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.',
+  bank:'',
+  account:'Golden Pro International',
+  iban:'',
+  note:'يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب. يبدأ تنفيذ الطلب بعد اعتماد العرض واستلام الدفعة الأولى.'
+};
+const DEFAULT_TERMS = [
+  'الأسعار سارية لمدة 7 أيام من تاريخ العرض ما لم يذكر خلاف ذلك.',
+  'أي أعمال إضافية خارج البنود المذكورة يتم تسعيرها بشكل مستقل قبل التنفيذ.',
+  'مدة التنفيذ تبدأ بعد اعتماد العرض واستلام الدفعة الأولى وتوفر الموقع.',
+  'الضمان يخضع لشروط الشركة والمورد، ولا يشمل سوء الاستخدام أو التعديل من طرف آخر.',
+  'التركيب داخل نطاق الخدمة المعتمد، وأي مواقع خارج النطاق قد يضاف عليها تكلفة نقل.',
+  'لا تتحمل الشركة أي تأخير ناتج عن عدم جاهزية الموقع أو تأخر العميل في توفير متطلبات التنفيذ.'
+].join('\n');
+function today(){const d=new Date();return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;}
+function quoteNumber(){const d=new Date();return `QT-${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${Math.floor(Math.random()*900+100)}`;}
+function esc(value=''){return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
+function nl2br(value=''){return esc(value).replace(/\n/g,'<br>');}
+function logoImg(){return `<img class="logo-img" src="${COMPANY_LOGO}" alt="Golden Pro International">`;}
+function formatNumber(n){return Number(n||0).toLocaleString('ar-SA');}
+function cleanNumber(v){const n = Number(v);return Number.isFinite(n) && n >= 0 ? n : 0;}
+function setStatus(text){const el=$('#save-status'); if(!el) return; el.textContent=text; window.clearTimeout(setStatus._t); setStatus._t=window.setTimeout(()=>{el.textContent='محفوظ تلقائياً';},1200);}
+function makeItem(item={}){return {id:++idCounter, description:item.description || '', qty:cleanNumber(item.qty ?? 1), price:cleanNumber(item.price ?? 0)};}
+function makePayment(payment={}){return {...DEFAULT_PAYMENT, ...(payment || {}), downPercent:cleanNumber(payment?.downPercent ?? DEFAULT_PAYMENT.downPercent), finalPercent:cleanNumber(payment?.finalPercent ?? DEFAULT_PAYMENT.finalPercent)};}
+function hydrateState(data={}){return {num:data.num||quoteNumber(), date:data.date||today(), client:data.client||'', subject:data.subject||'', items:Array.isArray(data.items)?data.items.map(makeItem):[], payment:makePayment(data.payment), terms:typeof data.terms==='string'?data.terms:DEFAULT_TERMS};}
+function compactState(){return {...state, items:state.items.map(({description,qty,price})=>({description,qty,price})), payment:makePayment(state.payment), terms:state.terms || DEFAULT_TERMS};}
+function loadState(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || 'null');
+    if(saved && Array.isArray(saved.items)){
+      state = hydrateState(saved);
+      return;
+    }
+  }catch(e){console.warn('تعذر تحميل البيانات المحفوظة', e);}
+  const first = templates.ac;
+  state = hydrateState({num:quoteNumber(), date:today(), client:'', subject:first.subject, items:first.items, payment:DEFAULT_PAYMENT, terms:DEFAULT_TERMS});
+}
+function saveState(){
+  try{
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(compactState()));
+    setStatus('تم الحفظ');
+  }catch(e){
+    console.warn('تعذر الحفظ التلقائي', e);
+    setStatus('تعذر الحفظ محلياً');
+  }
+}
+function syncFieldsToState(){
+  state.num=$('#qt-num').value.trim();state.date=$('#qt-date').value.trim();state.client=$('#qt-client').value.trim();state.subject=$('#qt-subject').value.trim();
+  state.payment = makePayment({
+    method:$('#pay-method')?.value || DEFAULT_PAYMENT.method,
+    downPercent:$('#pay-down-percent')?.value || DEFAULT_PAYMENT.downPercent,
+    finalPercent:$('#pay-final-percent')?.value || DEFAULT_PAYMENT.finalPercent,
+    downText:$('#pay-down-text')?.value.trim() || DEFAULT_PAYMENT.downText,
+    finalText:$('#pay-final-text')?.value.trim() || DEFAULT_PAYMENT.finalText,
+    bank:$('#pay-bank')?.value.trim() || '',
+    account:$('#pay-account')?.value.trim() || DEFAULT_PAYMENT.account,
+    iban:$('#pay-iban')?.value.trim() || '',
+    note:$('#pay-note')?.value.trim() || DEFAULT_PAYMENT.note
+  });
+  state.terms = $('#qt-terms')?.value || DEFAULT_TERMS;
+}
+function syncStateToFields(){
+  $('#qt-num').value=state.num;$('#qt-date').value=state.date;$('#qt-client').value=state.client;$('#qt-subject').value=state.subject;
+  const p=makePayment(state.payment);
+  if($('#pay-method')) $('#pay-method').value=p.method;
+  if($('#pay-down-percent')) $('#pay-down-percent').value=p.downPercent;
+  if($('#pay-final-percent')) $('#pay-final-percent').value=p.finalPercent;
+  if($('#pay-down-text')) $('#pay-down-text').value=p.downText;
+  if($('#pay-final-text')) $('#pay-final-text').value=p.finalText;
+  if($('#pay-bank')) $('#pay-bank').value=p.bank;
+  if($('#pay-account')) $('#pay-account').value=p.account;
+  if($('#pay-iban')) $('#pay-iban').value=p.iban;
+  if($('#pay-note')) $('#pay-note').value=p.note;
+  if($('#qt-terms')) $('#qt-terms').value=state.terms || DEFAULT_TERMS;
+}
+function renderItems(){
+  const container = $('#items-container');
+  container.innerHTML = '';
+  if(!state.items.length){
+    const empty = document.createElement('div');
+    empty.className='item-card';
+    empty.innerHTML='<div class="item-total">لا توجد بنود. اضغط “بند جديد” لإضافة بند.</div>';
+    container.appendChild(empty);
+    return;
+  }
+  state.items.forEach((item, idx)=>{
+    const card=document.createElement('div');
+    card.className='item-card';
+    card.dataset.id=item.id;
+    card.innerHTML = `
+      <div class="item-num">${idx+1}</div>
+      <button class="del-btn" type="button" title="حذف البند" data-action="remove">✕</button>
+      <textarea placeholder="وصف البند..." data-field="description">${esc(item.description)}</textarea>
+      <div class="item-nums">
+        <input type="number" inputmode="decimal" min="0" step="1" placeholder="الكمية" value="${esc(item.qty)}" data-field="qty" />
+        <input type="number" inputmode="decimal" min="0" step="0.01" placeholder="السعر" value="${esc(item.price)}" data-field="price" />
+      </div>
+      <div class="item-total">الإجمالي: ${formatNumber(item.qty*item.price)} ر.س</div>`;
+    container.appendChild(card);
+  });
+}
+function grandTotal(){return state.items.reduce((sum,item)=>sum + cleanNumber(item.qty)*cleanNumber(item.price),0);}
+function rowsHtml(){
+  if(!state.items.length){return '<tr><td colspan="5" class="empty-cell">أضف بنوداً من النموذج</td></tr>';}
+  return state.items.map((item,idx)=>{
+    const total = cleanNumber(item.qty)*cleanNumber(item.price);
+    return `<tr class="${idx%2?'alt':''}">
+      <td style="width:36px;font-weight:900;color:var(--blue)">${idx+1}</td>
+      <td class="desc">${nl2br(item.description)}</td>
+      <td>${formatNumber(item.qty)}</td>
+      <td>${formatNumber(item.price)}</td>
+      <td>${formatNumber(total)}</td>
+    </tr>`;
+  }).join('');
+}
+function paymentHtml(total){
+  const p = makePayment(state.payment);
+  const downAmount = total * cleanNumber(p.downPercent) / 100;
+  const finalAmount = total * cleanNumber(p.finalPercent) / 100;
+  const bankRows = [];
+  if(p.bank) bankRows.push(`<div><span>البنك:</span> ${esc(p.bank)}</div>`);
+  if(p.account) bankRows.push(`<div><span>اسم المستفيد:</span> ${esc(p.account)}</div>`);
+  if(p.iban) bankRows.push(`<div><span>IBAN:</span> <strong>${esc(p.iban)}</strong></div>`);
+  bankRows.push(`<div><span>طريقة الدفع:</span> ${esc(p.method)}</div>`);
+  return `<section class="block payment-block"><div class="block-title">طريقة الدفع</div>
+    <div class="pay-summary">
+      <div class="pay-box"><div class="k">إجمالي العرض</div><div class="v">${formatNumber(total)} ر.س</div></div>
+      <div class="pay-box"><div class="k">الدفعة الأولى ${formatNumber(p.downPercent)}%</div><div class="v">${formatNumber(downAmount)} ر.س</div></div>
+      <div class="pay-box"><div class="k">الدفعة النهائية ${formatNumber(p.finalPercent)}%</div><div class="v">${formatNumber(finalAmount)} ر.س</div></div>
+    </div>
+    <div class="pay-grid">
+      <div class="pay-card"><h4>الدفعة الأولى</h4><p>${nl2br(p.downText)}</p></div>
+      <div class="pay-card"><h4>الدفعة النهائية</h4><p>${nl2br(p.finalText)}</p></div>
+    </div>
+    <div class="bank-box"><div class="bank-grid">${bankRows.join('')}</div>${p.note ? `<p class="payment-note">${nl2br(p.note)}</p>` : ''}</div>
+  </section>`;
+}
+function termsHtml(){
+  const lines = String(state.terms || DEFAULT_TERMS).split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  return `<section class="block"><div class="block-title">الشروط والأحكام</div><ol class="term-list">${lines.map(line=>`<li>${nl2br(line)}</li>`).join('')}</ol></section>`;
+}
+function documentHtml(){
+  const subject = state.subject || 'عرض سعر';
+  const client = state.client || '—';
+  const num = state.num || '—';
+  const date = state.date || '—';
+  const total = grandTotal();
+  return `
+  <article class="doc-page cover">
+    <div class="cover-top"><div><div class="cover-name">جولدن برو العالمية</div><div class="cover-sub">Golden Pro International</div></div><div class="doc-logo">${logoImg()}</div></div>
+    <div class="cover-body"><div class="cover-logo">${logoImg()}</div><div class="cover-title">${esc(subject)}</div><div class="cover-badge">عرض سعر رسمي</div></div>
+    <div class="cover-foot"><div class="cover-meta"><div><strong>رقم العرض:</strong> ${esc(num)}</div><div><strong>التاريخ:</strong> ${esc(date)}</div><div><strong>مقدم إلى:</strong> ${esc(client)}</div></div><div class="seal">GOLDEN<br>PRO<br>INT'L</div></div>
+  </article>
+  <article class="doc-page quote-page">
+    <div class="doc-header"><div class="doc-co"><strong>جولدن برو العالمية</strong><br>الرياض – المملكة العربية السعودية<br>Goldenksa.store<br>Golden_Prp_Support@goldenksa.store</div><div class="doc-logo">${logoImg()}</div></div>
+    <div class="quote-bar"><div class="quote-title">عرض سعر — ${esc(num)}</div><div class="quote-sub">الموضوع: ${esc(subject)} | العميل: ${esc(client)} | التاريخ: ${esc(date)}</div></div>
+    <table class="items-table" aria-label="بنود عرض السعر">
+      <thead><tr><th>#</th><th>الوصف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead>
+      <tbody>${rowsHtml()}</tbody>
+      <tfoot><tr><td colspan="4">الإجمالي شامل الضريبة</td><td>${formatNumber(total)} ر.س</td></tr></tfoot>
+    </table>
+    ${paymentHtml(total)}
+    ${termsHtml()}
+    <footer class="doc-foot"><p>مع التحية،<br><strong>Golden Pro International</strong><br>حلول التكييف، تنقية المياه، المضخات، أنظمة الضباب وخدمات التركيب.</p><div class="foot-seal">GOLDEN<br>PRO<br>INT'L</div></footer>
+  </article>`;
+}
+function renderDocuments(){
+  const html = documentHtml();
+  $('#preview-root').innerHTML = html;
+  $('#print-doc').innerHTML = html;
+  $('#grand-total').textContent = `${formatNumber(grandTotal())} ر.س`;
+  fitPreview();
+}
+function renderAll({save=true}={}){syncStateToFields();renderItems();renderDocuments();renderVersions();if(save) saveState();}
+function fitPreview(){
+  const wrap = $('#preview-wrap');
+  const root = $('#preview-root');
+  if(!wrap || !root) return;
+  root.style.zoom = 1;
+  const targetWidth = 794;
+  const available = Math.max(320, wrap.clientWidth - 28);
+  const scale = Math.min(1, available / targetWidth);
+  root.style.zoom = scale;
+}
+function loadTemplate(key){
+  const t = templates[key]; if(!t) return;
+  syncFieldsToState();
+  state.subject = t.subject;
+  state.items = t.items.map(makeItem);
+  renderAll();
+}
+function clearAll(){
+  localStorage.removeItem(STORAGE_KEY);
+  idCounter=0;
+  state=hydrateState({num:quoteNumber(),date:today(),client:'',subject:'',items:[],payment:DEFAULT_PAYMENT,terms:DEFAULT_TERMS});
+  renderAll({save:false});
+  setStatus('تم المسح');
+}
+function loadVersions(){
+  try{return JSON.parse(localStorage.getItem(VERSIONS_KEY) || '[]').filter(v=>v && v.id && v.data);}catch(e){return [];}
+}
+function saveVersions(list){localStorage.setItem(VERSIONS_KEY, JSON.stringify(list.slice(0,60)));}
+function renderVersions(){
+  const select=$('#versions-list'); if(!select) return;
+  const versions=loadVersions();
+  select.innerHTML = versions.length ? versions.map(v=>`<option value="${esc(v.id)}">${esc(v.name)} — ${esc(v.date||'')}</option>`).join('') : '<option value="">لا توجد نسخ محفوظة</option>';
+  select.disabled = !versions.length;
+  const note=$('#versions-note'); if(note) note.textContent = versions.length ? `عدد النسخ المحفوظة: ${versions.length}. الحفظ محلي داخل هذا المتصفح.` : 'تُحفظ النسخ داخل نفس المتصفح على هذا الجهاز.';
+}
+function saveCurrentVersion(){
+  syncFieldsToState();
+  const versions=loadVersions();
+  const nameInput=$('#version-name');
+  const name=(nameInput?.value.trim() || `${state.client || 'بدون عميل'} - ${state.subject || 'عرض سعر'} - ${state.date || today()}`).slice(0,120);
+  versions.unshift({id:String(Date.now()), name, date:new Date().toLocaleString('ar-SA'), data:compactState()});
+  saveVersions(versions);
+  if(nameInput) nameInput.value='';
+  renderVersions();
+  setStatus('تم حفظ نسخة مستقلة');
+}
+function loadSelectedVersion(){
+  const id=$('#versions-list')?.value; if(!id) return setStatus('لا توجد نسخة محددة');
+  const found=loadVersions().find(v=>v.id===id); if(!found) return setStatus('النسخة غير موجودة');
+  state=hydrateState(found.data);
+  renderAll({save:true});
+  setStatus('تم فتح النسخة');
+}
+function deleteSelectedVersion(){
+  const id=$('#versions-list')?.value; if(!id) return setStatus('لا توجد نسخة محددة');
+  const versions=loadVersions();
+  const next=versions.filter(v=>v.id!==id);
+  saveVersions(next);
+  renderVersions();
+  setStatus('تم حذف النسخة');
+}
+function safeFilePart(value){
+  const cleaned = String(value || 'العميل')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g,'-')
+    .replace(/\s+/g,' ')
+    .slice(0,80);
+  return cleaned || 'العميل';
+}
+function pdfFileName(){return `عرض سعر إلى ${safeFilePart(state.client)}.pdf`;}
+function printDoc(){
+  syncFieldsToState();
+  renderDocuments();
+  saveState();
+  const oldTitle = document.title;
+  document.title = pdfFileName().replace(/\.pdf$/,'');
+  const restore = ()=>{
+    document.title = oldTitle;
+    window.removeEventListener('afterprint', restore);
+    setStatus('جاهز');
+  };
+  window.addEventListener('afterprint', restore);
+  setStatus('اختر حفظ كـ PDF من نافذة الطباعة');
+  setTimeout(()=>window.print(),80);
+}
+function waitForImages(root){
+  const imgs = Array.from(root.querySelectorAll('img'));
+  return Promise.all(imgs.map(img => {
+    if(img.complete && img.naturalWidth !== 0) return Promise.resolve();
+    return new Promise(resolve => {
+      img.onload = resolve;
+      img.onerror = resolve;
+    });
+  }));
+}
+async function downloadPdf(){
+  syncFieldsToState();
+  renderDocuments();
+  saveState();
+  setStatus('يفتح حفظ PDF...');
+  /*
+    التحميل المباشر من ملف HTML محلي على الجوال يتعطل كثيرًا بسبب قيود المتصفح
+    وملفات Blob أو مكتبات CDN. لذلك زر التحميل يستخدم الآن نفس مسار الطباعة
+    المؤكد، مع ضبط اسم الملف إلى: عرض سعر إلى اسم العميل.
+  */
+  await waitForImages($('#print-doc'));
+  printDoc();
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  loadState();
+  renderAll({save:false});
+  ['#qt-num','#qt-date','#qt-client','#qt-subject','#pay-method','#pay-down-percent','#pay-final-percent','#pay-down-text','#pay-final-text','#pay-bank','#pay-account','#pay-iban','#pay-note','#qt-terms'].forEach(sel=>{const el=$(sel); if(el) el.addEventListener('input',()=>{syncFieldsToState();renderDocuments();saveState();});});
+  $('#add-item-btn').addEventListener('click',()=>{syncFieldsToState();state.items.push(makeItem());renderAll();});
+  $('#clear-items-btn').addEventListener('click',()=>{syncFieldsToState();state.items=[];renderAll();});
+  $('#reset-btn').addEventListener('click',clearAll);
+  $('#save-version-btn').addEventListener('click',saveCurrentVersion);
+  $('#load-version-btn').addEventListener('click',loadSelectedVersion);
+  $('#delete-version-btn').addEventListener('click',deleteSelectedVersion);
+  $('#print-btn').addEventListener('click',printDoc);
+  $('#print-top-btn').addEventListener('click',printDoc);
+  $('#download-btn').addEventListener('click',downloadPdf);
+  $('#download-top-btn').addEventListener('click',downloadPdf);
+  $$('.chip').forEach(btn=>btn.addEventListener('click',()=>loadTemplate(btn.dataset.template)));
+  $('#items-container').addEventListener('input',e=>{
+    const card=e.target.closest('.item-card'); if(!card) return;
+    const item=state.items.find(x=>x.id===Number(card.dataset.id)); if(!item) return;
+    const field=e.target.dataset.field;
+    if(field==='description') item.description=e.target.value;
+    if(field==='qty') item.qty=cleanNumber(e.target.value);
+    if(field==='price') item.price=cleanNumber(e.target.value);
+    renderDocuments();
+    const totalEl=card.querySelector('.item-total'); if(totalEl) totalEl.textContent=`الإجمالي: ${formatNumber(item.qty*item.price)} ر.س`;
+    saveState();
+  });
+  $('#items-container').addEventListener('click',e=>{
+    if(e.target.dataset.action!=='remove') return;
+    const card=e.target.closest('.item-card');
+    state.items=state.items.filter(x=>x.id!==Number(card.dataset.id));
+    renderAll();
+  });
+  $$('.tabs button').forEach(btn=>btn.addEventListener('click',()=>{
+    const tab=btn.dataset.tab;
+    $$('.tabs button').forEach(b=>b.classList.toggle('active',b===btn));
+    $('#left-col').classList.toggle('hidden-mobile',tab!=='form');
+    $('#preview-col').classList.toggle('hidden-mobile',tab!=='preview');
+    fitPreview();
+  }));
+  window.addEventListener('resize',fitPreview,{passive:true});
+});
+</script>
+</body>
+</html>
