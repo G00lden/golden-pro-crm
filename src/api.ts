@@ -150,6 +150,7 @@ export type WhatsAppStatus = {
   qr?: string;
   lastError?: string;
   user?: string;
+  connectedAt?: string;
   outbound?: {
     mode: "dry_run" | "allowlist" | "code" | "production";
     launchApproved: boolean;
@@ -476,6 +477,15 @@ export type Quote = {
   tax: number;
   total: number;
   currency: string;
+  payment_method?: string;
+  payment_down_percent?: number;
+  payment_final_percent?: number;
+  payment_down_text?: string;
+  payment_final_text?: string;
+  payment_bank?: string;
+  payment_account?: string;
+  payment_iban?: string;
+  payment_note?: string;
   items: QuoteItem[];
   notes?: string;
   terms?: string;
@@ -1218,6 +1228,20 @@ function quoteTotals(items: QuoteItem[], discount = 0, tax = 0) {
   };
 }
 
+function quotePaymentFields(data: QuoteInput, existing?: Quote) {
+  return {
+    payment_method: String(data.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
+    payment_down_percent: Number(data.payment_down_percent ?? existing?.payment_down_percent ?? 70),
+    payment_final_percent: Number(data.payment_final_percent ?? existing?.payment_final_percent ?? 30),
+    payment_down_text: String(data.payment_down_text || existing?.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim(),
+    payment_final_text: String(data.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim(),
+    payment_bank: String(data.payment_bank || existing?.payment_bank || "").trim(),
+    payment_account: String(data.payment_account || existing?.payment_account || "Breexe Pro").trim(),
+    payment_iban: String(data.payment_iban || existing?.payment_iban || "").trim(),
+    payment_note: String(data.payment_note || existing?.payment_note || "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.").trim(),
+  };
+}
+
 function quoteStats(quotes: Quote[]): QuoteStats {
   return {
     total: quotes.length,
@@ -1267,6 +1291,7 @@ function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quo
     createdBy: uid,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
+    ...quotePaymentFields(data, existing),
     ...totals,
   };
 }
@@ -1375,6 +1400,7 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
       valid_until: data.valid_until || null,
       follow_up_date: data.follow_up_date || null,
       currency: data.currency || "SAR",
+      ...quotePaymentFields(data),
       items,
       notes: String(data.notes || "").trim(),
       terms: String(data.terms || "").trim(),
@@ -1435,6 +1461,36 @@ export const deleteQuote = (id: string) => {
     return apiFetch(`/api/quotes/${id}`, { method: "DELETE" }).then(() => undefined);
   }
   return wrap(() => deleteDoc(doc(db, "quotes", id)), OperationType.DELETE, `quotes/${id}`);
+};
+
+export const sendQuoteWhatsApp = async (quote: Quote, message: string) => {
+  const outboundCode = requestOutboundCode();
+  const user = getCurrentAppUser();
+  const metadata = {
+    kind: "quote",
+    quote_id: quote.id,
+    quote_number: quote.quote_number,
+  };
+  if (serverDataEnabled() && !user?.local) {
+    return apiFetch<{ success: boolean; result: unknown }>(`/api/quotes/${quote.id}/send-whatsapp`, {
+      method: "POST",
+      body: JSON.stringify({
+        phone: quote.customer_phone,
+        message,
+        outboundCode,
+        metadata,
+      }),
+    });
+  }
+  return apiFetch<{ success: boolean; result: unknown }>("/api/whatsapp/send-test", {
+    method: "POST",
+    body: JSON.stringify({
+      phone: quote.customer_phone,
+      message,
+      outboundCode,
+      metadata,
+    }),
+  });
 };
 
 export const getProducts = async () => {
@@ -2078,10 +2134,10 @@ function buildDemoDataSet(uid: string, count = 10) {
   const now = nowIso();
 
   const demoProducts: Product[] = [
-    { id: localId("prod"), name: `فلتر ذهبي ${stamp}`, interval_months: 3, category: "فلاتر", sku: `GP-F-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
-    { id: localId("prod"), name: `مضخة منزلية ${stamp}`, interval_months: 6, category: "مضخات", sku: `GP-P-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
-    { id: localId("prod"), name: `جهاز تحلية ${stamp}`, interval_months: 4, category: "تحلية", sku: `GP-R-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
-    { id: localId("prod"), name: `عقد صيانة ${stamp}`, interval_months: 1, category: "خدمة", sku: `GP-S-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
+    { id: localId("prod"), name: `فلتر Breexe ${stamp}`, interval_months: 3, category: "فلاتر", sku: `BP-F-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
+    { id: localId("prod"), name: `مضخة Breexe ${stamp}`, interval_months: 6, category: "مضخات", sku: `BP-P-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
+    { id: localId("prod"), name: `جهاز تحلية Breexe ${stamp}`, interval_months: 4, category: "تحلية", sku: `BP-R-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
+    { id: localId("prod"), name: `عقد صيانة Breexe ${stamp}`, interval_months: 1, category: "خدمة", sku: `BP-S-${stamp}`, remind_text: "", createdBy: uid, createdAt: now, updatedAt: now },
   ];
 
   const demoTechs: Technician[] = [
@@ -2217,11 +2273,11 @@ export const getWhatsAppQR = async () => apiFetch<{ qr: string }>("/api/whatsapp
 export const disconnectWhatsApp = async () =>
   apiFetch<WhatsAppStatus>("/api/whatsapp/disconnect", { method: "POST" });
 
-export const testWhatsApp = async (phone: string, message: string) => {
+export const testWhatsApp = async (phone: string, message: string, metadata?: Record<string, unknown>) => {
   const outboundCode = requestOutboundCode();
   return apiFetch<{ success: boolean; result: unknown }>("/api/whatsapp/send-test", {
     method: "POST",
-    body: JSON.stringify({ phone, message, outboundCode }),
+    body: JSON.stringify({ phone, message, outboundCode, metadata }),
   });
 };
 

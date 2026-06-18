@@ -407,6 +407,15 @@ db.exec(`
     tax NUMERIC DEFAULT 0,
     total NUMERIC DEFAULT 0,
     currency TEXT DEFAULT 'SAR',
+    payment_method TEXT DEFAULT 'تحويل بنكي',
+    payment_down_percent NUMERIC DEFAULT 70,
+    payment_final_percent NUMERIC DEFAULT 30,
+    payment_down_text TEXT DEFAULT '',
+    payment_final_text TEXT DEFAULT '',
+    payment_bank TEXT DEFAULT '',
+    payment_account TEXT DEFAULT '',
+    payment_iban TEXT DEFAULT '',
+    payment_note TEXT DEFAULT '',
     items TEXT DEFAULT '[]',
     notes TEXT DEFAULT '',
     terms TEXT DEFAULT '',
@@ -436,6 +445,22 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_products_store_product ON products(owner_uid, store_provider, store_product_id)");
+
+for (const col of [
+  ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],
+  ["payment_down_percent", "NUMERIC DEFAULT 70"],
+  ["payment_final_percent", "NUMERIC DEFAULT 30"],
+  ["payment_down_text", "TEXT DEFAULT ''"],
+  ["payment_final_text", "TEXT DEFAULT ''"],
+  ["payment_bank", "TEXT DEFAULT ''"],
+  ["payment_account", "TEXT DEFAULT ''"],
+  ["payment_iban", "TEXT DEFAULT ''"],
+  ["payment_note", "TEXT DEFAULT ''"],
+] as const) {
+  if (!hasColumn("quotes", col[0])) {
+    db.exec(`ALTER TABLE quotes ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
 
 for (const col of [
   ["store_provider", "TEXT"],

@@ -203,14 +203,14 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
   }
 
   return (
-    <section dir="rtl" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+    <section dir="rtl" className="whatsapp-console cloud-design">
+      <header className="wa-console-head">
         <div>
           <h1 style={{ margin: 0 }}>وحدة تحكم واتساب</h1>
           <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>الاتصال + الأجهزة المرتبطة + الإرسال + سجل الرسائل</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ background: tone.bg, color: tone.color, padding: "6px 12px", borderRadius: 999, fontWeight: 600, fontSize: 13, border: `1px solid ${tone.color}` }}>
+        <div className="wa-actions">
+          <span className="wa-status-pill" style={{ background: tone.bg, color: tone.color, borderColor: tone.color }}>
             ● {tone.label}
           </span>
           <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} /> تحديث</button>
@@ -228,9 +228,9 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
 
       {/* QR */}
       {status?.qr && (
-        <div style={{ border: "1px solid #fbbf24", borderRadius: 12, padding: 16, display: "flex", gap: 16, alignItems: "center", background: "rgba(251,191,36,0.05)" }}>
-          <img src={status.qr} alt="WhatsApp QR" style={{ width: 220, height: 220, borderRadius: 8, background: "white", padding: 8 }} />
-          <div style={{ flex: 1 }}>
+        <div className="wa-qr-card">
+          <img src={status.qr} alt="WhatsApp QR" />
+          <div>
             <h3 style={{ margin: 0, color: "#fbbf24" }}><QrCode size={18} style={{ verticalAlign: "middle" }} /> امسح هذا الرمز</h3>
             <p style={{ marginTop: 6 }}>افتح واتساب على جوالك → <strong>الإعدادات</strong> → <strong>الأجهزة المرتبطة</strong> → <strong>ربط جهاز</strong> → وجّه الكاميرا على هذا الرمز.</p>
             <p style={{ fontSize: 12, opacity: 0.7 }}>عمر الرمز الحالي: <strong>{qrAgeSec} ثانية</strong> (الرمز يتجدد كل دقيقة تقريباً، سيظهر الجديد تلقائياً)</p>
@@ -242,7 +242,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
       )}
 
       {/* Stats row */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+      <div className="wa-stat-grid">
         <Stat label="أرسلت اليوم" value={stats?.today.sent || 0} color="#0fbf6c" icon={<Send size={18} />} />
         <Stat label="تم التسليم" value={stats?.today.delivered || 0} color="#a78bfa" icon={<CheckCircle2 size={18} />} />
         <Stat label="تم القراءة" value={stats?.today.read || 0} color="#22d3ee" icon={<CheckCircle2 size={18} />} />
@@ -251,14 +251,14 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
       </div>
 
       {/* Devices + outbound mode */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div className="wa-split">
         <Panel title="الأجهزة المرتبطة" icon={<Smartphone size={16} />}>
           {devices.length === 0 ? (
             <p style={{ opacity: 0.6 }}>لا يوجد جهاز مرتبط حالياً.</p>
           ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+            <ul className="wa-device-list">
               {devices.map((d) => (
-                <li key={d.id} style={{ background: "rgba(255,255,255,0.03)", padding: 10, borderRadius: 8 }}>
+                <li key={d.id}>
                   <strong dir="ltr" style={{ display: "block", direction: "ltr", textAlign: "right" }}>{d.id}</strong>
                   <small style={{ opacity: 0.7 }}>{d.label} · مرتبط منذ {fmtDateTime(d.connected_since)}</small>
                 </li>
@@ -285,7 +285,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
 
       {/* Send test message */}
       <Panel title="إرسال رسالة (اختبار / يدوي)" icon={<Send size={16} />}>
-        <form onSubmit={submitSend} style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        <form onSubmit={submitSend} className="wa-send-form">
           <label className="field">
             <span>رقم الجوال (05… أو +9665…)</span>
             <input className="input" required dir="ltr" value={sendPhone} onChange={(e) => setSendPhone(e.target.value)} placeholder="0500000000" />
@@ -321,7 +321,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
 
       {/* Conversation search */}
       <Panel title="محادثة عميل" icon={<Search size={16} />}>
-        <form onSubmit={submitSearch} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <form onSubmit={submitSearch} className="wa-search-form">
           <label className="field" style={{ flex: 1 }}>
             <span>رقم العميل</span>
             <input className="input" dir="ltr" value={searchPhone} onChange={(e) => setSearchPhone(e.target.value)} placeholder="0500000000" />
@@ -329,7 +329,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
           <button className="btn primary" type="submit" disabled={searchLoading}>{searchLoading ? "…" : "بحث"}</button>
         </form>
         {searchConv && (
-          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6, maxHeight: 360, overflowY: "auto" }}>
+          <div className="wa-message-list compact">
             {searchConv.length === 0 ? <p style={{ opacity: 0.6 }}>لا توجد رسائل مع هذا الرقم.</p> : searchConv.map((m) => (
               <MessageRow key={m.id} m={m} />
             ))}
@@ -342,7 +342,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
         {recent.length === 0 ? (
           <p style={{ opacity: 0.6 }}>لم تُسجّل أي رسائل حتى الآن.</p>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 420, overflowY: "auto" }}>
+          <div className="wa-message-list">
             {recent.map((m) => <MessageRow key={m.id} m={m} />)}
           </div>
         )}
@@ -350,11 +350,11 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
 
       {/* Templates reference */}
       <Panel title="قوالب الرسائل المتاحة" icon={<LinkIcon size={16} />}>
-        <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+        <div className="wa-template-grid">
           {templates.map((t) => (
-            <div key={t.name} style={{ border: "1px solid #2a2f3a", borderRadius: 8, padding: 10 }}>
+            <div key={t.name} className="wa-template-card">
               <strong style={{ display: "block", fontSize: 13, marginBottom: 6 }}>{t.name}</strong>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontSize: 12, opacity: 0.8, fontFamily: "inherit" }}>{t.sample}</pre>
+              <pre>{t.sample}</pre>
               <button
                 className="btn muted"
                 type="button"
@@ -373,11 +373,11 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
 
 function Stat({ label, value, color, icon }: { label: string; value: number; color: string; icon: React.ReactNode }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.02)", border: `1px solid ${color}33`, borderRadius: 10, padding: 12, display: "flex", gap: 10, alignItems: "center" }}>
-      <div style={{ color }}>{icon}</div>
+    <div className="wa-stat" style={{ borderColor: `${color}44` }}>
+      <div className="wa-stat-icon" style={{ color }}>{icon}</div>
       <div>
-        <div style={{ fontSize: 11, opacity: 0.7 }}>{label}</div>
-        <div style={{ fontSize: 22, fontWeight: 700 }}>{value}</div>
+        <span>{label}</span>
+        <strong>{value}</strong>
       </div>
     </div>
   );
@@ -385,8 +385,8 @@ function Stat({ label, value, color, icon }: { label: string; value: number; col
 
 function Panel({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section style={{ border: "1px solid #2a2f3a", borderRadius: 10, padding: 14, background: "rgba(255,255,255,0.015)" }}>
-      <header style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, fontWeight: 600 }}>
+    <section className="wa-panel">
+      <header>
         {icon} <span>{title}</span>
       </header>
       {children}
@@ -400,13 +400,13 @@ function MessageRow({ m }: { m: api.WhatsAppMessage }) {
   const statusColor = (m.status && MSG_STATUS_TONE[m.status]) || "#9ca3af";
   const phone = dir === "inbound" ? m.from_phone : m.to_phone;
   return (
-    <div style={{ background: "rgba(255,255,255,0.03)", padding: 10, borderRadius: 8, borderRight: `3px solid ${dirTone.color}` }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.8 }}>
+    <div className="wa-message-row" style={{ borderRightColor: dirTone.color }}>
+      <div className="wa-message-meta">
         <span><strong style={{ color: dirTone.color }}>{dirTone.label}</strong> · {phoneLabel(phone)} {m.template_name ? `· ${m.template_name}` : ""}</span>
         <span><span style={{ color: statusColor }}>{m.status || "—"}</span> · {fmtDateTime(m.created_at)}</span>
       </div>
       {m.message && (
-        <p style={{ margin: "6px 0 0", fontSize: 13, whiteSpace: "pre-wrap" }}>{m.message}</p>
+        <p>{m.message}</p>
       )}
     </div>
   );

@@ -1281,8 +1281,25 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
 }
 
 export async function syncSallaStoreForUser(currentUid: string): Promise<SyncResult & { orders: SyncResult; products: SyncResult }> {
-  const products = await syncSallaProductsForUser(currentUid);
-  const orders = await syncSallaOrdersForUser(currentUid);
+  const failedResult = (message: string): SyncResult => ({
+    success: false,
+    imported: 0,
+    updated: 0,
+    failed: 1,
+    pages: 0,
+    fetched: 0,
+    last_sync_at: nowIso(),
+    last_error: message,
+  });
+  const products = await syncSallaProductsForUser(currentUid).catch((error) =>
+    failedResult(error instanceof Error ? error.message : String(error)),
+  );
+  const orders = await syncSallaOrdersForUser(currentUid).catch((error) =>
+    failedResult(error instanceof Error ? error.message : String(error)),
+  );
+  if (!products.success && !orders.success) {
+    throw new Error(orders.last_error || products.last_error || "Salla sync failed.");
+  }
   return {
     ...orders,
     success: products.success && orders.success,

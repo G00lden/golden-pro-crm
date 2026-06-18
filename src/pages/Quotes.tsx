@@ -3,9 +3,11 @@ import {
   CheckCircle2,
   Clock3,
   Copy,
+  Download,
   Edit3,
   Eye,
   FileText,
+  MessageCircle,
   Plus,
   Printer,
   RefreshCcw,
@@ -52,6 +54,97 @@ const statusTone: Record<api.QuoteStatus, "muted" | "success" | "danger" | "warn
   expired: "danger",
   follow_up: "warn",
 };
+
+const defaultTerms = [
+  "الأسعار سارية لمدة 7 أيام من تاريخ العرض ما لم يذكر خلاف ذلك.",
+  "أي أعمال إضافية خارج البنود المذكورة يتم تسعيرها بشكل مستقل قبل التنفيذ.",
+  "مدة التنفيذ تبدأ بعد اعتماد العرض واستلام الدفعة الأولى وتوفر الموقع.",
+  "الضمان يخضع لشروط الشركة والمورد ولا يشمل سوء الاستخدام أو التعديل من طرف آخر.",
+  "التركيب داخل نطاق الخدمة المعتمد، وأي مواقع خارج النطاق قد يضاف عليها تكلفة نقل.",
+].join("\n");
+
+const defaultPayment = {
+  method: "تحويل بنكي",
+  downPercent: 70,
+  finalPercent: 30,
+  downText: "عند اعتماد العرض وبدء تنفيذ الطلب.",
+  finalText: "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.",
+  bank: "",
+  account: "Breexe Pro",
+  iban: "",
+  note: "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.",
+};
+
+const quoteTemplates = [
+  {
+    key: "ac",
+    label: "تكييف صحراوي",
+    title: "عرض سعر توريد وتركيب مكيفات تكييف صحراوي",
+    items: [
+      { description: "مكيف مركزي صحراوي مطور نطاق التبريد واسع\n2 حصان", quantity: 3, unit_price: 5950, total: 17850 },
+      { description: "خدمة التركيب وتشمل رفع المكيف، تفصيل الدكت، العزل، قاعدة المكيف، والتركيب على المنافذ", quantity: 3, unit_price: 3700, total: 11100 },
+      { description: "خدمة تشغيل الوحدات وتشمل مواسير التغذية، التمديدات الكهربائية، الصرف، والتشغيل", quantity: 3, unit_price: 799, total: 2397 },
+      { description: "فلتر تنقية جامبو 20 إنش لمعالجة الماء الداخل للمكيف", quantity: 3, unit_price: 299, total: 897 },
+    ],
+  },
+  {
+    key: "water",
+    label: "تنقية مياه",
+    title: "عرض سعر توريد وتركيب منظومة تنقية مياه",
+    items: [
+      { description: "منظومة تنقية مياه 7 مراحل RO مع خزان 8 لتر", quantity: 1, unit_price: 1200, total: 1200 },
+      { description: "خدمة التركيب والتوصيل بشبكة المياه", quantity: 1, unit_price: 300, total: 300 },
+      { description: "فلاتر استبدال - طقم سنوي كامل", quantity: 1, unit_price: 250, total: 250 },
+    ],
+  },
+  {
+    key: "fog",
+    label: "رذاذ وضباب",
+    title: "عرض سعر توريد وتركيب نظام رذاذ وضباب",
+    items: [
+      { description: "نظام رذاذ ضباب ضغط عالي مع مضخة 70 بار", quantity: 1, unit_price: 4500, total: 4500 },
+      { description: "خراطيم ونوزل نحاس بالمتر الطولي", quantity: 20, unit_price: 85, total: 1700 },
+      { description: "خدمة التركيب والبرمجة والتشغيل", quantity: 1, unit_price: 800, total: 800 },
+    ],
+  },
+  {
+    key: "pump",
+    label: "مضخة مياه",
+    title: "عرض سعر توريد وتركيب مضخة مياه",
+    items: [
+      { description: "مضخة مياه غاطسة 2 حصان", quantity: 1, unit_price: 1800, total: 1800 },
+      { description: "أعمال التمديدات وتركيب المضخة والتشغيل", quantity: 1, unit_price: 500, total: 500 },
+    ],
+  },
+  {
+    key: "filter",
+    label: "فلاتر شاور",
+    title: "عرض سعر توريد فلاتر شاور",
+    items: [
+      { description: "فلتر شاور كروم لتنقية مياه الاستحمام", quantity: 5, unit_price: 180, total: 900 },
+      { description: "فلتر شاور بلاستيك اقتصادي", quantity: 5, unit_price: 95, total: 475 },
+    ],
+  },
+];
+
+const safeFilePart = (value?: string) =>
+  String(value || "العميل")
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 80) || "العميل";
+
+const paymentForQuote = (quote: api.Quote) => ({
+  method: quote.payment_method || defaultPayment.method,
+  downPercent: Number(quote.payment_down_percent ?? defaultPayment.downPercent),
+  finalPercent: Number(quote.payment_final_percent ?? defaultPayment.finalPercent),
+  downText: quote.payment_down_text || defaultPayment.downText,
+  finalText: quote.payment_final_text || defaultPayment.finalText,
+  bank: quote.payment_bank || defaultPayment.bank,
+  account: quote.payment_account || defaultPayment.account,
+  iban: quote.payment_iban || defaultPayment.iban,
+  note: quote.payment_note || defaultPayment.note,
+});
 
 function useAsyncData<T>(fetcher: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -108,8 +201,10 @@ function quoteSummaryRows(stats: api.QuoteStats) {
 
 function quoteShareText(quote: api.Quote) {
   const lines = quote.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, quote.currency)}`);
+  const payment = paymentForQuote(quote);
   return [
-    `عرض سعر ${quote.quote_number}`,
+    "عرض سعر من Breexe Pro",
+    `رقم العرض: ${quote.quote_number}`,
     quote.title || "عرض سعر",
     `العميل: ${quote.customer_name}`,
     quote.valid_until ? `صالح حتى: ${quote.valid_until}` : "",
@@ -117,6 +212,9 @@ function quoteShareText(quote: api.Quote) {
     ...lines,
     "",
     `الإجمالي: ${money(quote.total, quote.currency)}`,
+    `طريقة الدفع: ${payment.method}`,
+    `الدفعة الأولى ${payment.downPercent}%: ${money((quote.total || 0) * payment.downPercent / 100, quote.currency)}`,
+    `الدفعة النهائية ${payment.finalPercent}%: ${money((quote.total || 0) * payment.finalPercent / 100, quote.currency)}`,
     quote.terms ? `الشروط: ${quote.terms}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -127,6 +225,7 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
   const [editing, setEditing] = useState<api.Quote | null>(null);
   const [preview, setPreview] = useState<api.Quote | null>(null);
   const [creating, setCreating] = useState(false);
+  const [sendingQuoteId, setSendingQuoteId] = useState("");
   const quotes = useAsyncData(() => api.getQuotes({ search, status }), [search, status]);
   const stats = quotes.data?.stats || {
     total: 0,
@@ -188,6 +287,37 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
       notify("تم نسخ نص عرض السعر");
     } catch {
       notify("تعذر نسخ عرض السعر", false);
+    }
+  };
+
+  const printQuote = (quote: api.Quote, asPdf = false) => {
+    setPreview(quote);
+    const previousTitle = document.title;
+    document.title = `عرض سعر إلى ${safeFilePart(quote.customer_name)}`;
+    document.body.classList.add("quote-print-mode");
+    const restore = () => {
+      document.title = previousTitle;
+      document.body.classList.remove("quote-print-mode");
+      window.removeEventListener("afterprint", restore);
+    };
+    window.addEventListener("afterprint", restore);
+    window.setTimeout(() => window.print(), 120);
+    notify(asPdf ? "اختر حفظ كـ PDF من نافذة الطباعة" : "تم تجهيز عرض السعر للطباعة A4");
+  };
+
+  const sendQuoteWhatsApp = async (quote: api.Quote) => {
+    if (!quote.customer_phone) {
+      notify("أضف رقم جوال العميل قبل إرسال عرض السعر واتساب", false);
+      return;
+    }
+    setSendingQuoteId(quote.id);
+    try {
+      await api.sendQuoteWhatsApp(quote, quoteShareText(quote));
+      notify("تم إرسال عرض السعر عبر واتساب");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "تعذر إرسال عرض السعر واتساب", false);
+    } finally {
+      setSendingQuoteId("");
     }
   };
 
@@ -335,6 +465,60 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
           <QuotePreview quote={preview} onCopy={() => copyQuote(preview)} />
         </QuoteModal>
       )}
+    </div>
+  );
+}
+
+function QuotePreview({ quote, onCopy }: { quote: api.Quote; onCopy: () => void }) {
+  return (
+    <div className="quote-preview">
+      <section className="quote-preview-paper">
+        <header>
+          <div>
+            <span>Breexe Pro</span>
+            <h2>{quote.title || "عرض سعر"}</h2>
+          </div>
+          <strong>{quote.quote_number}</strong>
+        </header>
+        <div className="quote-preview-meta">
+          <span>العميل: {quote.customer_name}</span>
+          <span>الجوال: {quote.customer_phone || "-"}</span>
+          <span>المدينة: {quote.customer_city || "-"}</span>
+          <span>تاريخ الإصدار: {quote.issue_date}</span>
+          <span>صالح حتى: {quote.valid_until || "-"}</span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>البند</th>
+              <th>الكمية</th>
+              <th>السعر</th>
+              <th>الإجمالي</th>
+            </tr>
+          </thead>
+          <tbody>
+            {quote.items.map((item, index) => (
+              <tr key={`${item.description}-${index}`}>
+                <td>{item.description}</td>
+                <td>{item.quantity}</td>
+                <td>{money(item.unit_price, quote.currency)}</td>
+                <td>{money(item.total, quote.currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="quote-preview-totals">
+          <span>المجموع: {money(quote.subtotal, quote.currency)}</span>
+          <span>الخصم: {money(quote.discount, quote.currency)}</span>
+          <span>الضريبة/الرسوم: {money(quote.tax, quote.currency)}</span>
+          <strong>الإجمالي: {money(quote.total, quote.currency)}</strong>
+        </div>
+        {quote.terms && <p className="quote-preview-terms">{quote.terms}</p>}
+      </section>
+      <div className="form-actions">
+        <button className="btn primary" type="button" onClick={() => window.print()}><Printer size={16} /> طباعة</button>
+        <button className="btn muted" type="button" onClick={onCopy}><Copy size={16} /> نسخ نص العرض</button>
+      </div>
     </div>
   );
 }

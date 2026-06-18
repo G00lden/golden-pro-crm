@@ -595,14 +595,27 @@ async function startServer() {
     "/api/whatsapp/send-test",
     requireAdmin,
     asyncRoute(async (req, res) => {
-      const { phone, message } = req.body || {};
+      const userReq = req as AuthedRequest;
+      const { phone, message, metadata } = req.body || {};
       if (!phone) throw httpError(400, "رقم الجوال مطلوب.");
 
       try {
+        const body = message || "رسالة اختبار من نظام Breexe Pro CRM";
         const result = await whatsappService.sendText(
           phone,
-          message || "رسالة اختبار من نظام Golden Pro CRM",
+          body,
         );
+        recordWhatsAppMessage({
+          type: "sent",
+          provider: whatsappService.getStatus().provider,
+          direction: "outbound",
+          to_phone: phone,
+          message: body,
+          message_id: (result as { messageId?: string | null })?.messageId || null,
+          status: (result as { dryRun?: boolean })?.dryRun ? "dry_run" : "sent",
+          owner_uid: userReq.user.uid,
+          metadata: metadata && typeof metadata === "object" ? metadata : { kind: "manual" },
+        });
         res.json({ success: true, result });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -1176,7 +1189,7 @@ async function startServer() {
             id: status.user,
             provider: status.provider,
             status: status.status,
-            connected_since: status.updatedAt,
+            connected_since: status.connectedAt || status.updatedAt,
             label: status.provider === "web" ? "WhatsApp Web (Baileys)" : "WhatsApp Business Cloud API",
           }]
         : [];

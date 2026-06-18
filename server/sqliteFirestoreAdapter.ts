@@ -57,6 +57,9 @@ function isValidColumn(field: string): boolean {
     "email", "status", "date", "scheduled_time",
     "quote_number", "title", "issue_date", "valid_until", "follow_up_date",
     "subtotal", "discount", "tax", "total", "currency", "confirmed_at",
+    "payment_method", "payment_down_percent", "payment_final_percent",
+    "payment_down_text", "payment_final_text", "payment_bank",
+    "payment_account", "payment_iban", "payment_note",
     "id", "customer_id", "customer_name", "customer_phone",
     "customer_city",
     "product_id", "product_name", "product_sku",
@@ -185,6 +188,15 @@ const fieldToColumn: Record<string, string> = {
   followUpDate: "follow_up_date",
   customerCity: "customer_city",
   confirmedAt: "confirmed_at",
+  paymentMethod: "payment_method",
+  paymentDownPercent: "payment_down_percent",
+  paymentFinalPercent: "payment_final_percent",
+  paymentDownText: "payment_down_text",
+  paymentFinalText: "payment_final_text",
+  paymentBank: "payment_bank",
+  paymentAccount: "payment_account",
+  paymentIban: "payment_iban",
+  paymentNote: "payment_note",
 };
 
 const jsonColumns = new Set([

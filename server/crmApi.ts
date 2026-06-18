@@ -2,6 +2,7 @@ import type express from "express";
 import { adminDb } from "./firebaseAdmin";
 import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
+import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
 
 type DocSnapshot = {
   id: string;
@@ -191,6 +192,20 @@ function quoteTotals(items: Array<{ total: number }>, discount = 0, tax = 0) {
   };
 }
 
+function quotePaymentFields(row: Record<string, any>, existing?: Record<string, any>) {
+  return {
+    payment_method: String(row.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
+    payment_down_percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70),
+    payment_final_percent: Number(row.payment_final_percent ?? existing?.payment_final_percent ?? 30),
+    payment_down_text: String(row.payment_down_text || existing?.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim(),
+    payment_final_text: String(row.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim(),
+    payment_bank: String(row.payment_bank || existing?.payment_bank || "").trim(),
+    payment_account: String(row.payment_account || existing?.payment_account || "Breexe Pro").trim(),
+    payment_iban: String(row.payment_iban || existing?.payment_iban || "").trim(),
+    payment_note: String(row.payment_note || existing?.payment_note || "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.").trim(),
+  };
+}
+
 function normalizeQuote(row: Record<string, any>): Record<string, any> {
   const items = normalizeQuoteItems(row.items);
   const totals = quoteTotals(items, row.discount, row.tax);
@@ -207,6 +222,7 @@ function normalizeQuote(row: Record<string, any>): Record<string, any> {
     currency: row.currency || "SAR",
     confirmed_at: row.confirmed_at || null,
     items,
+    ...quotePaymentFields(row),
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
     tax: Number(row.tax ?? totals.tax),
@@ -303,8 +319,32 @@ function quotePayload(body: Record<string, any>, customer: Record<string, any>, 
     notes: String(body.notes || "").trim(),
     terms: String(body.terms || "").trim(),
     confirmed_at: status === "confirmed" ? existing?.confirmed_at || now : existing?.confirmed_at || null,
+    ...quotePaymentFields(body, existing),
     ...totals,
   });
+}
+
+function formatMoney(value: unknown, currency = "SAR") {
+  return `${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+}
+
+function quoteWhatsAppText(quote: Record<string, any>) {
+  const currency = String(quote.currency || "SAR");
+  const lines = (Array.isArray(quote.items) ? quote.items : []).map(
+    (item) => `- ${item.description} × ${item.quantity}: ${formatMoney(item.total, currency)}`,
+  );
+  return [
+    `عرض سعر من Breexe Pro`,
+    `${quote.quote_number} - ${quote.title || "عرض سعر"}`,
+    `العميل: ${quote.customer_name}`,
+    quote.valid_until ? `صالح حتى: ${quote.valid_until}` : "",
+    "",
+    ...lines,
+    "",
+    `الإجمالي: ${formatMoney(quote.total, currency)}`,
+    quote.payment_method ? `طريقة الدفع: ${quote.payment_method}` : "",
+    quote.terms ? `الشروط: ${quote.terms}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 export function registerCrmApiRoutes(app: express.Express) {
@@ -421,6 +461,50 @@ export function registerCrmApiRoutes(app: express.Express) {
   app.delete("/api/quotes/:id", asyncRoute(async (req, res) => {
     if (!(await deleteOwned("quotes", req.params.id, userId(req)))) return res.status(404).json({ error: "Quote was not found." });
     res.json({ success: true });
+  }));
+
+  app.post("/api/quotes/:id/send-whatsapp", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const existing = await getOwned("quotes", req.params.id, uid);
+    if (!existing) {
+      res.status(404).json({ error: "Quote was not found." });
+      return;
+    }
+    const quote = normalizeQuote(existing);
+    const phone = String(req.body?.phone || quote.customer_phone || "").trim();
+    if (!phone) {
+      res.status(400).json({ error: "رقم جوال العميل مطلوب لإرسال عرض السعر." });
+      return;
+    }
+    const message = String(req.body?.message || quoteWhatsAppText(quote)).trim();
+    let result: Awaited<ReturnType<typeof whatsappService.sendText>>;
+    try {
+      result = await whatsappService.sendText(phone, message, { confirmationCode: req.body?.outboundCode });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes("credentials are missing") || msg.includes("is not connected")) {
+        const err = new Error(msg) as Error & { status?: number };
+        err.status = 503;
+        throw err;
+      }
+      throw error;
+    }
+    recordWhatsAppMessage({
+      type: "sent",
+      provider: whatsappService.getStatus().provider,
+      direction: "outbound",
+      to_phone: phone,
+      message,
+      message_id: (result as { messageId?: string | null })?.messageId || null,
+      status: (result as { dryRun?: boolean })?.dryRun ? "dry_run" : "sent",
+      owner_uid: uid,
+      metadata: {
+        kind: "quote",
+        quote_id: req.params.id,
+        quote_number: quote.quote_number,
+      },
+    });
+    res.json({ success: true, result });
   }));
 
   app.get("/api/products", asyncRoute(async (req, res) => {

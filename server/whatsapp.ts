@@ -27,6 +27,7 @@ export type WhatsAppStatus = {
   lastError?: string;
   template?: string;
   user?: string;
+  connectedAt?: string;
   outbound?: ReturnType<typeof outboundSafetyStatus>;
   updatedAt: string;
 };
@@ -39,6 +40,7 @@ export class WhatsAppService {
   private qrDataUrl = "";
   private lastError = "";
   private user = "";
+  private connectedAt = "";
   private starting?: Promise<void>;
   private manualDisconnect = false;
   private waiters = new Set<() => void>();
@@ -53,12 +55,14 @@ export class WhatsAppService {
   getStatus(): WhatsAppStatus {
     if (this.provider === "cloud_api") {
       const configured = Boolean(this.cloudToken() && this.cloudPhoneNumberId());
+      if (configured && !this.connectedAt) this.connectedAt = new Date().toISOString();
       return {
         provider: this.provider,
         status: configured ? "connected" : "error",
         lastError: configured ? this.lastError || undefined : "WhatsApp Cloud API credentials are missing.",
         template: this.cloudTemplateName() || undefined,
         user: this.cloudPhoneNumberId() || undefined,
+        connectedAt: configured ? this.connectedAt || new Date().toISOString() : undefined,
         outbound: outboundSafetyStatus(),
         updatedAt: new Date().toISOString(),
       };
@@ -70,6 +74,7 @@ export class WhatsAppService {
       qr: this.qrDataUrl || undefined,
       lastError: this.lastError || undefined,
       user: this.user || undefined,
+      connectedAt: this.connectedAt || undefined,
       outbound: outboundSafetyStatus(),
       updatedAt: new Date().toISOString(),
     };
@@ -98,6 +103,7 @@ export class WhatsAppService {
     this.manualDisconnect = true;
     this.qrDataUrl = "";
     this.user = "";
+    this.connectedAt = "";
     this.lastError = "";
     this.status = "disconnected";
     this.notifyWaiters();
@@ -189,6 +195,7 @@ export class WhatsAppService {
         this.qrDataUrl = "";
         this.lastError = "";
         this.user = sock.user?.id || "";
+        this.connectedAt = this.connectedAt || new Date().toISOString();
         this.notifyWaiters();
       }
 
@@ -200,6 +207,7 @@ export class WhatsAppService {
         this.sock = undefined;
         this.qrDataUrl = "";
         this.user = "";
+        this.connectedAt = "";
         this.status = shouldReconnect ? "connecting" : "disconnected";
         this.lastError = lastDisconnect?.error?.message || "";
         this.notifyWaiters();
