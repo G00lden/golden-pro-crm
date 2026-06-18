@@ -73,14 +73,14 @@ This is the page paid ads send traffic to. It's a **public** page; the rest of t
 
 | # | Item | Status | Owner | Notes |
 |---|------|--------|-------|-------|
-| 5.1 | Landing route `/` or `/landing` rendered server-side or pre-built | ✗ | claude | route + layout |
-| 5.2 | Hero + value proposition + owner profile section | ✗ | hermes + claude | hermes drafts copy, claude implements |
-| 5.3 | Product showcase (grid + product detail modal) | ✗ | claude | reuses existing product model |
-| 5.4 | Primary CTAs: WhatsApp button, call button, lead form | ✗ | claude | each fires a tracked conversion event |
+| 5.1 | Landing route `/` or `/landing` rendered server-side or pre-built | ✓ | claude | done 2026-06-18: `/landing` route in main.tsx renders `src/pages/Landing.tsx` |
+| 5.2 | Hero + value proposition + owner profile section | ◐ | hermes + claude | structure + copy stub done; hermes to polish copy & owner profile |
+| 5.3 | Product showcase (grid + product detail modal) | ◐ | claude | service grid implemented; product detail modal pending |
+| 5.4 | Primary CTAs: WhatsApp button, call button, lead form | ✓ | claude | done 2026-06-18: WA + call + form, each fires trackEvent() with utm context |
 | 5.5 | Trust signals (reviews / past work / counts) | ✗ | claude | manual entries for now |
 | 5.6 | Core Web Vitals: LCP <2.5s, CLS <0.1, INP <200ms | ✗ | claude | ad quality score depends on this |
 | 5.7 | Cookie consent banner (PDPL-aware) | ✗ | claude | required before firing any pixel |
-| 5.8 | Mobile-first design (≤375px is the primary view) | ✗ | claude | most ad traffic is mobile |
+| 5.8 | Mobile-first design (≤375px is the primary view) | ✓ | claude | done 2026-06-18: all sections responsive, sticky bottom CTA on mobile |
 
 ### 5B. Tracking stack — client-side
 
@@ -93,10 +93,10 @@ This is the page paid ads send traffic to. It's a **public** page; the rest of t
 | 5.13 | Snap Pixel | ✗ | claude | `VITE_SNAP_PIXEL_ID` env |
 | 5.14 | Google Ads conversion tag | ✗ | claude | `VITE_GADS_ID` + conversion label |
 | 5.15 | Microsoft Clarity (heatmaps + session recording) | ✗ | claude | `VITE_CLARITY_ID` env; consent-gated |
-| 5.16 | UTM parameter capture → localStorage (persists across visits) | ✗ | claude | for last-touch attribution |
-| 5.17 | Phone-call click event fires on all platforms | ✗ | claude | event=`call_click` with utm metadata |
-| 5.18 | WhatsApp click event fires on all platforms | ✗ | claude | event=`wa_click`; should also tag the deep-link with attribution |
-| 5.19 | Lead form submit fires `Lead` standard event on all platforms | ✗ | claude | with hashed email/phone for matching |
+| 5.16 | UTM parameter capture → localStorage (persists across visits) | ✓ | claude | done 2026-06-18: `captureUtm()` in src/track.ts; first-touch persists, last-touch updates |
+| 5.17 | Phone-call click event fires on all platforms | ◐ | claude | dataLayer push wired (src/track.ts); will fan out to pixels once GTM is in (5.9) |
+| 5.18 | WhatsApp click event fires on all platforms | ◐ | claude | dataLayer push wired; same fan-out story as 5.17 |
+| 5.19 | Lead form submit fires `Lead` standard event on all platforms | ◐ | claude | client side wired; needs server-side `Lead` via CAPI (5.20-5.23) |
 
 ### 5C. Tracking stack — server-side (Conversions API / CAPI)
 
