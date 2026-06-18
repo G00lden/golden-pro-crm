@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:smoke": "node scripts/smoke.mjs",
+    "test:golden": "node scripts/golden-path.mjs",
     "doctor": "node scripts/doctor.mjs",
     "doctor:prod": "node scripts/doctor.mjs --production",
     "env:prod": "node scripts/create-production-env.mjs",
