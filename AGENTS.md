@@ -29,8 +29,27 @@ All three ultimately push and pull the same `origin` over HTTPS. Git identity is
 ## Branch policy
 
 - Trivial edits → straight to `main`.
-- Multi-file features → `feat/<short-slug>` branch, open PR with `gh pr create`, merge after self-review.
+- Multi-file features → `feat/<short-slug>` branch (or `codex/<slug>`, `claude/<slug>`, `hermes/<slug>` if you want to mark who did the work), open PR with `gh pr create`, **Supervisor reviews** before merge.
 - Long-running experiments → `exp/<slug>` branch, never auto-merge.
+
+## Supervisor agent (the gatekeeper)
+
+There is a **fourth role** layered on top of the three agents: the **Supervisor**. The Supervisor is not a separate program — any of the three agents can be invoked **in Supervisor mode** by loading `docs/supervisor-agent.md` as their system prompt. The Supervisor:
+
+- Owns the path to a **commercial v1 release**, gated by `docs/commercial-release-checklist.md`.
+- Is the only role authorized to flip release-checklist items from ✗ to ✓.
+- Reviews every PR through engineering + security + marketing lenses.
+- Plans the next sprint and assigns each item to the right executor (Codex / Claude Code / Hermes / human).
+
+**Launch the Supervisor:**
+
+```cmd
+open-supervisor.cmd            REM defaults to Claude Code
+open-supervisor.cmd codex      REM run via Codex
+open-supervisor.cmd hermes     REM run via Hermes
+```
+
+Or directly inside any agent: "Operate in Supervisor mode — read `docs/supervisor-agent.md` and run the loop."
 
 ## File ownership (so agents don't fight each other)
 
