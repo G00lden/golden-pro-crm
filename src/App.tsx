@@ -436,7 +436,7 @@ export default function App() {
         <div className="brand">
           <div className="brand-mark">BP</div>
           <div>
-            <strong>Breexe Pro</strong>
+            <strong>BreeXe Pro</strong>
             <span>CRM</span>
           </div>
         </div>
@@ -568,7 +568,7 @@ function EmailAuthPage({ notify }: { notify: (message: string, ok?: boolean) => 
     <div className="auth-screen" dir="rtl">
       <section className="auth-card">
         <div className="brand-mark large">BP</div>
-        <h1>Breexe Pro CRM</h1>
+        <h1>BreeXe Pro CRM</h1>
         <p>نظام إدارة العملاء والصيانة ورسائل واتساب</p>
 
         <div className="auth-tabs" role="tablist" aria-label="اختيار طريقة الدخول">
@@ -660,7 +660,7 @@ function AuthPage({ notify }: { notify: (message: string, ok?: boolean) => void 
     <div className="auth-screen" dir="rtl">
       <section>
         <div className="brand-mark large">BP</div>
-        <h1>Breexe Pro CRM</h1>
+        <h1>BreeXe Pro CRM</h1>
         <p>نظام إدارة العملاء والصيانة ورسائل واتساب</p>
         <Button loading={loading} onClick={handleLogin}>
           تسجيل الدخول بجوجل
@@ -718,7 +718,7 @@ function Dashboard({
       <section className="cloud-hero dashboard-hero">
         <div className="cloud-hero-copy">
           <span className="eyebrow">Cloud Design</span>
-          <h1>مركز تشغيل Breexe Pro</h1>
+          <h1>مركز تشغيل BreeXe Pro</h1>
           <p>المهام الحرجة، الصيانة، ورعاية العملاء في شاشة واحدة.</p>
           <div className="hero-actions">
             <Button onClick={() => go("installations")}><Plus size={16} /> إضافة صيانة</Button>
@@ -2386,7 +2386,7 @@ function WhatsAppPanel({ notify }: { notify: (message: string, ok?: boolean) => 
   const status = useData(api.getWhatsAppStatus);
   const diagnostics = useData(api.getReminderDiagnostics);
   const [phone, setPhone] = useState("");
-  const [message, setMessage] = useState("رسالة اختبار من نظام Breexe Pro CRM");
+  const [message, setMessage] = useState("رسالة اختبار من نظام BreeXe Pro CRM");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {

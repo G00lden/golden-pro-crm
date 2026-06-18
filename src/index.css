@@ -1,23 +1,49 @@
 @import "tailwindcss";
 
+/* ============================================================
+ * BreeXe Pro — Brand Identity (single source of truth)
+ * Source: "الهوية البصرية BreeXe Pro-1.pdf" (تابعة للمجموعة الذهبية المتحدة)
+ * Reference: docs/brand-identity.md
+ * Do not change brand-* values without updating both.
+ * ============================================================ */
 :root {
   color-scheme: dark;
-  --bg: #070a0f;
+
+  /* -- Brand palette (canonical) -- */
+  --brand-blue: #0B355C;          /* Primary Blue — الأزرق الأساسي */
+  --brand-blue-deep: #07223D;     /* darker shade of brand blue for elevation */
+  --brand-blue-soft: #CDE8FA;     /* Soft Light Blue — للخلفيات الثانوية */
+  --brand-gold: #C9A47A;          /* Champagne Gold — الذهبي الشمباني */
+  --brand-gold-light: #DCBE9A;    /* lighter gold for hovers/accents */
+  --brand-charcoal: #393A3F;      /* Dark Gray — الرمادي الداكن */
+  --brand-gray: #F4F4F4;          /* Light Gray — الرمادي الفاتح */
+  --brand-white: #FFFFFF;         /* White — الأبيض */
+
+  /* -- Brand fonts (canonical) -- */
+  --brand-font-ar: "Tajawal", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --brand-font-en: "Montserrat", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* -- Semantic tokens (used by every other rule) -- */
+  --bg: #070a0f;                  /* dark interior — CRM operator mode */
   --surface: #101722;
   --surface-2: #162231;
   --line: #253245;
   --text: #f3f7fb;
   --muted: #9cafbf;
   --faint: #6f8196;
-  --gold: #d6a84f;
-  --gold-2: #f2d77f;
+  --gold: var(--brand-gold);
+  --gold-2: var(--brand-gold-light);
   --teal: #28c7a0;
-  --blue: #4da3ff;
+  --blue: var(--brand-blue);
   --red: #e35858;
   --orange: #e0a14f;
-  --brand-deep: #07131b;
-  font-family: Tajawal, Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --brand-deep: var(--brand-blue-deep);
+
+  font-family: var(--brand-font-ar);
 }
+
+/* Latin glyphs render in Montserrat per the brand kit. */
+[lang="en"], .latin, code, kbd, samp { font-family: var(--brand-font-en); }
 
 * {
   box-sizing: border-box;
@@ -73,19 +99,19 @@ textarea {
   height: 38px;
   place-items: center;
   border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(40, 199, 160, 0.95), rgba(77, 163, 255, 0.84) 50%, rgba(214, 168, 79, 0.95)),
-    var(--brand-deep);
-  color: #061015;
-  font-weight: 900;
-  box-shadow: 0 0 0 1px rgba(242, 215, 127, 0.25), 0 14px 30px rgba(40, 199, 160, 0.14);
+  background: var(--brand-white) url("/brand/icon-64.png") center / 30px no-repeat;
+  color: transparent;                       /* hide any text fallback */
+  font-size: 0;
+  box-shadow: 0 0 0 1px rgba(11, 53, 92, 0.18), 0 8px 22px rgba(11, 53, 92, 0.20);
 }
 
 .brand-mark.large {
-  width: 58px;
-  height: 58px;
+  width: 88px;
+  height: 88px;
   margin: 0 auto 16px;
-  font-size: 22px;
+  background-size: 72px;
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px rgba(11, 53, 92, 0.18), 0 14px 36px rgba(11, 53, 92, 0.22);
 }
 
 .brand strong {
@@ -1294,9 +1320,374 @@ main {
   background: rgba(215, 168, 77, 0.08);
 }
 
+.quotes-workspace .modal.wide {
+  width: min(1120px, 100%);
+}
+
+.quote-template-panel,
+.quote-payment-form {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0c1118;
+}
+
+.quote-template-panel > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quote-payment-form .quote-lines-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.textarea.compact {
+  min-height: 72px;
+}
+
 .quote-preview {
   display: grid;
   gap: 12px;
+}
+
+.quote-document-stage {
+  display: grid;
+  gap: 18px;
+  max-height: min(72vh, 980px);
+  overflow: auto;
+  padding: 16px;
+  border-radius: 10px;
+  background: #353b44;
+}
+
+.quote-a4-doc {
+  width: min(210mm, 100%);
+  min-height: 297mm;
+  margin: 0 auto;
+  overflow: hidden;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.35);
+  background: #ffffff;
+  color: #1f2937;
+}
+
+.quote-cover-page {
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(160deg, #0a1722 0%, #0f3f54 55%, #12283b 100%);
+  color: #ffffff;
+}
+
+.quote-cover-top,
+.quote-cover-foot,
+.quote-doc-head,
+.quote-doc-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+}
+
+.quote-cover-top {
+  padding: 38px 46px 26px;
+  border-bottom: 1px solid rgba(242, 215, 127, 0.34);
+}
+
+.quote-cover-top strong,
+.quote-doc-head strong {
+  display: block;
+  font-size: 22px;
+}
+
+.quote-cover-top span,
+.quote-doc-head span {
+  display: block;
+  color: #d6a84f;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.quote-logo-mark,
+.quote-cover-logo {
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, #28c7a0, #4da3ff 54%, #d6a84f);
+  color: #07131b;
+  font-weight: 950;
+}
+
+.quote-logo-mark {
+  width: 66px;
+  height: 66px;
+  font-size: 20px;
+}
+
+.quote-cover-body {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  align-content: center;
+  gap: 22px;
+  padding: 54px;
+  text-align: center;
+}
+
+.quote-cover-logo {
+  width: 160px;
+  height: 160px;
+  border-radius: 32px;
+  font-size: 42px;
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.18);
+}
+
+.quote-cover-badge {
+  padding: 10px 26px;
+  border: 1px solid rgba(242, 215, 127, 0.55);
+  border-radius: 999px;
+  color: #f2d77f;
+  font-weight: 900;
+}
+
+.quote-cover-body h2 {
+  max-width: 650px;
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.45;
+}
+
+.quote-cover-body p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.84);
+}
+
+.quote-cover-foot {
+  padding: 24px 46px;
+  background: rgba(0, 0, 0, 0.22);
+  font-size: 13px;
+}
+
+.quote-cover-foot strong {
+  color: #f2d77f;
+}
+
+.quote-detail-page {
+  display: flex;
+  flex-direction: column;
+  padding: 30px 38px;
+}
+
+.quote-doc-head {
+  padding-bottom: 16px;
+  border-bottom: 3px solid #d6a84f;
+  margin-bottom: 18px;
+}
+
+.quote-doc-title {
+  padding: 15px 20px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  background: linear-gradient(135deg, #0f6a86, #12314a);
+  color: #ffffff;
+  text-align: center;
+}
+
+.quote-doc-title h2 {
+  margin: 0 0 5px;
+  font-size: 18px;
+}
+
+.quote-doc-title p {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.88;
+}
+
+.quote-client-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.quote-client-grid span {
+  padding: 8px 10px;
+  border: 1px solid #d7e0ea;
+  border-radius: 8px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.quote-client-grid strong {
+  color: #10212c;
+}
+
+.quote-doc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+}
+
+.quote-doc-table th {
+  padding: 10px;
+  background: #0f6a86;
+  color: #ffffff;
+  font-size: 12px;
+  text-align: center;
+}
+
+.quote-doc-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #334155;
+  font-size: 11px;
+  line-height: 1.7;
+  text-align: center;
+  white-space: pre-line;
+}
+
+.quote-doc-table td:nth-child(2) {
+  text-align: right;
+}
+
+.quote-doc-table tbody tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
+.quote-doc-table tfoot td {
+  border: 0;
+  background: #12314a;
+  color: #ffffff;
+  font-weight: 950;
+  font-size: 13px;
+}
+
+.quote-payment-block,
+.quote-terms-block {
+  margin-bottom: 14px;
+}
+
+.quote-payment-block h3,
+.quote-terms-block h3 {
+  margin: 0 0 9px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: #d6a84f;
+  color: #07131b;
+  font-size: 12px;
+  text-align: center;
+}
+
+.quote-payment-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin-bottom: 10px;
+}
+
+.quote-payment-summary article,
+.quote-payment-grid p,
+.quote-bank-box {
+  border: 1px solid #d7e0ea;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.quote-payment-summary article {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+}
+
+.quote-payment-summary span {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.quote-payment-summary strong {
+  color: #0f6a86;
+  font-size: 14px;
+}
+
+.quote-payment-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.quote-payment-grid p {
+  margin: 0;
+  padding: 10px 12px;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.quote-payment-grid strong {
+  color: #0f3f54;
+}
+
+.quote-bank-box {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 14px;
+  padding: 10px 12px;
+  background: #f0f9ff;
+  color: #31576b;
+  font-size: 10px;
+  line-height: 1.8;
+}
+
+.quote-bank-box p {
+  grid-column: 1 / -1;
+  margin: 4px 0 0;
+}
+
+.quote-terms-block ol {
+  margin: 0;
+  padding: 0 18px 0 0;
+}
+
+.quote-terms-block li {
+  padding: 3px 0;
+  border-bottom: 1px dashed #d7e0ea;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.75;
+}
+
+.quote-doc-foot {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid #d7e0ea;
+}
+
+.quote-doc-foot p {
+  margin: 0;
+  color: #64748b;
+  font-size: 9px;
+  line-height: 1.8;
+}
+
+.quote-foot-seal {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border: 1.5px solid #d6a84f;
+  border-radius: 50%;
+  color: #b18639;
+  font-size: 8px;
+  font-weight: 950;
+  line-height: 1.25;
+  text-align: center;
 }
 
 .quote-preview-paper {
@@ -1637,6 +2028,17 @@ main {
     grid-template-columns: 1fr;
   }
 
+  .quote-client-grid,
+  .quote-payment-summary,
+  .quote-payment-grid,
+  .quote-bank-box {
+    grid-template-columns: 1fr;
+  }
+
+  .quote-document-stage {
+    padding: 10px;
+  }
+
   .wa-qr-card img {
     width: min(220px, 100%);
     height: auto;
@@ -1676,6 +2078,11 @@ main {
 }
 
 @media print {
+  @page {
+    size: A4;
+    margin: 0;
+  }
+
   body {
     background: white;
   }
@@ -1710,5 +2117,50 @@ main {
   .quote-preview-paper {
     border: 0;
     color: #111;
+  }
+
+  body.quote-print-mode * {
+    visibility: hidden;
+  }
+
+  body.quote-print-mode .modal-backdrop,
+  body.quote-print-mode .modal,
+  body.quote-print-mode .quote-preview,
+  body.quote-print-mode .quote-document-stage,
+  body.quote-print-mode .quote-a4-doc,
+  body.quote-print-mode .quote-a4-doc * {
+    visibility: visible;
+  }
+
+  body.quote-print-mode .modal-backdrop,
+  body.quote-print-mode .modal,
+  body.quote-print-mode .quote-preview,
+  body.quote-print-mode .quote-document-stage {
+    display: block !important;
+    position: static !important;
+    width: 210mm !important;
+    max-width: 210mm !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: white !important;
+  }
+
+  body.quote-print-mode .quote-a4-doc {
+    width: 210mm !important;
+    min-height: 297mm !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    page-break-after: always;
+    break-after: page;
+  }
+
+  body.quote-print-mode .quote-a4-doc:last-child {
+    page-break-after: auto;
+    break-after: auto;
   }
 }
