@@ -10,6 +10,7 @@ import {
   MessageCircle,
   Package,
   Plus,
+  Receipt,
   RefreshCcw,
   Settings,
   Smartphone,
@@ -39,6 +40,7 @@ import {
   registerWithEmail,
 } from "./firebase";
 import { AdminUsersPage } from "./pages/AdminUsers";
+import { InvoicesPage } from "./pages/Invoices";
 import { QuotesPage } from "./pages/Quotes";
 import { WhatsAppConsole } from "./pages/WhatsAppConsole";
 import { ReminderDashboard } from "./components/ReminderDashboard";
@@ -260,6 +262,12 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authed, setAuthed] = useState(false);
+  const [lightMode, setLightMode] = useState(() => localStorage.getItem("gp_light_mode") === "true");
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("light-mode", lightMode);
+    localStorage.setItem("gp_light_mode", String(lightMode));
+  }, [lightMode]);
 
   useEffect(() => {
     return onAppAuthStateChanged((user) => {
@@ -324,6 +332,7 @@ export default function App() {
     { id: "dash" as Page, label: "الرئيسية", icon: ClipboardList },
     { id: "customers" as Page, label: "العملاء", icon: Users },
     { id: "quotes" as Page, label: "عروض الأسعار", icon: FileText, badge: summary.quoteFollowUps },
+    { id: "invoices" as Page, label: "الفواتير", icon: Receipt },
     { id: "products" as Page, label: "المنتجات", icon: Package },
     { id: "installations" as Page, label: "الصيانة", icon: Wrench, badge: summary.overdue },
     { id: "bookings" as Page, label: "الحجوزات", icon: CalendarDays },
@@ -349,6 +358,7 @@ export default function App() {
     dash: <Dashboard stats={summary} notify={notify} refreshStats={stats.refresh} go={openPage} />,
     customers: <CustomersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     quotes: <QuotesPage notify={notify} refreshStats={stats.refresh} />,
+    invoices: <InvoicesPage notify={notify} refreshStats={stats.refresh} />,
     products: <ProductsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     installations: <InstallationsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     bookings: <BookingsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
@@ -393,6 +403,11 @@ export default function App() {
         <div className="quota">
           <span>رسائل اليوم</span>
           <strong>{summary.sentToday || 0}/{summary.maxDaily || 24}</strong>
+        </div>
+        <div className="theme-toggle">
+          <button className="btn-ghost" type="button" onClick={() => setLightMode((prev) => !prev)} aria-label={lightMode ? "الوضع الليلي" : "الوضع النهاري"}>
+            {lightMode ? "🌙" : "☀️"} {lightMode ? "ليلي" : "نهاري"}
+          </button>
         </div>
       </aside>
 

@@ -8,6 +8,21 @@
  * ============================================================ */
 :root {
   color-scheme: dark;
+}
+
+.light-mode {
+  color-scheme: light;
+  --bg: #f0f3f7;
+  --surface: #ffffff;
+  --surface-2: #f7f9fc;
+  --line: #d0d8e0;
+  --text: #1a2332;
+  --muted: #5a6b7e;
+  --faint: #8a9baa;
+  --teal: #1a9e82;
+}
+
+:root {
 
   /* -- Brand palette (canonical) -- */
   --brand-blue: #0B355C;          /* Primary Blue — الأزرق الأساسي */

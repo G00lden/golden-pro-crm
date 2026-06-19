@@ -140,6 +140,9 @@ export type Settings = {
   jobs_per_tech: number;
   response_rate: number;
   maxDaily: number;
+  seller_name?: string;
+  seller_vat_number?: string;
+  seller_address?: string;
   createdBy?: string;
   updatedAt?: string;
 };
@@ -518,6 +521,70 @@ export type QuoteListResponse = {
   stats: QuoteStats;
 };
 
+export type InvoiceStatus = "draft" | "issued" | "paid" | "cancelled" | "refunded";
+
+export type InvoiceItem = {
+  description: string;
+  quantity: number;
+  unit_price: number;
+  total: number;
+  vat_excluded: boolean;
+};
+
+export type Invoice = {
+  id: string;
+  invoice_number: string;
+  quote_id?: string | null;
+  customer_id?: string | null;
+  customer_name: string;
+  customer_phone?: string;
+  customer_city?: string;
+  title?: string;
+  status: InvoiceStatus;
+  issue_date: string;
+  due_date?: string | null;
+  paid_at?: string | null;
+  payment_method?: string;
+  subtotal: number;
+  discount: number;
+  vat_percent: number;  // 15 for ZATCA standard
+  vat_amount: number;
+  total_with_vat: number;
+  total_without_vat: number;
+  currency: string;
+  items: InvoiceItem[];
+  notes?: string;
+  terms?: string;
+  seller_name: string;
+  seller_vat_number: string;
+  seller_address: string;
+  qr_code?: string;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "subtotal" | "vat_amount" | "total_with_vat" | "total_without_vat" | "createdBy" | "createdAt" | "updatedAt" | "qr_code">> & {
+  customer_name: string;
+  items: InvoiceItem[];
+};
+
+export type InvoiceStats = {
+  total: number;
+  draft: number;
+  issued: number;
+  paid: number;
+  cancelled: number;
+  total_value: number;
+  paid_value: number;
+};
+
+export type InvoiceListResponse = {
+  data: Invoice[];
+  total: number;
+  stats: InvoiceStats;
+};
+
 const nowIso = () => new Date().toISOString();
 const today = () => new Date().toLocaleDateString("en-CA");
 const tomorrow = () => {
@@ -556,10 +623,11 @@ type LocalDb = {
   bookings: Booking[];
   reminders: Reminder[];
   quotes: Quote[];
+  invoices: Invoice[];
   settings: Settings;
 };
 
-const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24 });
+const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24, seller_name: "Breexe Pro International", seller_vat_number: "313049114100003", seller_address: "الرياض - حي لوفياء - شارع فيا" });
 const localDbKey = (uid: string) => `golden-pro-crm-local-db:${uid}`;
 const localId = (prefix: string) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const withoutId = <T extends { id: string }>(item: T): Omit<T, "id"> => {
@@ -582,6 +650,7 @@ function emptyLocalDb(): LocalDb {
     bookings: [],
     reminders: [],
     quotes: [],
+    invoices: [],
     settings: defaultSettings(),
   };
 }
@@ -600,6 +669,7 @@ function loadLocalDb(uid: string): LocalDb {
       bookings: raw.bookings || [],
       reminders: raw.reminders || [],
       quotes: raw.quotes || [],
+      invoices: raw.invoices || [],
       settings: { ...defaultSettings(), ...(raw.settings || {}) },
     };
   } catch {
@@ -1493,6 +1563,348 @@ export const sendQuoteWhatsApp = async (quote: Quote, message: string) => {
   });
 };
 
+/* ── Invoice helpers ───────────────────────────────────── */
+
+function invoiceNumber(seed = Date.now(), index = 1) {
+  const d = new Date(seed);
+  const ymd = d.toISOString().slice(0, 10).replace(/-/g, "");
+  return `INV-${ymd}-${String(index).padStart(3, "0")}`;
+}
+
+function normalizeInvoiceItems(items: InvoiceItem[] = []) {
+  return items
+    .map((item) => {
+      const quantity = Math.max(0, Number(item.quantity || 0));
+      const unitPrice = Math.max(0, Number(item.unit_price || 0));
+      return {
+        description: String(item.description || "").trim(),
+        quantity,
+        unit_price: unitPrice,
+        total: quantity * unitPrice,
+        vat_excluded: item.vat_excluded !== undefined ? item.vat_excluded : true,
+      };
+    })
+    .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
+}
+
+function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15) {
+  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const cleanDiscount = Math.max(0, Number(discount || 0));
+  const withoutVat = subtotal - cleanDiscount;
+  const vatAmount = withoutVat * (vat_percent / 100);
+  return {
+    subtotal,
+    discount: cleanDiscount,
+    vat_percent,
+    vat_amount: Math.round(vatAmount * 100) / 100,
+    total_with_vat: Math.round((withoutVat + vatAmount) * 100) / 100,
+    total_without_vat: Math.round(withoutVat * 100) / 100,
+  };
+}
+
+function filterInvoices(invoices: Invoice[], filter: { search?: string; status?: string } = {}) {
+  const search = String(filter.search || "").trim();
+  return invoices
+    .filter((item) => !filter.status || filter.status === "all" || item.status === filter.status)
+    .filter((item) => {
+      if (!search) return true;
+      return `${item.invoice_number} ${item.customer_name} ${item.customer_phone || ""} ${item.title || ""}`.includes(search);
+    })
+    .sort((a, b) => String(b.createdAt || b.issue_date).localeCompare(String(a.createdAt || a.issue_date)));
+}
+
+function invoiceStats(invoices: Invoice[]): InvoiceStats {
+  return {
+    total: invoices.length,
+    draft: invoices.filter((item) => item.status === "draft").length,
+    issued: invoices.filter((item) => item.status === "issued").length,
+    paid: invoices.filter((item) => item.status === "paid").length,
+    cancelled: invoices.filter((item) => item.status === "cancelled").length,
+    total_value: invoices.reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+    paid_value: invoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+  };
+}
+
+function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings, existing?: Invoice): Invoice {
+  const items = normalizeInvoiceItems(data.items);
+  const totals = invoiceTotals(items, data.discount, data.vat_percent);
+  const now = nowIso();
+  return {
+    id: existing?.id || localId("inv"),
+    invoice_number: existing?.invoice_number || "",
+    quote_id: data.quote_id ?? existing?.quote_id ?? null,
+    customer_id: data.customer_id || existing?.customer_id || null,
+    customer_name: String(data.customer_name || existing?.customer_name || "").trim(),
+    customer_phone: String(data.customer_phone || existing?.customer_phone || "").trim(),
+    customer_city: String(data.customer_city || existing?.customer_city || "").trim(),
+    title: String(data.title || existing?.title || "").trim(),
+    status: (data.status || existing?.status || "issued") as InvoiceStatus,
+    issue_date: data.issue_date || existing?.issue_date || today(),
+    due_date: data.due_date ?? existing?.due_date ?? addDays(today(), 30),
+    paid_at: data.status === "paid" && !existing?.paid_at ? now : existing?.paid_at || null,
+    payment_method: data.payment_method || existing?.payment_method || "",
+    currency: data.currency || existing?.currency || "SAR",
+    items,
+    notes: String(data.notes || existing?.notes || "").trim(),
+    terms: String(data.terms || existing?.terms || "").trim(),
+    seller_name: String(data.seller_name || existing?.seller_name || settings.seller_name || "").trim(),
+    seller_vat_number: String(data.seller_vat_number || existing?.seller_vat_number || settings.seller_vat_number || "").trim(),
+    seller_address: String(data.seller_address || existing?.seller_address || settings.seller_address || "").trim(),
+    qr_code: existing?.qr_code || "",
+    createdBy: uid,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    ...totals,
+  };
+}
+
+/* ── Invoice API ───────────────────────────────────────── */
+
+export const getInvoices = async (filter: { search?: string; status?: string } = {}): Promise<InvoiceListResponse> => {
+  const user = getCurrentAppUser();
+  if (!user) return { data: [], total: 0, stats: invoiceStats([]) };
+  const uid = user.uid;
+  if (user.local) {
+    const all = loadLocalDb(uid).invoices;
+    const data = filterInvoices(all, filter);
+    return { data, total: data.length, stats: invoiceStats(all) };
+  }
+  if (serverDataEnabled()) {
+    const params = new URLSearchParams();
+    if (filter.search) params.set("search", filter.search);
+    if (filter.status && filter.status !== "all") params.set("status", filter.status);
+    return apiFetch<InvoiceListResponse>(`/api/invoices${params.toString() ? `?${params}` : ""}`);
+  }
+  const snap = await getDocs(query(collection(db, "invoices"), where("createdBy", "==", uid), orderBy("createdAt", "desc"), limit(300)));
+  const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Invoice);
+  const data = filterInvoices(all, filter);
+  return { data, total: data.length, stats: invoiceStats(all) };
+};
+
+export const createInvoice = async (data: InvoiceInput) => {
+  const user = getUserOrThrow();
+  const uid = user.uid;
+  if (user.local) {
+    const localDb = loadLocalDb(uid);
+    let invoice = localInvoicePayload(data, uid, localDb.settings);
+    invoice.invoice_number = invoiceNumber(Date.now(), localDb.invoices.length + 1);
+    localDb.invoices.unshift(invoice);
+    saveLocalDb(uid, localDb);
+    return invoice.id;
+  }
+  if (serverDataEnabled()) {
+    return apiFetch<{ id: string }>("/api/invoices", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }).then((result) => result.id);
+  }
+  const existing = await getInvoices();
+  const id = doc(collection(db, "invoices")).id;
+  const payload = localInvoicePayload(data, uid, defaultSettings());
+  payload.id = id;
+  payload.invoice_number = invoiceNumber(Date.now(), existing.stats.total + 1);
+  await wrap(() => setDoc(doc(db, "invoices", id), withoutId(payload)), OperationType.CREATE, `invoices/${id}`);
+  return id;
+};
+
+export const updateInvoice = async (id: string, data: InvoiceInput) => {
+  const user = getUserOrThrow();
+  if (user.local) {
+    const localDb = loadLocalDb(user.uid);
+    localDb.invoices = localDb.invoices.map((item) =>
+      item.id === id ? localInvoicePayload(data, user.uid, localDb.settings, item) : item,
+    );
+    saveLocalDb(user.uid, localDb);
+    return;
+  }
+  if (serverDataEnabled()) {
+    return apiFetch(`/api/invoices/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }).then(() => undefined);
+  }
+  const items = normalizeInvoiceItems(data.items);
+  return wrap(
+    () => updateDoc(doc(db, "invoices", id), {
+      customer_id: data.customer_id || null,
+      customer_name: String(data.customer_name || "").trim(),
+      customer_phone: String(data.customer_phone || "").trim(),
+      customer_city: String(data.customer_city || "").trim(),
+      title: String(data.title || "").trim(),
+      status: data.status || "issued",
+      issue_date: data.issue_date || today(),
+      due_date: data.due_date || null,
+      payment_method: data.payment_method || "",
+      currency: data.currency || "SAR",
+      items,
+      notes: String(data.notes || "").trim(),
+      terms: String(data.terms || "").trim(),
+      seller_name: String(data.seller_name || "").trim(),
+      seller_vat_number: String(data.seller_vat_number || "").trim(),
+      seller_address: String(data.seller_address || "").trim(),
+      ...invoiceTotals(items, data.discount, data.vat_percent),
+      updatedAt: nowIso(),
+    }),
+    OperationType.UPDATE,
+    `invoices/${id}`,
+  );
+};
+
+export const setInvoiceStatus = async (id: string, status: InvoiceStatus) => {
+  const user = getUserOrThrow();
+  const now = nowIso();
+  if (user.local) {
+    const localDb = loadLocalDb(user.uid);
+    localDb.invoices = localDb.invoices.map((item) =>
+      item.id === id
+        ? {
+            ...item,
+            status,
+            paid_at: status === "paid" ? item.paid_at || now : item.paid_at || null,
+            updatedAt: now,
+          }
+        : item,
+    );
+    saveLocalDb(user.uid, localDb);
+    return;
+  }
+  if (serverDataEnabled()) {
+    return apiFetch(`/api/invoices/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    }).then(() => undefined);
+  }
+  return wrap(
+    () => updateDoc(doc(db, "invoices", id), {
+      status,
+      paid_at: status === "paid" ? now : null,
+      updatedAt: now,
+    }),
+    OperationType.UPDATE,
+    `invoices/${id}`,
+  );
+};
+
+export const deleteInvoice = (id: string) => {
+  const user = getUserOrThrow();
+  if (user.local) {
+    const localDb = loadLocalDb(user.uid);
+    localDb.invoices = localDb.invoices.filter((item) => item.id !== id);
+    saveLocalDb(user.uid, localDb);
+    return Promise.resolve();
+  }
+  if (serverDataEnabled()) {
+    return apiFetch(`/api/invoices/${id}`, { method: "DELETE" }).then(() => undefined);
+  }
+  return wrap(() => deleteDoc(doc(db, "invoices", id)), OperationType.DELETE, `invoices/${id}`);
+};
+
+export const convertQuoteToInvoice = async (quoteId: string) => {
+  const user = getUserOrThrow();
+  const uid = user.uid;
+
+  let quote: Quote | null = null;
+  if (user.local) {
+    const localDb = loadLocalDb(uid);
+    quote = localDb.quotes.find((q) => q.id === quoteId) || null;
+  } else if (serverDataEnabled()) {
+    quote = await apiFetch<Quote>(`/api/quotes/${quoteId}`);
+  } else {
+    const snap = await getDoc(doc(db, "quotes", quoteId));
+    if (snap.exists()) quote = { id: snap.id, ...snap.data() } as Quote;
+  }
+  if (!quote) throw new Error("عرض السعر غير موجود");
+
+  const settings = user.local
+    ? loadLocalDb(uid).settings
+    : defaultSettings();
+
+  const invoiceInput: InvoiceInput = {
+    quote_id: quote.id,
+    customer_id: quote.customer_id,
+    customer_name: quote.customer_name,
+    customer_phone: quote.customer_phone,
+    customer_city: quote.customer_city,
+    title: quote.title || "",
+    issue_date: today(),
+    due_date: addDays(today(), 30),
+    currency: quote.currency || "SAR",
+    discount: quote.discount,
+    vat_percent: 15,
+    items: quote.items.map((item) => ({
+      description: item.description,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      total: item.total,
+      vat_excluded: true,
+    })),
+    notes: quote.notes,
+    terms: quote.terms,
+    seller_name: settings.seller_name || "",
+    seller_vat_number: settings.seller_vat_number || "",
+    seller_address: settings.seller_address || "",
+  };
+
+  return createInvoice(invoiceInput);
+};
+
+export const generateInvoiceQRCode = (invoice: Invoice): string => {
+  const timestamp = invoice.issue_date + "T00:00:00Z";
+  const total = invoice.total_with_vat.toFixed(2);
+  const vatAmount = invoice.vat_amount.toFixed(2);
+
+  const tlvData: Array<[number, string]> = [
+    [1, invoice.seller_name],
+    [2, invoice.seller_vat_number],
+    [3, timestamp],
+    [4, total],
+    [5, vatAmount],
+  ];
+
+  const encoder = new TextEncoder();
+  const bytes: number[] = [];
+
+  for (const [tag, value] of tlvData) {
+    const valueBytes = Array.from(encoder.encode(String(value)));
+    bytes.push(tag, valueBytes.length);
+    bytes.push(...valueBytes);
+  }
+
+  return btoa(String.fromCharCode(...bytes));
+};
+
+export const sendInvoiceWhatsApp = async (invoice: Invoice, message: string) => {
+  const outboundCode = requestOutboundCode();
+  const user = getCurrentAppUser();
+  const metadata = {
+    kind: "invoice",
+    invoice_id: invoice.id,
+    invoice_number: invoice.invoice_number,
+  };
+  if (serverDataEnabled() && !user?.local) {
+    return apiFetch<{ success: boolean; result: unknown }>(`/api/invoices/${invoice.id}/send-whatsapp`, {
+      method: "POST",
+      body: JSON.stringify({
+        phone: invoice.customer_phone,
+        message,
+        outboundCode,
+        metadata,
+      }),
+    });
+  }
+  return apiFetch<{ success: boolean; result: unknown }>("/api/whatsapp/send-test", {
+    method: "POST",
+    body: JSON.stringify({
+      phone: invoice.customer_phone,
+      message,
+      outboundCode,
+      metadata,
+    }),
+  });
+};
+
+/* ── Products ──────────────────────────────────────────── */
+
 export const getProducts = async () => {
   const user = getCurrentAppUser();
   if (!user) return [] as Product[];
@@ -2210,12 +2622,49 @@ function buildDemoDataSet(uid: string, count = 10) {
     bookings.push(booking);
   }
 
+  const demoInvoice: Invoice = {
+    id: localId("inv"),
+    invoice_number: invoiceNumber(Date.now(), 1),
+    quote_id: null,
+    customer_id: customers[0]?.id || null,
+    customer_name: customers[0]?.name || "عميل تجربة",
+    customer_phone: customers[0]?.phone || "0000000000",
+    customer_city: customers[0]?.city || "الرياض",
+    title: "فاتورة تجربة - خدمة صيانة",
+    status: "issued",
+    issue_date: today(),
+    due_date: addDays(today(), 30),
+    paid_at: null,
+    payment_method: "تحويل بنكي",
+    currency: "SAR",
+    items: [
+      { description: "خدمة صيانة دورية", quantity: 1, unit_price: 500, total: 500, vat_excluded: true },
+      { description: "قطع غيار", quantity: 2, unit_price: 150, total: 300, vat_excluded: true },
+    ],
+    subtotal: 800,
+    discount: 0,
+    vat_percent: 15,
+    vat_amount: 120,
+    total_with_vat: 920,
+    total_without_vat: 800,
+    notes: "",
+    terms: "فاتورة ضريبية مبسطة - متوافقة مع ZATCA",
+    seller_name: "BreeXe Pro",
+    seller_vat_number: "300000000000003",
+    seller_address: "الرياض، المملكة العربية السعودية",
+    qr_code: "",
+    createdBy: uid,
+    createdAt: now,
+    updatedAt: now,
+  };
+
   return {
     products: demoProducts,
     technicians: demoTechs,
     customers,
     installations,
     bookings,
+    invoices: [demoInvoice],
   };
 }
 
@@ -2231,6 +2680,7 @@ export const seedDemoData = async (count = 10) => {
     localDb.customers.push(...demo.customers);
     localDb.installations.push(...demo.installations);
     localDb.bookings.push(...demo.bookings);
+    if (demo.invoices) localDb.invoices.push(...demo.invoices);
     saveLocalDb(uid, localDb);
   } else {
     if (serverDataEnabled()) {
@@ -2251,6 +2701,7 @@ export const seedDemoData = async (count = 10) => {
     demo.customers.forEach((item) => batch.set(doc(db, "customers", item.id), withoutId(item)));
     demo.installations.forEach((item) => batch.set(doc(db, "installations", item.id), withoutId(item)));
     demo.bookings.forEach((item) => batch.set(doc(db, "bookings", item.id), withoutId(item)));
+    if (demo.invoices) demo.invoices.forEach((item) => batch.set(doc(db, "invoices", item.id), withoutId(item)));
     await wrap(() => batch.commit(), OperationType.CREATE, "demo-data");
   }
 
@@ -2260,6 +2711,7 @@ export const seedDemoData = async (count = 10) => {
     technicians: demo.technicians.length,
     installations: count,
     bookings: count,
+    invoices: demo.invoices?.length || 0,
   };
 };
 

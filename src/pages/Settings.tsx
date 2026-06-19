@@ -119,6 +119,22 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
               <Field label="نسبة الاستجابة"><TextInput type="number" min={0} max={100} value={values.response_rate} onChange={(e) => setValues({ ...values, response_rate: Number(e.target.value) })} /></Field>
               <Field label="حد الرسائل اليومي"><TextInput type="number" min={1} value={values.maxDaily} onChange={(e) => setValues({ ...values, maxDaily: Number(e.target.value) })} /></Field>
             </div>
+            <fieldset className="form-fieldset">
+              <legend>بيانات الفاتورة الضريبية (ZATCA)</legend>
+              <div className="form-grid">
+                <Field label="اسم البائع (الجهة المصدرة)">
+                  <TextInput value={values.seller_name || ""} onChange={(e) => setValues({ ...values, seller_name: e.target.value })} placeholder="مثال: مؤسسة BreeXe للتجارة" />
+                </Field>
+                <Field label="الرقم الضريبي (VAT)">
+                  <TextInput value={values.seller_vat_number || ""} onChange={(e) => setValues({ ...values, seller_vat_number: e.target.value })} placeholder="مثال: 300000000000003" />
+                </Field>
+              </div>
+              <div className="form-grid">
+                <Field label="عنوان البائع">
+                  <TextInput value={values.seller_address || ""} onChange={(e) => setValues({ ...values, seller_address: e.target.value })} placeholder="مثال: الرياض، المملكة العربية السعودية" />
+                </Field>
+              </div>
+            </fieldset>
             <div className="form-actions">
               <Button type="submit" loading={saving}><Save size={16} /> حفظ</Button>
               <Button tone="success" loading={preparing} onClick={prepareDaily}><RefreshCcw size={16} /> تهيئة للاستخدام اليومي</Button>

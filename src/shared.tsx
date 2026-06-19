@@ -27,6 +27,7 @@ export type Page =
   | "dash"
   | "customers"
   | "quotes"
+  | "invoices"
   | "products"
   | "installations"
   | "bookings"

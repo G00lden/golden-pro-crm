@@ -10,6 +10,7 @@ import {
   MessageCircle,
   Plus,
   Printer,
+  Receipt,
   RefreshCcw,
   Search,
   Send,
@@ -416,6 +417,17 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                 <strong>{money(quote.total, quote.currency)}</strong>
               </div>
               <div className="row-actions">
+                <button className="icon-btn gold" type="button" title="تحويل إلى فاتورة" onClick={async () => {
+                  try {
+                    const id = await api.convertQuoteToInvoice(quote.id);
+                    notify("تم تحويل عرض السعر إلى فاتورة ✓");
+                    await refreshAll();
+                  } catch (err) {
+                    notify(err instanceof Error ? err.message : "فشل تحويل عرض السعر", false);
+                  }
+                }}>
+                  <Receipt size={15} />
+                </button>
                 <button className="icon-btn success" type="button" title="تأكيد" onClick={() => setQuoteStatus(quote, "confirmed")}>
                   <CheckCircle2 size={15} />
                 </button>
