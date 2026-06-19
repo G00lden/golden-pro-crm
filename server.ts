@@ -253,11 +253,17 @@ async function startServer() {
   registerReminderRoutes(app);
 
   // ── Daily-prep route (uses getSallaStatus, ownedCount, whatsappService) ──
+  function asyncRoute2(
+    handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
+  ) {
+    return (req: Request, res: Response, next: NextFunction) => {
+      Promise.resolve(handler(req, res, next)).catch(next);
+    };
+  }
   app.post(
     "/api/operations/prepare-daily",
-    async (req, res, next) => {
-      try {
-        // Dynamic import to avoid circular dependency — routes-salla exports no register for this pattern.
+    asyncRoute2(async (req, res) => {
+      // Dynamic import to avoid circular dependency — routes-salla exports no register for this pattern.
         const { getSallaStatus, syncSallaStoreForUser } = await import("./server/salla");
         const { whatsappService } = await import("./server/whatsapp");
         const userReq = req as any;
@@ -348,10 +354,8 @@ async function startServer() {
             },
           ],
         });
-      } catch (error) {
-        next(error);
       }
-    },
+    }),
   );
 
   // Error handler
