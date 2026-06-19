@@ -264,97 +264,96 @@ async function startServer() {
     "/api/operations/prepare-daily",
     asyncRoute2(async (req, res) => {
       // Dynamic import to avoid circular dependency — routes-salla exports no register for this pattern.
-        const { getSallaStatus, syncSallaStoreForUser } = await import("./server/salla");
-        const { whatsappService } = await import("./server/whatsapp");
-        const userReq = req as any;
-        const uid = userReq.user.uid;
-        const syncRequested = Boolean(req.body?.syncSalla);
-        const [salla, technicians, storeOrders, needsReview, awaitingSchedule, todayBookings] = await Promise.all([
-          getSallaStatus(uid, req),
-          ownedCount("technicians", uid),
-          ownedCount("store_orders", uid),
-          ownedCount("store_orders", uid, (ref: any) => ref.where("journey_status", "==", "needs_review")),
-          ownedCount("store_orders", uid, (ref: any) => ref.where("journey_status", "==", "awaiting_schedule")),
-          ownedCount("bookings", uid, (ref: any) => ref.where("date", "==", todayInTimeZone())),
-        ]);
+      const { getSallaStatus, syncSallaStoreForUser } = await import("./server/salla");
+      const { whatsappService } = await import("./server/whatsapp");
+      const userReq = req as any;
+      const uid = userReq.user.uid;
+      const syncRequested = Boolean(req.body?.syncSalla);
+      const [salla, technicians, storeOrders, needsReview, awaitingSchedule, todayBookings] = await Promise.all([
+        getSallaStatus(uid, req),
+        ownedCount("technicians", uid),
+        ownedCount("store_orders", uid),
+        ownedCount("store_orders", uid, (ref: any) => ref.where("journey_status", "==", "needs_review")),
+        ownedCount("store_orders", uid, (ref: any) => ref.where("journey_status", "==", "awaiting_schedule")),
+        ownedCount("bookings", uid, (ref: any) => ref.where("date", "==", todayInTimeZone())),
+      ]);
 
-        let sync: unknown = null;
-        if (syncRequested && (salla as any).linked) {
-          try {
-            sync = await syncSallaStoreForUser(uid);
-          } catch (error) {
-            sync = {
-              success: false,
-              error: error instanceof Error ? error.message : String(error),
-            };
-          }
+      let sync: unknown = null;
+      if (syncRequested && (salla as any).linked) {
+        try {
+          sync = await syncSallaStoreForUser(uid);
+        } catch (error) {
+          sync = {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
         }
-
-        const whatsapp = whatsappService.getStatus();
-        const storageErrors = [
-          technicians.error,
-          storeOrders.error,
-          needsReview.error,
-          awaitingSchedule.error,
-          todayBookings.error,
-        ].filter(Boolean);
-
-        res.json({
-          success: true,
-          prepared_at: new Date().toISOString(),
-          sync,
-          summary: {
-            technicians: technicians.count,
-            storeOrders: storeOrders.count,
-            needsReview: needsReview.count,
-            awaitingSchedule: awaitingSchedule.count,
-            todayBookings: todayBookings.count,
-          },
-          checks: [
-            {
-              id: "salla",
-              ok: Boolean((salla as any).linked),
-              label: "ربط سلة",
-              detail: (salla as any).linked ? `مرتبط: ${(salla as any).store_name || "متجر سلة"}` : "اربط تطبيق سلة أو راجع حالة التكامل.",
-            },
-            {
-              id: "technicians",
-              ok: technicians.count > 0,
-              label: "ملف الفنيين",
-              detail: technicians.count > 0 ? `${technicians.count} فني جاهز للتحويل.` : "أضف فني واحد على الأقل مع رقم الجوال.",
-            },
-            {
-              id: "messaging",
-              ok: whatsapp.status === "connected" || process.env.WHATSAPP_PROVIDER === "cloud_api",
-              label: "قناة الرسائل",
-              detail:
-                whatsapp.status === "connected"
-                  ? "واتساب ويب متصل."
-                  : process.env.WHATSAPP_PROVIDER === "cloud_api"
-                    ? "WhatsApp Cloud API محدد كقناة الإنتاج."
-                    : "اربط واتساب ويب أو فعّل WhatsApp Cloud API قبل التشغيل التجاري.",
-            },
-            {
-              id: "review_queue",
-              ok: needsReview.count === 0,
-              label: "طلبات تحتاج مراجعة",
-              detail: needsReview.count ? `${needsReview.count} طلب يحتاج تصنيف أو ربط يدوي.` : "لا توجد طلبات عالقة للمراجعة.",
-            },
-            {
-              id: "schedule_queue",
-              ok: awaitingSchedule.count === 0,
-              label: "طلبات بانتظار الجدولة",
-              detail: awaitingSchedule.count ? `${awaitingSchedule.count} طلب يحتاج موعد وفني.` : "لا توجد طلبات بانتظار الجدولة.",
-            },
-            {
-              id: "storage",
-              ok: storageErrors.length === 0,
-              label: "قاعدة البيانات",
-              detail: storageErrors.length ? storageErrors[0] : "قراءة الجداول الأساسية نجحت.",
-            },
-          ],
-        });
       }
+
+      const whatsapp = whatsappService.getStatus();
+      const storageErrors = [
+        technicians.error,
+        storeOrders.error,
+        needsReview.error,
+        awaitingSchedule.error,
+        todayBookings.error,
+      ].filter(Boolean);
+
+      res.json({
+        success: true,
+        prepared_at: new Date().toISOString(),
+        sync,
+        summary: {
+          technicians: technicians.count,
+          storeOrders: storeOrders.count,
+          needsReview: needsReview.count,
+          awaitingSchedule: awaitingSchedule.count,
+          todayBookings: todayBookings.count,
+        },
+        checks: [
+          {
+            id: "salla",
+            ok: Boolean((salla as any).linked),
+            label: "ربط سلة",
+            detail: (salla as any).linked ? `مرتبط: ${(salla as any).store_name || "متجر سلة"}` : "اربط تطبيق سلة أو راجع حالة التكامل.",
+          },
+          {
+            id: "technicians",
+            ok: technicians.count > 0,
+            label: "ملف الفنيين",
+            detail: technicians.count > 0 ? `${technicians.count} فني جاهز للتحويل.` : "أضف فني واحد على الأقل مع رقم الجوال.",
+          },
+          {
+            id: "messaging",
+            ok: whatsapp.status === "connected" || process.env.WHATSAPP_PROVIDER === "cloud_api",
+            label: "قناة الرسائل",
+            detail:
+              whatsapp.status === "connected"
+                ? "واتساب ويب متصل."
+                : process.env.WHATSAPP_PROVIDER === "cloud_api"
+                  ? "WhatsApp Cloud API محدد كقناة الإنتاج."
+                  : "اربط واتساب ويب أو فعّل WhatsApp Cloud API قبل التشغيل التجاري.",
+          },
+          {
+            id: "review_queue",
+            ok: needsReview.count === 0,
+            label: "طلبات تحتاج مراجعة",
+            detail: needsReview.count ? `${needsReview.count} طلب يحتاج تصنيف أو ربط يدوي.` : "لا توجد طلبات عالقة للمراجعة.",
+          },
+          {
+            id: "schedule_queue",
+            ok: awaitingSchedule.count === 0,
+            label: "طلبات بانتظار الجدولة",
+            detail: awaitingSchedule.count ? `${awaitingSchedule.count} طلب يحتاج موعد وفني.` : "لا توجد طلبات بانتظار الجدولة.",
+          },
+          {
+            id: "storage",
+            ok: storageErrors.length === 0,
+            label: "قاعدة البيانات",
+            detail: storageErrors.length ? storageErrors[0] : "قراءة الجداول الأساسية نجحت.",
+          },
+        ],
+      });
     }),
   );
 

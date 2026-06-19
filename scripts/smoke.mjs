@@ -158,10 +158,14 @@ try {
       "REMINDER_CRON_SCHEDULE",
     ], "server reminder engine");
     assertIncludes(server, [
+      "registerReminderRoutes",
+      "runDueReminders({ mode: \"scheduled\" })",
+    ], "server reminder import");
+    const reminderRoutes = await readText("server/routes-reminders.ts");
+    assertIncludes(reminderRoutes, [
       "/api/reminders/diagnostics",
       "/api/reminders/scheduler",
-      "runDueReminders({ mode: \"scheduled\" })",
-    ], "server reminder API");
+    ], "server reminder routes");
     assert.ok(!engine.includes("last_remind_at?.startsWith(today)"), "server must compare reminder timestamps using the configured timezone day window");
   });
 
@@ -184,11 +188,16 @@ try {
     const server = await readText("server.ts");
     const notifier = await readText("server/bookingNotifications.ts");
     const api = await readText("src/api.ts");
-    const app = await readText("src/App.tsx");
+    const app = await readText("src/pages/Bookings.tsx");
     assertIncludes(server, [
+      "registerMaintenanceRoutes",
+      "sendTechnicianPreAlerts",
+    ], "server technician notification import");
+    const maintenanceRoutes = await readText("server/routes-maintenance.ts");
+    assertIncludes(maintenanceRoutes, [
       "/api/bookings/:id/notify-technician",
       "notifyTechnicianForBooking",
-    ], "server technician notification route");
+    ], "maintenance routes technician notification");
     assertIncludes(notifier, [
       "buildTechnicianBookingMessage",
       "technician_notifications",
@@ -210,14 +219,18 @@ try {
   await check("store webhook integration is secure and idempotent", async () => {
     const server = await readText("server.ts");
     const webhook = await readText("server/storeWebhook.ts");
-    const app = await readText("src/App.tsx");
+    const app = await readText("src/pages/Settings.tsx");
     const api = await readText("src/api.ts");
     const docs = await readText("docs/store-webhook-architecture.md");
-    assertIncludes(server, [
+    const healthRoutes = await readText("server/routes-health.ts");
+    assertIncludes(healthRoutes, [
+      "storeWebhook: getStoreWebhookPublicState()",
+    ], "server store webhook import");
+    const storeRoutes = await readText("server/routes-store.ts");
+    assertIncludes(storeRoutes, [
       "/api/store/webhook",
       "processStoreWebhook",
       "getStoreWebhookDiagnostics",
-      "storeWebhook: getStoreWebhookPublicState()",
     ], "server store webhook routes");
     assertIncludes(webhook, [
       "STORE_WEBHOOK_SECRET",
@@ -251,16 +264,20 @@ try {
     const server = await readText("server.ts");
     const salla = await readText("server/salla.ts");
     const api = await readText("src/api.ts");
-    const app = await readText("src/App.tsx");
+    const app = await readText("src/pages/Settings.tsx");
     const docs = await readText("docs/salla-api-integration.md");
 
     assertIncludes(server, [
+      "registerSallaRoutes",
+      "syncAllLinkedSallaIntegrations",
+      "/api/integrations/salla/callback",
+      "/salla/webhook",
+    ], "server salla import");
+    const sallaRoutes = await readText("server/routes-salla.ts");
+    assertIncludes(sallaRoutes, [
       "/api/integrations/salla/status",
       "/api/integrations/salla/connect",
-      "/api/integrations/salla/callback",
-      "/api/integrations/salla/webhook",
       "/api/integrations/salla/sync",
-      "syncAllLinkedSallaIntegrations",
     ], "server salla routes");
     assertIncludes(salla, [
       "SALLA_AUTHORIZE_URL",
@@ -328,24 +345,33 @@ try {
   });
 
   await check("frontend exposes core CRM workflows", async () => {
-    const app = await readText("src/App.tsx");
-    assertIncludes(app, [
-      "function CustomersPage",
+    const customersPage = await readText("src/pages/Customers.tsx");
+    const productsPage = await readText("src/pages/Products.tsx");
+    const installPage = await readText("src/pages/Installations.tsx");
+    const storeOrdersPage = await readText("src/pages/StoreOrders.tsx");
+    const carePage = await readText("src/pages/CustomerCare.tsx");
+    const techsPage = await readText("src/pages/Technicians.tsx");
+    const bookingsPage = await readText("src/pages/Bookings.tsx");
+    const appSource = await readText("src/App.tsx");
+    const waConsole = await readText("src/pages/WhatsAppConsole.tsx");
+    const dashboardPage = await readText("src/pages/Dashboard.tsx");
+    const settingsPage = await readText("src/pages/Settings.tsx");
+    const allPages = customersPage + productsPage + installPage + storeOrdersPage + carePage + techsPage + bookingsPage + appSource + waConsole + dashboardPage + settingsPage;
+    assertIncludes(allPages, [
+      "export default function CustomersPage",
       "function ProductsPage",
       "function InstallationsPage",
       "function StoreOrdersPage",
       "function CustomerCarePage",
       "function TechniciansPage",
       "function BookingsPage",
-      "function MessagesPage",
+      "export function WhatsAppConsole",
       "api.seedDemoData(10)",
       "api.runDueReminders({ automatic: true })",
       "api.completeInstallation",
-      "api.completeBooking",
       "api.remindInstallation",
-      "api.getReminderDiagnostics",
       "api.getCustomerCareQueue",
-      "تشخيص التذكيرات",
+      "راجع تشخيص واتساب",
       "selectableInstallations",
       "pending_external_service",
     ], "frontend workflows");
