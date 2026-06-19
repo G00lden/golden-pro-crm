@@ -55,7 +55,7 @@ const values = {
   SALLA_CLIENT_ID: keep("SALLA_CLIENT_ID"),
   SALLA_CLIENT_SECRET: keep("SALLA_CLIENT_SECRET"),
   SALLA_REDIRECT_URI: `https://${domain}/api/integrations/salla/callback`,
-  SALLA_SCOPES: keep("SALLA_SCOPES", "offline_access orders.read"),
+  SALLA_SCOPES: keep("SALLA_SCOPES", "offline_access orders.read products.read"),
   SALLA_SYNC_CRON_ENABLED: "true",
   SALLA_SYNC_CRON_SCHEDULE: keep("SALLA_SYNC_CRON_SCHEDULE", "*/15 * * * *"),
   SALLA_SYNC_MAX_PAGES: keep("SALLA_SYNC_MAX_PAGES", "3"),

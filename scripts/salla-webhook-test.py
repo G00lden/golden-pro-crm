@@ -121,7 +121,7 @@ def main() -> int:
             "access_token": f"access-{args.token_suffix}",
             "refresh_token": f"refresh-{args.token_suffix}",
             "expires": expires_in,
-            "scope": "offline_access orders.read",
+            "scope": "offline_access orders.read products.read",
             "token_type": "bearer",
         },
     }

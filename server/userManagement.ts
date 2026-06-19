@@ -110,6 +110,13 @@ function countFirebaseAdmins(): number {
   return Number(row?.c || 0);
 }
 
+export function repairLocalDevAdminRoles() {
+  const ownerUid = process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
+  db.prepare(
+    "UPDATE users SET role = 'user', updated_at = ? WHERE provider = 'local-dev' AND IFNULL(uid, '') <> ? AND role = 'admin'",
+  ).run(nowIso(), ownerUid);
+}
+
 export function listUsers(filter: { search?: string; role?: string; active?: boolean } = {}): ManagedUser[] {
   const where: string[] = [];
   const args: unknown[] = [];

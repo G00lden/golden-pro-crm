@@ -26,7 +26,7 @@
 SALLA_AUTH_MODE=easy
 SALLA_CLIENT_ID=
 SALLA_CLIENT_SECRET=
-SALLA_SCOPES=offline_access orders.read
+SALLA_SCOPES=offline_access orders.read products.read
 SALLA_SYNC_CRON_ENABLED=true
 SALLA_SYNC_CRON_SCHEDULE=*/15 * * * *
 SALLA_SYNC_MAX_PAGES=3

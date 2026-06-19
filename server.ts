@@ -8,7 +8,7 @@ import { createServer as createViteServer } from "vite";
 import { type AuthedRequest, requireFirebaseUser } from "./server/auth";
 import { completeBooking } from "./server/bookingLifecycle";
 import { registerCrmApiRoutes } from "./server/crmApi";
-import { registerUserAdminRoutes } from "./server/userManagement";
+import { registerUserAdminRoutes, repairLocalDevAdminRoles } from "./server/userManagement";
 import { adminDb } from "./server/firebaseAdmin";
 import { outboundSafetyStatus, runWithOutboundCode } from "./server/outboundSafety";
 import {
@@ -262,6 +262,7 @@ async function startServer() {
       "ALLOW_LOCAL_AUTH=true is forbidden in production. Unset it before deploying.",
     );
   }
+  repairLocalDevAdminRoles();
 
   const app = express();
   const port = Number(process.env.PORT || 3000);
@@ -308,6 +309,7 @@ async function startServer() {
       "/api/integrations/salla/callback",
       "/salla/callback",
       "/salla/webhook",
+      "/api/whatsapp/webhook",
       "/api/health",
     ],
     webhookRateLimit,
@@ -388,7 +390,6 @@ async function startServer() {
 
   app.post(
     "/api/whatsapp/webhook",
-    webhookRateLimit,
     asyncRoute(async (req, res) => {
       await handleWhatsAppWebhook(req, res, { ownerUid: __whatsappOwnerUid() });
     }),

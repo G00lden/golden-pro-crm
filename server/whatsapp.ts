@@ -2,16 +2,25 @@ import crypto from "crypto";
 import { rm } from "fs/promises";
 import path from "path";
 import { Boom } from "@hapi/boom";
-import makeWASocket, {
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  useMultiFileAuthState,
-} from "@whiskeysockets/baileys";
 import pino from "pino";
 import QRCode from "qrcode";
 import db from "./db";
 import { decideOutbound, dryRunSendResult, outboundSafetyStatus, type OutboundSendOptions } from "./outboundSafety";
 import { renderTemplate, type RenderVars, type TemplateName } from "./whatsappTemplates";
+
+type BaileysModule = typeof import("@whiskeysockets/baileys");
+let baileysModule: BaileysModule | null = null;
+
+async function loadBaileys(): Promise<BaileysModule> {
+  if (baileysModule) return baileysModule;
+  try {
+    baileysModule = await import("@whiskeysockets/baileys");
+    return baileysModule;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`WhatsApp Web runtime is unavailable. Use WHATSAPP_PROVIDER=cloud_api in production or install dev dependencies for QR mode. ${detail}`);
+  }
+}
 
 export type WhatsAppConnectionStatus =
   | "disconnected"
@@ -167,6 +176,12 @@ export class WhatsAppService {
   }
 
   private async createSocket() {
+    const {
+      default: makeWASocket,
+      DisconnectReason,
+      fetchLatestBaileysVersion,
+      useMultiFileAuthState,
+    } = await loadBaileys();
     const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir);
     const { version } = await fetchLatestBaileysVersion();
 

@@ -147,7 +147,7 @@ def probe(base: str, env: dict[str, str]) -> dict:
             "client_id": env["SALLA_CLIENT_ID"],
             "response_type": "code",
             "redirect_uri": env.get("SALLA_REDIRECT_URI", ""),
-            "scope": env.get("SALLA_SCOPES", "offline_access orders.read"),
+            "scope": env.get("SALLA_SCOPES", "offline_access orders.read products.read"),
             "state": "probe",
         })
         try:

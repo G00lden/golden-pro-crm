@@ -56,6 +56,62 @@ function clean<T extends Record<string, unknown>>(value: T) {
   return copy;
 }
 
+function badRequest(message: string): never {
+  const err = new Error(message) as Error & { status?: number };
+  err.status = 400;
+  throw err;
+}
+
+function textField(
+  body: Record<string, any>,
+  key: string,
+  options: { required?: boolean; max?: number; fallback?: string } = {},
+) {
+  const hasValue = body[key] !== undefined && body[key] !== null;
+  const value = hasValue ? String(body[key]).trim() : options.fallback;
+  if (options.required && !value) badRequest(`${key} is required.`);
+  if (value && options.max && value.length > options.max) badRequest(`${key} must be ${options.max} characters or less.`);
+  return value;
+}
+
+function numberField(
+  body: Record<string, any>,
+  key: string,
+  options: { fallback?: number; min?: number; max?: number; integer?: boolean } = {},
+) {
+  if (body[key] === undefined || body[key] === null || body[key] === "") return options.fallback;
+  const raw = Number(body[key]);
+  if (!Number.isFinite(raw)) badRequest(`${key} must be a valid number.`);
+  const value = options.integer ? Math.trunc(raw) : raw;
+  if (options.min !== undefined && value < options.min) badRequest(`${key} must be at least ${options.min}.`);
+  if (options.max !== undefined && value > options.max) badRequest(`${key} must be at most ${options.max}.`);
+  return value;
+}
+
+function dateField(body: Record<string, any>, key: string, required = false) {
+  const value = textField(body, key, { required, max: 10 });
+  if (value && !/^\d{4}-\d{2}-\d{2}$/.test(value)) badRequest(`${key} must be YYYY-MM-DD.`);
+  return value;
+}
+
+function enumField<T extends string>(
+  body: Record<string, any>,
+  key: string,
+  allowed: ReadonlySet<T>,
+  fallback?: T,
+) {
+  if (body[key] === undefined || body[key] === null || body[key] === "") return fallback;
+  const value = String(body[key]).trim() as T;
+  if (!allowed.has(value)) badRequest(`${key} is invalid.`);
+  return value;
+}
+
+const productTypes = new Set(["sale_only", "install_maintenance", "maintenance_existing", "external_maintenance", "needs_review"]);
+const installationStatuses = new Set(["pending_installation", "pending_external_service", "active", "completed", "cancelled"]);
+const remindTypes = new Set(["first", "second", "last"]);
+const bookingStatuses = new Set(["confirmed", "completed", "cancelled"]);
+const bookingTypes = new Set(["installation", "maintenance", "external_maintenance"]);
+
 function docData(doc: DocSnapshot): Record<string, any> & { id: string } {
   return { id: doc.id, ...doc.data() };
 }
@@ -376,24 +432,29 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.post("/api/customers", asyncRoute(async (req, res) => {
-    const name = String(req.body?.name || "").trim();
-    const phone = String(req.body?.phone || "").trim();
-    if (!name || !phone) {
-      res.status(400).json({ error: "Customer name and phone are required." });
-      return;
-    }
+    const body = (req.body || {}) as Record<string, any>;
+    const name = textField(body, "name", { required: true, max: 160 });
+    const phone = textField(body, "phone", { required: true, max: 40 });
     const id = await createOwned("customers", userId(req), {
-      ...req.body,
       name,
       phone,
-      city: req.body?.city || "",
-      source: req.body?.source || "manual",
+      city: textField(body, "city", { max: 120, fallback: "" }),
+      source: textField(body, "source", { max: 40, fallback: "manual" }),
+      notes: textField(body, "notes", { max: 2000, fallback: "" }),
     });
     res.status(201).json({ id });
   }));
 
   app.put("/api/customers/:id", asyncRoute(async (req, res) => {
-    if (!(await updateOwned("customers", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Customer was not found." });
+    const body = (req.body || {}) as Record<string, any>;
+    const payload = clean({
+      name: body.name !== undefined ? textField(body, "name", { required: true, max: 160 }) : undefined,
+      phone: body.phone !== undefined ? textField(body, "phone", { required: true, max: 40 }) : undefined,
+      city: body.city !== undefined ? textField(body, "city", { max: 120 }) : undefined,
+      source: body.source !== undefined ? textField(body, "source", { max: 40 }) : undefined,
+      notes: body.notes !== undefined ? textField(body, "notes", { max: 2000 }) : undefined,
+    });
+    if (!(await updateOwned("customers", req.params.id, userId(req), payload))) return res.status(404).json({ error: "Customer was not found." });
     res.json({ success: true });
   }));
 
@@ -528,23 +589,39 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.post("/api/products", asyncRoute(async (req, res) => {
+    const body = (req.body || {}) as Record<string, any>;
     const id = await createOwned("products", userId(req), {
-      ...req.body,
-      interval_months: Number(req.body?.interval_months || 1),
-      category: req.body?.category || "",
-      sku: req.body?.sku || "",
-      remind_text: req.body?.remind_text || "",
-      source: req.body?.source || "manual",
-      product_type: req.body?.product_type || "install_maintenance",
+      name: textField(body, "name", { required: true, max: 180 }),
+      interval_months: numberField(body, "interval_months", { fallback: 1, min: 1, max: 120, integer: true }),
+      category: textField(body, "category", { max: 120, fallback: "" }),
+      sku: textField(body, "sku", { max: 120, fallback: "" }),
+      remind_text: textField(body, "remind_text", { max: 2000, fallback: "" }),
+      source: textField(body, "source", { max: 40, fallback: "manual" }),
+      product_type: enumField(body, "product_type", productTypes, "install_maintenance"),
+      price: numberField(body, "price", { min: 0 }),
+      sale_price: numberField(body, "sale_price", { min: 0 }),
+      currency: textField(body, "currency", { max: 12, fallback: "SAR" }),
+      stock_quantity: numberField(body, "stock_quantity", { min: 0 }),
     });
     res.status(201).json({ id });
   }));
 
   app.put("/api/products/:id", asyncRoute(async (req, res) => {
-    if (!(await updateOwned("products", req.params.id, userId(req), {
-      ...req.body,
-      interval_months: req.body?.interval_months ? Number(req.body.interval_months) : undefined,
-    }))) return res.status(404).json({ error: "Product was not found." });
+    const body = (req.body || {}) as Record<string, any>;
+    const payload = clean({
+      name: body.name !== undefined ? textField(body, "name", { required: true, max: 180 }) : undefined,
+      interval_months: body.interval_months !== undefined ? numberField(body, "interval_months", { min: 1, max: 120, integer: true }) : undefined,
+      category: body.category !== undefined ? textField(body, "category", { max: 120 }) : undefined,
+      sku: body.sku !== undefined ? textField(body, "sku", { max: 120 }) : undefined,
+      remind_text: body.remind_text !== undefined ? textField(body, "remind_text", { max: 2000 }) : undefined,
+      source: body.source !== undefined ? textField(body, "source", { max: 40 }) : undefined,
+      product_type: body.product_type !== undefined ? enumField(body, "product_type", productTypes) : undefined,
+      price: body.price !== undefined ? numberField(body, "price", { min: 0 }) : undefined,
+      sale_price: body.sale_price !== undefined ? numberField(body, "sale_price", { min: 0 }) : undefined,
+      currency: body.currency !== undefined ? textField(body, "currency", { max: 12 }) : undefined,
+      stock_quantity: body.stock_quantity !== undefined ? numberField(body, "stock_quantity", { min: 0 }) : undefined,
+    });
+    if (!(await updateOwned("products", req.params.id, userId(req), payload))) return res.status(404).json({ error: "Product was not found." });
     res.json({ success: true });
   }));
 
@@ -559,22 +636,48 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.post("/api/installations", asyncRoute(async (req, res) => {
+    const body = (req.body || {}) as Record<string, any>;
     const id = await createOwned("installations", userId(req), {
-      ...req.body,
-      label: req.body?.label || "",
+      customer_id: textField(body, "customer_id", { required: true, max: 120 }),
+      customer_name: textField(body, "customer_name", { required: true, max: 180 }),
+      customer_phone: textField(body, "customer_phone", { required: true, max: 40 }),
+      product_id: textField(body, "product_id", { required: true, max: 120 }),
+      product_name: textField(body, "product_name", { required: true, max: 180 }),
+      product_sku: textField(body, "product_sku", { max: 120, fallback: "" }),
+      install_date: dateField(body, "install_date", true),
+      next_maintenance: dateField(body, "next_maintenance", true),
+      label: textField(body, "label", { max: 180, fallback: "" }),
       remind_count: 0,
-      next_remind_type: req.body?.next_remind_type || "first",
-      status: req.body?.status || "active",
+      next_remind_type: enumField(body, "next_remind_type", remindTypes, "first"),
+      status: enumField(body, "status", installationStatuses, "active"),
       completed_date: null,
       last_remind_at: null,
       last_remind_attempt_at: null,
-      source: req.body?.source || "manual",
+      source: textField(body, "source", { max: 40, fallback: "manual" }),
+      notes: textField(body, "notes", { max: 2000, fallback: "" }),
     });
     res.status(201).json({ id });
   }));
 
   app.put("/api/installations/:id", asyncRoute(async (req, res) => {
-    if (!(await updateOwned("installations", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Installation was not found." });
+    const body = (req.body || {}) as Record<string, any>;
+    const payload = clean({
+      customer_id: body.customer_id !== undefined ? textField(body, "customer_id", { required: true, max: 120 }) : undefined,
+      customer_name: body.customer_name !== undefined ? textField(body, "customer_name", { required: true, max: 180 }) : undefined,
+      customer_phone: body.customer_phone !== undefined ? textField(body, "customer_phone", { required: true, max: 40 }) : undefined,
+      product_id: body.product_id !== undefined ? textField(body, "product_id", { required: true, max: 120 }) : undefined,
+      product_name: body.product_name !== undefined ? textField(body, "product_name", { required: true, max: 180 }) : undefined,
+      product_sku: body.product_sku !== undefined ? textField(body, "product_sku", { max: 120 }) : undefined,
+      install_date: body.install_date !== undefined ? dateField(body, "install_date", true) : undefined,
+      next_maintenance: body.next_maintenance !== undefined ? dateField(body, "next_maintenance", true) : undefined,
+      label: body.label !== undefined ? textField(body, "label", { max: 180 }) : undefined,
+      next_remind_type: body.next_remind_type !== undefined ? enumField(body, "next_remind_type", remindTypes) : undefined,
+      status: body.status !== undefined ? enumField(body, "status", installationStatuses) : undefined,
+      completed_date: body.completed_date !== undefined ? dateField(body, "completed_date") : undefined,
+      source: body.source !== undefined ? textField(body, "source", { max: 40 }) : undefined,
+      notes: body.notes !== undefined ? textField(body, "notes", { max: 2000 }) : undefined,
+    });
+    if (!(await updateOwned("installations", req.params.id, userId(req), payload))) return res.status(404).json({ error: "Installation was not found." });
     res.json({ success: true });
   }));
 
@@ -597,19 +700,27 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.post("/api/technicians", asyncRoute(async (req, res) => {
+    const body = (req.body || {}) as Record<string, any>;
     const id = await createOwned("technicians", userId(req), {
-      ...req.body,
-      specialty: req.body?.specialty || "",
-      max_daily: Number(req.body?.max_daily || 4),
+      name: textField(body, "name", { required: true, max: 160 }),
+      phone: textField(body, "phone", { max: 40, fallback: "" }),
+      specialty: textField(body, "specialty", { max: 160, fallback: "" }),
+      max_daily: numberField(body, "max_daily", { fallback: 4, min: 1, max: 30, integer: true }),
+      notes: textField(body, "notes", { max: 2000, fallback: "" }),
     });
     res.status(201).json({ id });
   }));
 
   app.put("/api/technicians/:id", asyncRoute(async (req, res) => {
-    if (!(await updateOwned("technicians", req.params.id, userId(req), {
-      ...req.body,
-      max_daily: req.body?.max_daily ? Number(req.body.max_daily) : undefined,
-    }))) return res.status(404).json({ error: "Technician was not found." });
+    const body = (req.body || {}) as Record<string, any>;
+    const payload = clean({
+      name: body.name !== undefined ? textField(body, "name", { required: true, max: 160 }) : undefined,
+      phone: body.phone !== undefined ? textField(body, "phone", { max: 40 }) : undefined,
+      specialty: body.specialty !== undefined ? textField(body, "specialty", { max: 160 }) : undefined,
+      max_daily: body.max_daily !== undefined ? numberField(body, "max_daily", { min: 1, max: 30, integer: true }) : undefined,
+      notes: body.notes !== undefined ? textField(body, "notes", { max: 2000 }) : undefined,
+    });
+    if (!(await updateOwned("technicians", req.params.id, userId(req), payload))) return res.status(404).json({ error: "Technician was not found." });
     res.json({ success: true });
   }));
 
@@ -628,23 +739,56 @@ export function registerCrmApiRoutes(app: express.Express) {
 
   app.post("/api/bookings", asyncRoute(async (req, res) => {
     const uid = userId(req);
-    const technicianId = String(req.body?.technician_id || "").trim();
+    const body = (req.body || {}) as Record<string, any>;
+    const technicianId = textField(body, "technician_id", { max: 120, fallback: "" }) || "";
     if (technicianId && !(await getOwned("technicians", technicianId, uid))) {
       res.status(400).json({ error: "Technician was not found." });
       return;
     }
     const id = await createOwned("bookings", uid, {
-      ...req.body,
-      technician_id: technicianId || req.body?.technician_id,
-      status: req.body?.status || "confirmed",
-      booking_type: req.body?.booking_type || "maintenance",
-      source: req.body?.source || "manual",
+      installation_id: textField(body, "installation_id", { max: 120, fallback: "" }),
+      customer_id: textField(body, "customer_id", { max: 120, fallback: "" }),
+      customer_name: textField(body, "customer_name", { required: true, max: 180 }),
+      customer_phone: textField(body, "customer_phone", { max: 40, fallback: "" }),
+      product_id: textField(body, "product_id", { max: 120, fallback: "" }),
+      product_name: textField(body, "product_name", { required: true, max: 180 }),
+      technician_id: technicianId || null,
+      tech_name: textField(body, "tech_name", { required: true, max: 180 }),
+      date: dateField(body, "date", true),
+      scheduled_time: textField(body, "scheduled_time", { required: true, max: 40 }),
+      status: enumField(body, "status", bookingStatuses, "confirmed"),
+      booking_type: enumField(body, "booking_type", bookingTypes, "maintenance"),
+      source: textField(body, "source", { max: 40, fallback: "manual" }),
+      notes: textField(body, "notes", { max: 2000, fallback: "" }),
     });
     res.status(201).json({ id });
   }));
 
   app.put("/api/bookings/:id", asyncRoute(async (req, res) => {
-    if (!(await updateOwned("bookings", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Booking was not found." });
+    const uid = userId(req);
+    const body = (req.body || {}) as Record<string, any>;
+    const technicianId = body.technician_id !== undefined ? textField(body, "technician_id", { max: 120 }) : undefined;
+    if (technicianId && !(await getOwned("technicians", technicianId, uid))) {
+      res.status(400).json({ error: "Technician was not found." });
+      return;
+    }
+    const payload = clean({
+      installation_id: body.installation_id !== undefined ? textField(body, "installation_id", { max: 120 }) : undefined,
+      customer_id: body.customer_id !== undefined ? textField(body, "customer_id", { max: 120 }) : undefined,
+      customer_name: body.customer_name !== undefined ? textField(body, "customer_name", { required: true, max: 180 }) : undefined,
+      customer_phone: body.customer_phone !== undefined ? textField(body, "customer_phone", { max: 40 }) : undefined,
+      product_id: body.product_id !== undefined ? textField(body, "product_id", { max: 120 }) : undefined,
+      product_name: body.product_name !== undefined ? textField(body, "product_name", { required: true, max: 180 }) : undefined,
+      technician_id: technicianId,
+      tech_name: body.tech_name !== undefined ? textField(body, "tech_name", { required: true, max: 180 }) : undefined,
+      date: body.date !== undefined ? dateField(body, "date", true) : undefined,
+      scheduled_time: body.scheduled_time !== undefined ? textField(body, "scheduled_time", { required: true, max: 40 }) : undefined,
+      status: body.status !== undefined ? enumField(body, "status", bookingStatuses) : undefined,
+      booking_type: body.booking_type !== undefined ? enumField(body, "booking_type", bookingTypes) : undefined,
+      source: body.source !== undefined ? textField(body, "source", { max: 40 }) : undefined,
+      notes: body.notes !== undefined ? textField(body, "notes", { max: 2000 }) : undefined,
+    });
+    if (!(await updateOwned("bookings", req.params.id, uid, payload))) return res.status(404).json({ error: "Booking was not found." });
     res.json({ success: true });
   }));
 
@@ -663,9 +807,13 @@ export function registerCrmApiRoutes(app: express.Express) {
 
   app.put("/api/settings", asyncRoute(async (req, res) => {
     const uid = userId(req);
+    const body = (req.body || {}) as Record<string, any>;
     await adminDb.collection("settings").doc(uid).set({
       ...defaultSettings,
-      ...req.body,
+      techs: numberField(body, "techs", { fallback: defaultSettings.techs, min: 1, max: 100, integer: true }),
+      jobs_per_tech: numberField(body, "jobs_per_tech", { fallback: defaultSettings.jobs_per_tech, min: 1, max: 50, integer: true }),
+      response_rate: numberField(body, "response_rate", { fallback: defaultSettings.response_rate, min: 0, max: 100, integer: true }),
+      maxDaily: numberField(body, "maxDaily", { fallback: defaultSettings.maxDaily, min: 1, max: 500, integer: true }),
       createdBy: uid,
       updatedAt: nowIso(),
     }, { merge: true });

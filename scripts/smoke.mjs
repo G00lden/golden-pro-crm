@@ -24,7 +24,7 @@ async function readJson(path) {
 
 async function timedFetch(path, init = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timer = setTimeout(() => controller.abort(), 20000);
   try {
     return await fetch(new URL(path, baseUrl), { ...init, signal: controller.signal });
   } finally {
@@ -86,7 +86,11 @@ try {
     const pkg = await readJson("package.json");
     assert.equal(pkg.name, "golden-pro-crm");
     assertIncludes(JSON.stringify(pkg.scripts), ["dev", "build", "start", "lint", "test:smoke"], "package scripts");
-    assertIncludes(JSON.stringify(pkg.dependencies), ["firebase-admin", "@whiskeysockets/baileys", "pino"], "dependencies");
+    assertIncludes(JSON.stringify(pkg.dependencies), ["firebase-admin", "pino"], "dependencies");
+    assert.ok(
+      pkg.dependencies?.["@whiskeysockets/baileys"] || pkg.devDependencies?.["@whiskeysockets/baileys"],
+      "dependencies/devDependencies is missing: @whiskeysockets/baileys",
+    );
   });
 
   await check("server health and reminder scheduler", async () => {

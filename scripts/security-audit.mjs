@@ -2,6 +2,10 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { readProjectEnv, root, masked } from "./env-utils.mjs";
 
+if (process.argv.includes("--production") && !process.env.ENV_FILE) {
+  process.env.ENV_FILE = ".env.production";
+}
+
 const env = readProjectEnv();
 const findings = [];
 
