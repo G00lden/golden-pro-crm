@@ -73,34 +73,43 @@ npm run dev
 
 ---
 
-## آخر تحديث: 2026-06-18 — Multi-agent setup (Claude Code)
+## آخر تحديث: 2026-06-19 — Supervisor Sprint #2 kickoff
 
 ### حالة Git
 - المستودع البعيد: https://github.com/G00lden/golden-pro-crm (private)
-- الفرع: `main` — last commit `12e9c90` (payment fields + manual WhatsApp send WIP)
-- Working tree نظيف. الفروع المحلية والبعيدة متزامنة.
+- آخر commit في `main`: `e3853dc` — security: harden daily-use readiness and backups
+- Working tree نظيف على main. مستعد لإستقبال الـ branches الجديدة.
 
 ### حالة Dev Server
-- يعمل حاليًا على http://localhost:3000 (PID قابل للتغيير).
-- `/api/health` يرجع `status: ok`، المنطقة الزمنية `Asia/Riyadh`.
-- جدولة Cron مفعّلة: التذكيرات `*/10`، مزامنة Salla `*/15`، تنبيه الفنيين `*/10`.
-- وضع outbound: `code` (الإرسال يتطلب كود تفعيل من الواجهة).
+- يعمل على http://localhost:3000 — `/api/health` = ok
+- واتساب: غير متصل (يحتاج QR)، outbound mode: `code`
+- التذكيرات: cron مفعّل كل 10 دقائق، لكنها متوقفة لأن واتساب غير متصل
+- Salla: متكامل، Cron مزامنة كل 15 دقيقة
 
-### الوكلاء الثلاثة على نفس المجلد
-- اقرأ [AGENTS.md](../AGENTS.md) في جذر المشروع — هذا هو "العقد" بين Codex / Claude Code / Hermes.
-- ابدأ كل جلسة بـ: `git fetch && git pull --rebase` ثم اقرأ هذا الملف.
-- انهِ كل جلسة بـ: `git add -A && git commit -m "<msg>" && git push`.
-- لتشغيل الثلاثة دفعة واحدة: `open-all-agents.cmd` في جذر المشروع.
+### Supervisor snapshot (2026-06-19)
+```
+Lint:        ✓
+Build:       ✓ (skipped by default but verified)
+Secrets:     ✓ (0 hits)
+npm audit:   critical=1 high=2 (both baileys/protobuf transitive)
+Checklist:   10/71 done, 10 in-progress, 51 todo, 9 hard-gate remaining
+Open PRs:    0
+```
 
-### آخر تغييرات WIP (commit 12e9c90)
-- إضافة حقول الدفع (طريقة، نسبة المقدم/النهائي، البنك، IBAN) على Customer/Quote.
-- مسار `/api/whatsapp/send` يدوي مع تسجيل في `whatsapp_messages`.
-- تعديلات schema في SQLite + Supabase adapter لتطابق.
-- تعديلات UI في `Quotes.tsx` و`WhatsAppConsole.tsx`.
+### Sprint #2 — 3 task briefs written (docs/templates/)
 
-### "أكمل من حيث وقفت" — أولويات الوكيل التالي
-1. **اختبر مسار `/api/whatsapp/send` يدويًا** من `WhatsAppConsole.tsx` بعد ربط QR.
-2. **اربط حقول الدفع الجديدة في `Quotes.tsx`** بقالب PDF عرض السعر (`public/quotation-template.html`).
-3. **شغّل `npm run lint`** قبل أي commit جديد — الـTypeScript يتحقق من حقول الدفع الجديدة في `src/api.ts`.
-4. **إذا تعطل WhatsApp**: امسح `.wa-session/` ثم أعد فتح صفحة الكونسول لإعادة ربط QR.
-5. **قبل push لـmain**: `npm run lint && npm run build` يجب أن يمرّا.
+| # | الوكيل | البنود | الفرع |
+|---|--------|--------|-------|
+| 1 | **Codex** | `2.5 🔒` Rate limiting (per-UID) + `2.6 🔒` Zod input validation | `codex/security-rate-limit-zod` |
+| 2 | **Claude Code** | `5.9` GTM container + `5.10` GA4 + `5.11` Meta Pixel | `claude/ad-tracking-gtm-pixels` |
+| 3 | **Hermes** | `3.1` Arabic copy audit + `5.31` Brand voice guideline | `hermes/arabic-copy-brand` |
+
+### أبدا مع أي وكيل؟
+كل task brief مكتوب كـ `docs/templates/task-brief-<agent>-sprint2.md`. افتح الوكيل المطلوب والصق الـ brief كأول رسالة.
+
+### أولويات المحادثة (next-in-line بعد Sprint #2)
+- `1.6` Dockerfile produces runnable image
+- `1.7` Cloud Run + VPS deploy scripts
+- `5.12-5.15` باقي pixels (TikTok, Snap, Google Ads, Clarity)
+- `4.1` Payment gateway (Tap or Moyasar)
+- `4.3` Terms of Service + Privacy Policy pages

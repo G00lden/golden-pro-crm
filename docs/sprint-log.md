@@ -13,16 +13,20 @@ Format per sprint:
 
 ---
 
-## Sprint #1 — 2026-06-18 — PENDING
+---
 
-**Goal:** First commercial-readiness sprint. Lock down build + minimum security baseline + pricing definition so we can show a real demo to a paying pilot.
+## Sprint #2 — 2026-06-19 — IN PROGRESS
+
+**Goal:** Secure the API surface (rate limiting + input validation), wire client-side ad tracking (GTM + GA4 + Meta Pixel), and polish Arabic UX copy.
 
 **Picks:**
-- `1.2` Build passes — any agent — pending
-- `4.1` Pricing tiers defined — supervisor + hermes — pending
-- `2.6 🔒` Input validation with zod — codex — pending
-- `2.5 🔒` Rate limiting — codex — pending
-- `3.1` Arabic copy review — hermes — pending
+- `2.5 🔒` Rate limiting (per-IP + per-UID) — **Codex** — in progress
+- `2.6 🔒` Zod input validation on all public endpoints — **Codex** — in progress
+- `5.9` GTM container loaded — **Claude Code** — in progress
+- `5.10` Google Analytics 4 — **Claude Code** — in progress
+- `5.11` Meta Pixel — **Claude Code** — in progress
+- `3.1` Arabic copy review — **Hermes** — in progress
+- `5.31` Brand voice guideline — **Hermes** — in progress
 
 **Outcome:** _(filled at sprint end)_
 
