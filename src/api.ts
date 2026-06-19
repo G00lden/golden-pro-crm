@@ -486,6 +486,15 @@ export type Quote = {
   payment_account?: string;
   payment_iban?: string;
   payment_note?: string;
+  invoice_status?: "not_issued" | "issued";
+  invoice_number?: string;
+  invoice_issued_at?: string;
+  invoice_seller_name?: string;
+  invoice_vat_number?: string;
+  invoice_vat_rate?: number;
+  invoice_vat_amount?: number;
+  invoice_qr_payload?: string;
+  invoice_phase?: string;
   items: QuoteItem[];
   notes?: string;
   terms?: string;
@@ -1242,6 +1251,20 @@ function quotePaymentFields(data: QuoteInput, existing?: Quote) {
   };
 }
 
+function quoteInvoiceFields(data: QuoteInput, existing?: Quote) {
+  return {
+    invoice_status: data.invoice_status || existing?.invoice_status || "not_issued",
+    invoice_number: String(data.invoice_number || existing?.invoice_number || "").trim(),
+    invoice_issued_at: String(data.invoice_issued_at || existing?.invoice_issued_at || "").trim(),
+    invoice_seller_name: String(data.invoice_seller_name || existing?.invoice_seller_name || "").trim(),
+    invoice_vat_number: String(data.invoice_vat_number || existing?.invoice_vat_number || "").trim(),
+    invoice_vat_rate: Number(data.invoice_vat_rate ?? existing?.invoice_vat_rate ?? 15),
+    invoice_vat_amount: Number(data.invoice_vat_amount ?? existing?.invoice_vat_amount ?? 0),
+    invoice_qr_payload: String(data.invoice_qr_payload || existing?.invoice_qr_payload || "").trim(),
+    invoice_phase: String(data.invoice_phase || existing?.invoice_phase || "").trim(),
+  };
+}
+
 function quoteStats(quotes: Quote[]): QuoteStats {
   return {
     total: quotes.length,
@@ -1292,6 +1315,7 @@ function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quo
     createdAt: existing?.createdAt || now,
     updatedAt: now,
     ...quotePaymentFields(data, existing),
+    ...quoteInvoiceFields(data, existing),
     ...totals,
   };
 }
@@ -1388,8 +1412,11 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
     }).then(() => undefined);
   }
   const items = normalizeQuoteItems(data.items);
+  const quoteRef = doc(db, "quotes", id);
+  const existingSnap = await getDoc(quoteRef);
+  const existing = existingSnap.exists() ? ({ id, ...existingSnap.data() } as Quote) : undefined;
   return wrap(
-    () => updateDoc(doc(db, "quotes", id), {
+    () => updateDoc(quoteRef, {
       customer_id: data.customer_id || null,
       customer_name: String(data.customer_name || "").trim(),
       customer_phone: String(data.customer_phone || "").trim(),
@@ -1401,6 +1428,7 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
       follow_up_date: data.follow_up_date || null,
       currency: data.currency || "SAR",
       ...quotePaymentFields(data),
+      ...quoteInvoiceFields(data, existing),
       items,
       notes: String(data.notes || "").trim(),
       terms: String(data.terms || "").trim(),

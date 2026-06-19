@@ -206,6 +206,20 @@ function quotePaymentFields(row: Record<string, any>, existing?: Record<string, 
   };
 }
 
+function quoteInvoiceFields(row: Record<string, any>, existing?: Record<string, any>) {
+  return {
+    invoice_status: row.invoice_status || existing?.invoice_status || "not_issued",
+    invoice_number: String(row.invoice_number || existing?.invoice_number || "").trim(),
+    invoice_issued_at: String(row.invoice_issued_at || existing?.invoice_issued_at || "").trim(),
+    invoice_seller_name: String(row.invoice_seller_name || existing?.invoice_seller_name || "").trim(),
+    invoice_vat_number: String(row.invoice_vat_number || existing?.invoice_vat_number || "").trim(),
+    invoice_vat_rate: Number(row.invoice_vat_rate ?? existing?.invoice_vat_rate ?? 15),
+    invoice_vat_amount: Number(row.invoice_vat_amount ?? existing?.invoice_vat_amount ?? 0),
+    invoice_qr_payload: String(row.invoice_qr_payload || existing?.invoice_qr_payload || "").trim(),
+    invoice_phase: String(row.invoice_phase || existing?.invoice_phase || "").trim(),
+  };
+}
+
 function normalizeQuote(row: Record<string, any>): Record<string, any> {
   const items = normalizeQuoteItems(row.items);
   const totals = quoteTotals(items, row.discount, row.tax);
@@ -223,6 +237,7 @@ function normalizeQuote(row: Record<string, any>): Record<string, any> {
     confirmed_at: row.confirmed_at || null,
     items,
     ...quotePaymentFields(row),
+    ...quoteInvoiceFields(row),
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
     tax: Number(row.tax ?? totals.tax),
@@ -320,6 +335,7 @@ function quotePayload(body: Record<string, any>, customer: Record<string, any>, 
     terms: String(body.terms || "").trim(),
     confirmed_at: status === "confirmed" ? existing?.confirmed_at || now : existing?.confirmed_at || null,
     ...quotePaymentFields(body, existing),
+    ...quoteInvoiceFields(body, existing),
     ...totals,
   });
 }

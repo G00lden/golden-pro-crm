@@ -60,6 +60,9 @@ function isValidColumn(field: string): boolean {
     "payment_method", "payment_down_percent", "payment_final_percent",
     "payment_down_text", "payment_final_text", "payment_bank",
     "payment_account", "payment_iban", "payment_note",
+    "invoice_status", "invoice_number", "invoice_issued_at",
+    "invoice_seller_name", "invoice_vat_number", "invoice_vat_rate",
+    "invoice_vat_amount", "invoice_qr_payload", "invoice_phase",
     "id", "customer_id", "customer_name", "customer_phone",
     "customer_city",
     "product_id", "product_name", "product_sku",
@@ -197,6 +200,15 @@ const fieldToColumn: Record<string, string> = {
   paymentAccount: "payment_account",
   paymentIban: "payment_iban",
   paymentNote: "payment_note",
+  invoiceStatus: "invoice_status",
+  invoiceNumber: "invoice_number",
+  invoiceIssuedAt: "invoice_issued_at",
+  invoiceSellerName: "invoice_seller_name",
+  invoiceVatNumber: "invoice_vat_number",
+  invoiceVatRate: "invoice_vat_rate",
+  invoiceVatAmount: "invoice_vat_amount",
+  invoiceQrPayload: "invoice_qr_payload",
+  invoicePhase: "invoice_phase",
 };
 
 const jsonColumns = new Set([

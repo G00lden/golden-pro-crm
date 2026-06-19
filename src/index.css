@@ -1345,6 +1345,60 @@ main {
   font-size: 12px;
 }
 
+.tax-invoice-form {
+  gap: 14px;
+}
+
+.invoice-issue-note,
+.invoice-total-preview {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(40, 199, 160, 0.22);
+  border-radius: 8px;
+  background: rgba(40, 199, 160, 0.08);
+}
+
+.invoice-issue-note {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+}
+
+.invoice-issue-note p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.invoice-total-preview {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.invoice-total-preview article {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0c1118;
+}
+
+.invoice-total-preview span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.invoice-total-preview strong {
+  color: var(--gold-2);
+}
+
+.field-error {
+  color: #ff9a9a;
+  font-size: 11px;
+}
+
 .textarea.compact {
   min-height: 72px;
 }
@@ -1525,6 +1579,45 @@ main {
 
 .quote-client-grid strong {
   color: #10212c;
+}
+
+.invoice-header-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) 120px;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.invoice-header-grid article {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid #d7e0ea;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.invoice-header-grid span {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.invoice-header-grid strong {
+  color: #10212c;
+  font-size: 12px;
+}
+
+.zatca-qr-card {
+  align-items: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.zatca-qr-card img {
+  width: 88px;
+  height: 88px;
+  image-rendering: crisp-edges;
 }
 
 .quote-doc-table {
@@ -2029,6 +2122,8 @@ main {
   }
 
   .quote-client-grid,
+  .invoice-header-grid,
+  .invoice-total-preview,
   .quote-payment-summary,
   .quote-payment-grid,
   .quote-bank-box {
@@ -2417,4 +2512,3 @@ main {
 .lp-footer a:hover { color: var(--brand-gold); }
 .lp-admin-link { font-size: 12px; opacity: 0.7; }
 @media (max-width: 800px) { .lp-footer-grid { grid-template-columns: 1fr; } }
-

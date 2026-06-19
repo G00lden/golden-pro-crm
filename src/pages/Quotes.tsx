@@ -10,13 +10,16 @@ import {
   MessageCircle,
   Plus,
   Printer,
+  QrCode,
   RefreshCcw,
+  ReceiptText,
   Search,
   Send,
   Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import QRCode from "qrcode";
 import * as api from "../api";
 
 type Notifier = (message: string, ok?: boolean) => void;
@@ -146,6 +149,77 @@ const paymentForQuote = (quote: api.Quote) => ({
   note: quote.payment_note || defaultPayment.note,
 });
 
+const sellerDefaults = {
+  name: import.meta.env.VITE_ZATCA_SELLER_NAME || "Breexe Pro",
+  vatNumber: import.meta.env.VITE_ZATCA_VAT_NUMBER || "",
+};
+
+const roundMoney = (value: number) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+
+const invoiceNumber = (quote: api.Quote) => {
+  const source = quote.quote_number.replace(/^QT-/, "");
+  return `INV-${source || new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+};
+
+const toDatetimeLocal = (value = new Date().toISOString()) => {
+  const d = new Date(value);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+};
+
+const zatcaTimestamp = (value?: string) => new Date(value || Date.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+function zatcaTlvBase64(fields: Array<[number, string]>) {
+  const bytes = fields.flatMap(([tag, value]) => {
+    const encoded = Array.from(new TextEncoder().encode(value));
+    if (encoded.length > 255) throw new Error("قيمة QR أطول من الحد المسموح في TLV.");
+    return [tag, encoded.length, ...encoded];
+  });
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function buildZatcaQrPayload(data: {
+  sellerName: string;
+  vatNumber: string;
+  issuedAt: string;
+  total: number;
+  vatAmount: number;
+}) {
+  return zatcaTlvBase64([
+    [1, data.sellerName],
+    [2, data.vatNumber],
+    [3, zatcaTimestamp(data.issuedAt)],
+    [4, roundMoney(data.total).toFixed(2)],
+    [5, roundMoney(data.vatAmount).toFixed(2)],
+  ]);
+}
+
+function useQrDataUrl(payload?: string) {
+  const [dataUrl, setDataUrl] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!payload) {
+      setDataUrl("");
+      return;
+    }
+    QRCode.toDataURL(payload, { width: 180, margin: 1, errorCorrectionLevel: "M" })
+      .then((value) => {
+        if (!cancelled) setDataUrl(value);
+      })
+      .catch(() => {
+        if (!cancelled) setDataUrl("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [payload]);
+
+  return dataUrl;
+}
+
 function useAsyncData<T>(fetcher: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
@@ -200,18 +274,22 @@ function quoteSummaryRows(stats: api.QuoteStats) {
 }
 
 function quoteShareText(quote: api.Quote) {
+  const isInvoice = quote.invoice_status === "issued";
   const lines = quote.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, quote.currency)}`);
   const payment = paymentForQuote(quote);
   return [
-    "عرض سعر من Breexe Pro",
-    `رقم العرض: ${quote.quote_number}`,
+    `${isInvoice ? "فاتورة ضريبية" : "عرض سعر"} من Breexe Pro`,
+    `${isInvoice ? "رقم الفاتورة" : "رقم العرض"}: ${isInvoice ? quote.invoice_number || invoiceNumber(quote) : quote.quote_number}`,
     quote.title || "عرض سعر",
     `العميل: ${quote.customer_name}`,
-    quote.valid_until ? `صالح حتى: ${quote.valid_until}` : "",
+    isInvoice && quote.invoice_vat_number ? `الرقم الضريبي: ${quote.invoice_vat_number}` : "",
+    isInvoice && quote.invoice_issued_at ? `تاريخ الفاتورة: ${zatcaTimestamp(quote.invoice_issued_at)}` : "",
+    !isInvoice && quote.valid_until ? `صالح حتى: ${quote.valid_until}` : "",
     "",
     ...lines,
     "",
     `الإجمالي: ${money(quote.total, quote.currency)}`,
+    isInvoice ? `ضريبة القيمة المضافة: ${money(quote.invoice_vat_amount || quote.tax || 0, quote.currency)}` : "",
     `طريقة الدفع: ${payment.method}`,
     `الدفعة الأولى ${payment.downPercent}%: ${money((quote.total || 0) * payment.downPercent / 100, quote.currency)}`,
     `الدفعة النهائية ${payment.finalPercent}%: ${money((quote.total || 0) * payment.finalPercent / 100, quote.currency)}`,
@@ -224,6 +302,7 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
   const [status, setStatus] = useState("all");
   const [editing, setEditing] = useState<api.Quote | null>(null);
   const [preview, setPreview] = useState<api.Quote | null>(null);
+  const [issuingInvoice, setIssuingInvoice] = useState<api.Quote | null>(null);
   const [creating, setCreating] = useState(false);
   const [sendingQuoteId, setSendingQuoteId] = useState("");
   const quotes = useAsyncData(() => api.getQuotes({ search, status }), [search, status]);
@@ -293,7 +372,7 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
   const printQuote = (quote: api.Quote, asPdf = false) => {
     setPreview(quote);
     const previousTitle = document.title;
-    document.title = `عرض سعر إلى ${safeFilePart(quote.customer_name)}`;
+    document.title = `${quote.invoice_status === "issued" ? "فاتورة ضريبية" : "عرض سعر"} إلى ${safeFilePart(quote.customer_name)}`;
     document.body.classList.add("quote-print-mode");
     const restore = () => {
       document.title = previousTitle;
@@ -303,6 +382,39 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
     window.addEventListener("afterprint", restore);
     window.setTimeout(() => window.print(), 120);
     notify(asPdf ? "اختر حفظ كـ PDF من نافذة الطباعة" : "تم تجهيز عرض السعر للطباعة A4");
+  };
+
+  const issueTaxInvoice = async (quote: api.Quote, input: TaxInvoiceInput) => {
+    const base = Math.max(0, Number(quote.subtotal || 0) - Number(quote.discount || 0));
+    const vatRate = Number(input.vatRate || 15);
+    const vatAmount = roundMoney(input.keepExistingTax && quote.tax > 0 ? Number(quote.tax) : base * vatRate / 100);
+    const totalWithVat = roundMoney(base + vatAmount);
+    const issuedAt = new Date(input.issuedAt).toISOString();
+    const qrPayload = buildZatcaQrPayload({
+      sellerName: input.sellerName.trim(),
+      vatNumber: input.vatNumber.trim(),
+      issuedAt,
+      total: totalWithVat,
+      vatAmount,
+    });
+
+    await api.updateQuote(quote.id, {
+      ...quote,
+      status: "confirmed",
+      tax: vatAmount,
+      invoice_status: "issued",
+      invoice_number: input.invoiceNumber.trim(),
+      invoice_issued_at: issuedAt,
+      invoice_seller_name: input.sellerName.trim(),
+      invoice_vat_number: input.vatNumber.trim(),
+      invoice_vat_rate: vatRate,
+      invoice_vat_amount: vatAmount,
+      invoice_qr_payload: qrPayload,
+      invoice_phase: "zatca_phase1_tlv_tags_1_5",
+    });
+    notify("تم تحويل عرض السعر إلى فاتورة ضريبية مع QR");
+    setIssuingInvoice(null);
+    await refreshAll();
   };
 
   const sendQuoteWhatsApp = async (quote: api.Quote) => {
@@ -409,6 +521,7 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                   <span className="badge muted"><CalendarDays size={12} /> {quote.issue_date}</span>
                   {quote.valid_until && <span className="badge muted">صالح حتى {quote.valid_until}</span>}
                   {quote.follow_up_date && <span className="badge warn">متابعة {quote.follow_up_date}</span>}
+                  {quote.invoice_status === "issued" && <span className="badge success"><ReceiptText size={12} /> {quote.invoice_number}</span>}
                 </div>
               </div>
               <div className="quote-total-box">
@@ -419,11 +532,20 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                 <button className="icon-btn success" type="button" title="تأكيد" onClick={() => setQuoteStatus(quote, "confirmed")}>
                   <CheckCircle2 size={15} />
                 </button>
+                <button className="icon-btn success" type="button" title="تحويل لفاتورة ضريبية" onClick={() => setIssuingInvoice(quote)}>
+                  <ReceiptText size={15} />
+                </button>
                 <button className="icon-btn" type="button" title="متابعة" onClick={() => setQuoteStatus(quote, "follow_up")}>
                   <Clock3 size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="طباعة" onClick={() => window.print()}>
+                <button className="icon-btn" type="button" title="طباعة A4" onClick={() => printQuote(quote)}>
                   <Printer size={15} />
+                </button>
+                <button className="icon-btn" type="button" title="تصدير PDF" onClick={() => printQuote(quote, true)}>
+                  <Download size={15} />
+                </button>
+                <button className="icon-btn success" type="button" title="إرسال واتساب" onClick={() => sendQuoteWhatsApp(quote)} disabled={sendingQuoteId === quote.id}>
+                  <MessageCircle size={15} />
                 </button>
                 <button className="icon-btn" type="button" title="معاينة" onClick={() => setPreview(quote)}>
                   <Eye size={15} />
@@ -460,63 +582,316 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
           />
         </QuoteModal>
       )}
+      {issuingInvoice && (
+        <QuoteModal title={`تحويل ${issuingInvoice.quote_number} إلى فاتورة ضريبية`} onClose={() => setIssuingInvoice(null)}>
+          <TaxInvoiceForm
+            quote={issuingInvoice}
+            onCancel={() => setIssuingInvoice(null)}
+            onIssue={(input) => issueTaxInvoice(issuingInvoice, input)}
+          />
+        </QuoteModal>
+      )}
       {preview && (
         <QuoteModal title={`معاينة ${preview.quote_number}`} onClose={() => setPreview(null)}>
-          <QuotePreview quote={preview} onCopy={() => copyQuote(preview)} />
+          <QuotePreview
+            quote={preview}
+            onCopy={() => copyQuote(preview)}
+            onPrint={() => printQuote(preview)}
+            onExport={() => printQuote(preview, true)}
+            onWhatsApp={() => sendQuoteWhatsApp(preview)}
+            sending={sendingQuoteId === preview.id}
+          />
         </QuoteModal>
       )}
     </div>
   );
 }
 
-function QuotePreview({ quote, onCopy }: { quote: api.Quote; onCopy: () => void }) {
+type TaxInvoiceInput = {
+  sellerName: string;
+  vatNumber: string;
+  invoiceNumber: string;
+  issuedAt: string;
+  vatRate: number;
+  keepExistingTax: boolean;
+};
+
+function TaxInvoiceForm({
+  quote,
+  onCancel,
+  onIssue,
+}: {
+  quote: api.Quote;
+  onCancel: () => void;
+  onIssue: (input: TaxInvoiceInput) => Promise<void>;
+}) {
+  const base = Math.max(0, Number(quote.subtotal || 0) - Number(quote.discount || 0));
+  const [sellerName, setSellerName] = useState(quote.invoice_seller_name || sellerDefaults.name);
+  const [vatNumber, setVatNumber] = useState(quote.invoice_vat_number || sellerDefaults.vatNumber);
+  const [number, setNumber] = useState(quote.invoice_number || invoiceNumber(quote));
+  const [issuedAt, setIssuedAt] = useState(toDatetimeLocal(quote.invoice_issued_at || new Date().toISOString()));
+  const [vatRate, setVatRate] = useState(String(quote.invoice_vat_rate ?? 15));
+  const [keepExistingTax, setKeepExistingTax] = useState(Boolean(quote.tax > 0));
+  const [saving, setSaving] = useState(false);
+  const computedVat = roundMoney(keepExistingTax && quote.tax > 0 ? Number(quote.tax) : base * Number(vatRate || 0) / 100);
+  const invoiceTotal = roundMoney(base + computedVat);
+  const vatValid = /^\d{15}$/.test(vatNumber.trim());
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!sellerName.trim() || !vatValid || !number.trim()) return;
+    setSaving(true);
+    try {
+      await onIssue({
+        sellerName,
+        vatNumber,
+        invoiceNumber: number,
+        issuedAt,
+        vatRate: Number(vatRate || 15),
+        keepExistingTax,
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="form tax-invoice-form" onSubmit={submit}>
+      <div className="invoice-issue-note">
+        <QrCode size={18} />
+        <div>
+          <strong>QR الزكاة والضريبة</strong>
+          <p>سيتم توليد TLV Base64 للحقول الأساسية: اسم البائع، الرقم الضريبي، وقت الفاتورة، الإجمالي شامل الضريبة، وقيمة الضريبة.</p>
+        </div>
+      </div>
+      <div className="form-grid">
+        <label className="field">
+          <span>اسم البائع المسجل</span>
+          <input className="input" value={sellerName} onChange={(event) => setSellerName(event.target.value)} required />
+        </label>
+        <label className="field">
+          <span>الرقم الضريبي VAT / TRN</span>
+          <input className="input" dir="ltr" value={vatNumber} onChange={(event) => setVatNumber(event.target.value.replace(/\D/g, "").slice(0, 15))} placeholder="15 digits" required />
+          {!vatValid && <small className="field-error">يجب أن يكون الرقم الضريبي 15 رقماً.</small>}
+        </label>
+      </div>
+      <div className="form-grid">
+        <label className="field">
+          <span>رقم الفاتورة</span>
+          <input className="input" dir="ltr" value={number} onChange={(event) => setNumber(event.target.value)} required />
+        </label>
+        <label className="field">
+          <span>تاريخ ووقت الإصدار</span>
+          <input className="input" type="datetime-local" value={issuedAt} onChange={(event) => setIssuedAt(event.target.value)} required />
+        </label>
+      </div>
+      <div className="form-grid">
+        <label className="field">
+          <span>نسبة الضريبة</span>
+          <input className="input" type="number" min={0} step="0.01" value={vatRate} onChange={(event) => setVatRate(event.target.value)} disabled={keepExistingTax && quote.tax > 0} />
+        </label>
+        <label className="field checkbox-field">
+          <span>استخدام الضريبة الموجودة في العرض</span>
+          <input type="checkbox" checked={keepExistingTax} disabled={!quote.tax} onChange={(event) => setKeepExistingTax(event.target.checked)} />
+        </label>
+      </div>
+      <div className="invoice-total-preview">
+        <article>
+          <span>المبلغ قبل الضريبة</span>
+          <strong>{money(base, quote.currency)}</strong>
+        </article>
+        <article>
+          <span>ضريبة القيمة المضافة</span>
+          <strong>{money(computedVat, quote.currency)}</strong>
+        </article>
+        <article>
+          <span>الإجمالي شامل الضريبة</span>
+          <strong>{money(invoiceTotal, quote.currency)}</strong>
+        </article>
+      </div>
+      <div className="form-actions">
+        <button className="btn success" type="submit" disabled={saving || !vatValid}>
+          <ReceiptText size={16} /> {saving ? "جاري الإصدار..." : "إصدار الفاتورة الضريبية"}
+        </button>
+        <button className="btn muted" type="button" onClick={onCancel}>إلغاء</button>
+      </div>
+    </form>
+  );
+}
+
+function QuotePreview({
+  quote,
+  onCopy,
+  onPrint,
+  onExport,
+  onWhatsApp,
+  sending,
+}: {
+  quote: api.Quote;
+  onCopy: () => void;
+  onPrint: () => void;
+  onExport: () => void;
+  onWhatsApp: () => void;
+  sending: boolean;
+}) {
+  const isInvoice = quote.invoice_status === "issued";
+  const documentTitle = isInvoice ? "فاتورة ضريبية مبسطة" : "عرض سعر رسمي";
+  const documentNumber = isInvoice ? quote.invoice_number || invoiceNumber(quote) : quote.quote_number;
+  const issuedDate = isInvoice ? (quote.invoice_issued_at ? zatcaTimestamp(quote.invoice_issued_at) : quote.issue_date) : quote.issue_date;
+  const qrDataUrl = useQrDataUrl(isInvoice ? quote.invoice_qr_payload : undefined);
+  const payment = paymentForQuote(quote);
+  const invoiceVat = Number(quote.invoice_vat_amount ?? quote.tax ?? 0);
+  const invoiceRate = Number(quote.invoice_vat_rate ?? 15);
+  const downAmount = (quote.total || 0) * payment.downPercent / 100;
+  const finalAmount = (quote.total || 0) * payment.finalPercent / 100;
+  const terms = String(quote.terms || defaultTerms).split(/\n+/).map((line) => line.trim()).filter(Boolean);
+
   return (
     <div className="quote-preview">
-      <section className="quote-preview-paper">
-        <header>
-          <div>
-            <span>Breexe Pro</span>
-            <h2>{quote.title || "عرض سعر"}</h2>
+      <div className="quote-document-stage">
+        <section className="quote-a4-doc quote-cover-page">
+          <div className="quote-cover-top">
+            <div>
+              <strong>Breexe Pro</strong>
+              <span>Water, cooling and maintenance solutions</span>
+            </div>
+            <div className="quote-logo-mark">BP</div>
           </div>
-          <strong>{quote.quote_number}</strong>
-        </header>
-        <div className="quote-preview-meta">
-          <span>العميل: {quote.customer_name}</span>
-          <span>الجوال: {quote.customer_phone || "-"}</span>
-          <span>المدينة: {quote.customer_city || "-"}</span>
-          <span>تاريخ الإصدار: {quote.issue_date}</span>
-          <span>صالح حتى: {quote.valid_until || "-"}</span>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>البند</th>
-              <th>الكمية</th>
-              <th>السعر</th>
-              <th>الإجمالي</th>
-            </tr>
-          </thead>
-          <tbody>
-            {quote.items.map((item, index) => (
-              <tr key={`${item.description}-${index}`}>
-                <td>{item.description}</td>
-                <td>{item.quantity}</td>
-                <td>{money(item.unit_price, quote.currency)}</td>
-                <td>{money(item.total, quote.currency)}</td>
+          <div className="quote-cover-body">
+            <div className="quote-cover-logo">BP</div>
+            <span className="quote-cover-badge">{documentTitle}</span>
+            <h2>{quote.title || "عرض سعر"}</h2>
+            <p>مقدم إلى {quote.customer_name || "العميل"}</p>
+          </div>
+          <div className="quote-cover-foot">
+            <span>{isInvoice ? "رقم الفاتورة" : "رقم العرض"}: <strong>{documentNumber}</strong></span>
+            <span>تاريخ الإصدار: <strong>{issuedDate}</strong></span>
+            <span>{isInvoice ? "الرقم الضريبي" : "صالح حتى"}: <strong>{isInvoice ? quote.invoice_vat_number || "-" : quote.valid_until || "-"}</strong></span>
+          </div>
+        </section>
+
+        <section className="quote-a4-doc quote-detail-page">
+          <header className="quote-doc-head">
+            <div>
+              <strong>Breexe Pro</strong>
+              <span>الرياض - المملكة العربية السعودية</span>
+              <span>عروض، توريد، تركيب، صيانة، ومتابعة عملاء</span>
+            </div>
+            <div className="quote-logo-mark">BP</div>
+          </header>
+
+          <div className="quote-doc-title">
+            <h2>{documentTitle} - {documentNumber}</h2>
+            <p>{quote.title || "عرض سعر"} | العميل: {quote.customer_name} | التاريخ: {issuedDate}</p>
+          </div>
+
+          <div className="quote-client-grid">
+            <span>العميل: <strong>{quote.customer_name || "-"}</strong></span>
+            <span>الجوال: <strong dir="ltr">{quote.customer_phone || "-"}</strong></span>
+            <span>المدينة: <strong>{quote.customer_city || "-"}</strong></span>
+            <span>{isInvoice ? "حالة الفاتورة" : "حالة العرض"}: <strong>{isInvoice ? "مصدرة" : statusLabels[quote.status]}</strong></span>
+          </div>
+
+          {isInvoice && (
+            <div className="invoice-header-grid">
+              <article>
+                <span>اسم البائع</span>
+                <strong>{quote.invoice_seller_name || "Breexe Pro"}</strong>
+              </article>
+              <article>
+                <span>الرقم الضريبي</span>
+                <strong dir="ltr">{quote.invoice_vat_number || "-"}</strong>
+              </article>
+              <article>
+                <span>ضريبة القيمة المضافة</span>
+                <strong>{invoiceRate}% · {money(invoiceVat, quote.currency)}</strong>
+              </article>
+              <article className="zatca-qr-card">
+                {qrDataUrl ? <img src={qrDataUrl} alt="ZATCA QR Code" /> : <QrCode size={58} />}
+                <span>QR TLV Tags 1-5</span>
+              </article>
+            </div>
+          )}
+
+          <table className="quote-doc-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>الوصف</th>
+                <th>الكمية</th>
+                <th>سعر الوحدة</th>
+                <th>الإجمالي</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="quote-preview-totals">
-          <span>المجموع: {money(quote.subtotal, quote.currency)}</span>
-          <span>الخصم: {money(quote.discount, quote.currency)}</span>
-          <span>الضريبة/الرسوم: {money(quote.tax, quote.currency)}</span>
-          <strong>الإجمالي: {money(quote.total, quote.currency)}</strong>
-        </div>
-        {quote.terms && <p className="quote-preview-terms">{quote.terms}</p>}
-      </section>
+            </thead>
+            <tbody>
+              {quote.items.length ? quote.items.map((item, index) => (
+                <tr key={`${item.description}-${index}`}>
+                  <td>{index + 1}</td>
+                  <td>{item.description}</td>
+                  <td>{item.quantity}</td>
+                  <td>{money(item.unit_price, quote.currency)}</td>
+                  <td>{money(item.total, quote.currency)}</td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={5}>لا توجد بنود في هذا العرض</td>
+                </tr>
+              )}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={4}>{isInvoice ? "الإجمالي شامل ضريبة القيمة المضافة" : "الإجمالي شامل الخصم والرسوم"}</td>
+                <td>{money(quote.total, quote.currency)}</td>
+              </tr>
+            </tfoot>
+          </table>
+
+          <section className="quote-payment-block">
+            <h3>طريقة الدفع</h3>
+            <div className="quote-payment-summary">
+              <article>
+                <span>إجمالي العرض</span>
+                <strong>{money(quote.total, quote.currency)}</strong>
+              </article>
+              <article>
+                <span>الدفعة الأولى {payment.downPercent}%</span>
+                <strong>{money(downAmount, quote.currency)}</strong>
+              </article>
+              <article>
+                <span>الدفعة النهائية {payment.finalPercent}%</span>
+                <strong>{money(finalAmount, quote.currency)}</strong>
+              </article>
+            </div>
+            <div className="quote-payment-grid">
+              <p><strong>الدفعة الأولى:</strong> {payment.downText}</p>
+              <p><strong>الدفعة النهائية:</strong> {payment.finalText}</p>
+            </div>
+            <div className="quote-bank-box">
+              <span>طريقة الدفع: <strong>{payment.method}</strong></span>
+              {payment.bank && <span>البنك: <strong>{payment.bank}</strong></span>}
+              {payment.account && <span>المستفيد: <strong>{payment.account}</strong></span>}
+              {payment.iban && <span>IBAN: <strong dir="ltr">{payment.iban}</strong></span>}
+              {payment.note && <p>{payment.note}</p>}
+            </div>
+          </section>
+
+          <section className="quote-terms-block">
+            <h3>الشروط والأحكام</h3>
+            <ol>
+              {terms.map((term) => <li key={term}>{term}</li>)}
+            </ol>
+          </section>
+
+          <footer className="quote-doc-foot">
+            <p>مع التحية،<br /><strong>Breexe Pro</strong><br />حلول التكييف، تنقية المياه، المضخات، أنظمة الرذاذ وخدمات التركيب.</p>
+            <div className="quote-foot-seal">BREEXE<br />PRO</div>
+          </footer>
+        </section>
+      </div>
       <div className="form-actions">
-        <button className="btn primary" type="button" onClick={() => window.print()}><Printer size={16} /> طباعة</button>
+        <button className="btn primary" type="button" onClick={onPrint}><Printer size={16} /> طباعة A4</button>
+        <button className="btn muted" type="button" onClick={onExport}><Download size={16} /> تصدير PDF</button>
+        <button className="btn success" type="button" onClick={onWhatsApp} disabled={sending}><MessageCircle size={16} /> {sending ? "جاري الإرسال..." : "إرسال واتساب"}</button>
         <button className="btn muted" type="button" onClick={onCopy}><Copy size={16} /> نسخ نص العرض</button>
       </div>
     </div>
@@ -545,7 +920,16 @@ function QuoteForm({
   const [discount, setDiscount] = useState(String(initial?.discount || 0));
   const [tax, setTax] = useState(String(initial?.tax || 0));
   const [notes, setNotes] = useState(initial?.notes || "");
-  const [terms, setTerms] = useState(initial?.terms || "العرض صالح حسب التاريخ الموضح، والأسعار بالريال السعودي.");
+  const [terms, setTerms] = useState(initial?.terms || defaultTerms);
+  const [paymentMethod, setPaymentMethod] = useState(initial?.payment_method || defaultPayment.method);
+  const [paymentDownPercent, setPaymentDownPercent] = useState(String(initial?.payment_down_percent ?? defaultPayment.downPercent));
+  const [paymentFinalPercent, setPaymentFinalPercent] = useState(String(initial?.payment_final_percent ?? defaultPayment.finalPercent));
+  const [paymentDownText, setPaymentDownText] = useState(initial?.payment_down_text || defaultPayment.downText);
+  const [paymentFinalText, setPaymentFinalText] = useState(initial?.payment_final_text || defaultPayment.finalText);
+  const [paymentBank, setPaymentBank] = useState(initial?.payment_bank || defaultPayment.bank);
+  const [paymentAccount, setPaymentAccount] = useState(initial?.payment_account || defaultPayment.account);
+  const [paymentIban, setPaymentIban] = useState(initial?.payment_iban || defaultPayment.iban);
+  const [paymentNote, setPaymentNote] = useState(initial?.payment_note || defaultPayment.note);
   const [items, setItems] = useState<api.QuoteItem[]>(
     initial?.items?.length
       ? initial.items
@@ -579,6 +963,12 @@ function QuoteForm({
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
   };
 
+  const applyTemplate = (template: (typeof quoteTemplates)[number]) => {
+    setTitle(template.title);
+    setItems(template.items.map((item) => ({ ...item })));
+    if (!terms.trim() || terms === defaultTerms) setTerms(defaultTerms);
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
@@ -596,6 +986,15 @@ function QuoteForm({
         discount: Number(discount || 0),
         tax: Number(tax || 0),
         currency: "SAR",
+        payment_method: paymentMethod.trim(),
+        payment_down_percent: Number(paymentDownPercent || 0),
+        payment_final_percent: Number(paymentFinalPercent || 0),
+        payment_down_text: paymentDownText.trim(),
+        payment_final_text: paymentFinalText.trim(),
+        payment_bank: paymentBank.trim(),
+        payment_account: paymentAccount.trim(),
+        payment_iban: paymentIban.trim(),
+        payment_note: paymentNote.trim(),
         items: normalizedItems.filter((item) => item.description.trim()),
         notes: notes.trim(),
         terms: terms.trim(),
@@ -607,6 +1006,17 @@ function QuoteForm({
 
   return (
     <form className="form quote-form" onSubmit={submit}>
+      <div className="quote-template-panel">
+        <strong>قوالب جاهزة من ملف عروض الأسعار</strong>
+        <div>
+          {quoteTemplates.map((template) => (
+            <button className="btn muted" type="button" key={template.key} onClick={() => applyTemplate(template)}>
+              {template.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="form-grid">
         <label className="field">
           <span>عميل موجود</span>
@@ -733,6 +1143,57 @@ function QuoteForm({
           <span>الإجمالي</span>
           <strong>{money(total)}</strong>
         </article>
+      </div>
+
+      <div className="quote-payment-form">
+        <div className="quote-lines-head">
+          <strong>الدفع والتصدير</strong>
+          <span>تظهر هذه البيانات في ملف A4 ونص واتساب</span>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>طريقة الدفع</span>
+            <input className="input" value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value)} />
+          </label>
+          <label className="field">
+            <span>اسم المستفيد</span>
+            <input className="input" value={paymentAccount} onChange={(event) => setPaymentAccount(event.target.value)} />
+          </label>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>نسبة الدفعة الأولى</span>
+            <input className="input" type="number" min={0} max={100} value={paymentDownPercent} onChange={(event) => setPaymentDownPercent(event.target.value)} />
+          </label>
+          <label className="field">
+            <span>نسبة الدفعة النهائية</span>
+            <input className="input" type="number" min={0} max={100} value={paymentFinalPercent} onChange={(event) => setPaymentFinalPercent(event.target.value)} />
+          </label>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>البنك</span>
+            <input className="input" value={paymentBank} onChange={(event) => setPaymentBank(event.target.value)} />
+          </label>
+          <label className="field">
+            <span>IBAN</span>
+            <input className="input" dir="ltr" value={paymentIban} onChange={(event) => setPaymentIban(event.target.value)} />
+          </label>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>نص الدفعة الأولى</span>
+            <textarea className="input textarea compact" value={paymentDownText} onChange={(event) => setPaymentDownText(event.target.value)} />
+          </label>
+          <label className="field">
+            <span>نص الدفعة النهائية</span>
+            <textarea className="input textarea compact" value={paymentFinalText} onChange={(event) => setPaymentFinalText(event.target.value)} />
+          </label>
+        </div>
+        <label className="field">
+          <span>ملاحظة الدفع</span>
+          <textarea className="input textarea compact" value={paymentNote} onChange={(event) => setPaymentNote(event.target.value)} />
+        </label>
       </div>
 
       <label className="field">
