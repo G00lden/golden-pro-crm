@@ -2,15 +2,13 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import {LandingPage} from './pages/Landing.tsx';
+import {LandingModern} from './pages/LandingModern.tsx';
 import {initializeTracking} from './gtm';
 import {initGA4} from './ga4';
 import {initMetaPixel} from './metaPixel';
 import './index.css';
 
 // ── Initialise client-side tracking (GTM, GA4, Meta Pixel) ────────────
-// This runs before any React render so that GTM is loaded before the first
-// trackEvent() call on the landing page. Each init function guards itself
-// against multiple calls and missing env vars.
 initializeTracking(import.meta.env);
 
 const ga4Id = import.meta.env.VITE_GA4_ID as string | undefined;
@@ -24,12 +22,20 @@ if (metaPixelId) {
 }
 // ──────────────────────────────────────────────────────────────────────
 
-// Public landing route — served without auth at /landing.
-// Destination for paid ads (Meta / TikTok / Snap / Google).
-const isLanding = typeof window !== 'undefined' && window.location.pathname === '/landing';
+const path = typeof window !== 'undefined' ? window.location.pathname : '';
+
+// Route: /landing → old page, /landing-v2 → new modern page
+let page: JSX.Element;
+if (path === '/landing-v2') {
+  page = <LandingModern />;
+} else if (path === '/landing') {
+  page = <LandingPage />;
+} else {
+  page = <App />;
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {isLanding ? <LandingPage /> : <App />}
+    {page}
   </StrictMode>,
 );

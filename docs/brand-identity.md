@@ -84,7 +84,46 @@ The PDF includes worked examples for: store signage (لوحة المحل), vehic
 - `src/App.tsx` — all string occurrences of the brand name use `BreeXe Pro` (capital X, capital P).
 - `public/brand/` — all logo and icon assets.
 
-## 7. Changing brand values
+## 7. Landing Modern — Dark mode design
+
+للاندنج الحديثة (`/landing-v2`)، تم بناء ثيم **dark mode مريح للعين** من نفس الهوية البصرية:
+
+### Design principles
+- **الخلفية:** أسود مزرق عميق (`#0a0e14`) — أغمق من الأزرق الأساسي لكنه يحافظ على الدفء
+- **الأسطح:** طبقات من الأزرق الداكن المغبر (`#111a24`, `#162332`)
+- **النصوص:** أبيض مزرق خفيف (`#e8edf2`) — غير قاسي على العين
+- **الأزرار:** تدرج من الأزرق الأساسي (`#0b355c → #144e7a`) أو الذهبي
+- **اللمسات:** الذهبي الشمباني (`#c9a47a`) في hover, borders, icon colors
+- **الهويات:** إضاءات ناعمة (glow effects) ذهبية وزرقاء في الخلفية
+
+### CSS variables for landing modern
+Stored in `src/pages/LandingModern.css`:
+
+```css
+--lm-bg: #0a0e14;
+--lm-surface: #111a24;
+--lm-surface-2: #162332;
+--lm-line: #1e2d3d;
+--lm-blue: #0b355c;
+--lm-blue-deep: #07223d;
+--lm-blue-soft: #1a3f5e;
+--lm-gold: #c9a47a;
+--lm-gold-light: #dcbe9a;
+--lm-text: #e8edf2;
+--lm-muted: #8a9aa8;
+--lm-success: #28c7a0;
+```
+
+### Key visual features
+1. **Header زجاجي** — `backdrop-filter: blur()` مع border ذهبي
+2. **Hero مع glow gradient** — radial gradients زرقاء وذهبية كخلفية
+3. **بطاقات services** تتغير حوافها للذهبي عند hover وتصعد للأعلى
+4. **شريط إحصائيات** متداخل في الـ hero مع خلفية داكنة وأرقام ذهبية
+5. **قسم تقييمات** مع نجوم ذهبية وتنسيق اقتباسات
+6. **جميع الزوايا دائرية** (`14px` للبطاقات، `10px` للأزرار)
+7. **متجاوب بالكامل** — موبايل، تابلت، ديسكتوب
+
+## 8. Changing brand values
 
 If the user supplies a revised brand book:
 
