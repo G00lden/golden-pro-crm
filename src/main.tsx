@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import {LandingPage} from './pages/Landing.tsx';
 import {LandingModern} from './pages/LandingModern.tsx';
+import LegalPage from './pages/Legal.tsx';
 import {initializeTracking} from './gtm';
 import {initGA4} from './ga4';
 import {initMetaPixel} from './metaPixel';
@@ -24,9 +25,11 @@ if (metaPixelId) {
 
 const path = typeof window !== 'undefined' ? window.location.pathname : '';
 
-// Route: /landing → old page, /landing-v2 → new modern page
+// Route: /landing → old page, /landing-v2 → new modern page, /legal/* → LegalPage
 let page: JSX.Element;
-if (path === '/landing-v2') {
+if (path.startsWith('/legal/')) {
+  page = <LegalPage />;
+} else if (path === '/landing-v2') {
   page = <LandingModern />;
 } else if (path === '/landing') {
   page = <LandingPage />;
