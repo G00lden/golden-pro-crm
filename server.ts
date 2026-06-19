@@ -67,6 +67,8 @@ import {
 } from "./server/escalationEngine";
 import { handleWebhook as handleWhatsAppWebhook, verifyWebhook as verifyWhatsAppWebhook } from "./server/whatsappWebhook";
 import { notifyTechnicianForBooking, sendTechnicianPreAlerts } from "./server/bookingNotifications";
+import { validate, loginSchema, registerSchema, sendTestSchema, resolveEscalationSchema, assignEscalationSchema, storeWebhookSchema } from "./server/validation";
+import { authenticate, generateToken, createUser, findUserByEmail } from "./server/localAuth";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
@@ -275,6 +277,11 @@ async function startServer() {
     max: Number(process.env.WEBHOOK_RATE_LIMIT_MAX || 120),
     name: "webhook",
   });
+  const authRateLimit = createRateLimiter({
+    windowMs: 300_000,
+    max: 20,
+    name: "auth",
+  });
 
   app.disable("x-powered-by");
   app.use(securityHeaders);
@@ -324,7 +331,40 @@ async function startServer() {
     });
   });
 
-  // ── Auth routes (stub — validation.ts + localAuth wiring pending from Codex) ──
+  // ── Auth routes (local SQLite auth) ──
+
+  app.post(
+    "/api/auth/login",
+    authRateLimit,
+    validate(loginSchema),
+    asyncRoute(async (req, res) => {
+      const { email, password } = req.body as { email: string; password: string };
+      const user = authenticate(email, password);
+      if (!user) {
+        res.status(401).json({ error: "Invalid email or password." });
+        return;
+      }
+      const token = generateToken(user);
+      res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    }),
+  );
+
+  app.post(
+    "/api/auth/register",
+    authRateLimit,
+    validate(registerSchema),
+    asyncRoute(async (req, res) => {
+      const { email, password, name } = req.body as { email: string; password: string; name?: string };
+      const existing = findUserByEmail(email);
+      if (existing) {
+        res.status(409).json({ error: "Email already registered." });
+        return;
+      }
+      const user = createUser(email, password, name || "");
+      const token = generateToken(user);
+      res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    }),
+  );
 
   app.post(
     "/api/store/webhook",
@@ -541,6 +581,7 @@ async function startServer() {
 
   app.post(
     "/api/escalations/:id/resolve",
+    validate(resolveEscalationSchema),
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       const updated = resolveEscalation(req.params.id, userReq.user.uid, req.body?.notes);
@@ -551,6 +592,7 @@ async function startServer() {
 
   app.post(
     "/api/escalations/:id/assign",
+    validate(assignEscalationSchema),
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       if (!req.body?.assigned_to) throw httpError(400, "assigned_to is required.");
@@ -596,6 +638,7 @@ async function startServer() {
   app.post(
     "/api/whatsapp/send-test",
     requireAdmin,
+    validate(sendTestSchema),
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       const { phone, message, metadata } = req.body || {};
