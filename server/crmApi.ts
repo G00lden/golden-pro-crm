@@ -774,17 +774,29 @@ function normalizeInvoiceItems(items: unknown) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function invoiceTotals(items: Array<{ total: number }>, discount = 0) {
+function invoiceTotals(items: Array<{ total: number }>, discount = 0, vatPercent = 15) {
   const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
   const cleanDiscount = Math.max(0, Number(discount || 0));
   const afterDiscount = subtotal - cleanDiscount;
-  const vat = Math.round(afterDiscount * 0.15 * 100) / 100;
-  return { subtotal, discount: cleanDiscount, vat, total_with_vat: afterDiscount + vat };
+  const cleanVatPercent = Math.max(0, Number(vatPercent || 15));
+  const vatAmount = Math.round(afterDiscount * (cleanVatPercent / 100) * 100) / 100;
+  return {
+    subtotal,
+    discount: cleanDiscount,
+    vat: vatAmount,
+    vat_percent: cleanVatPercent,
+    vat_amount: vatAmount,
+    total_without_vat: afterDiscount,
+    total_with_vat: afterDiscount + vatAmount,
+  };
 }
 
 function normalizeInvoice(row: Record<string, any>): Record<string, any> {
   const items = normalizeInvoiceItems(row.items);
-  const totals = invoiceTotals(items, row.discount);
+  const totals = invoiceTotals(items, row.discount, row.vat_percent);
+  const vatAmount = Number(row.vat_amount ?? row.vat ?? totals.vat_amount);
+  const totalWithoutVat = Number(row.total_without_vat ?? totals.total_without_vat);
+  const sellerVatNumber = String(row.seller_vat_number || row.seller_vat || "").trim();
   return {
     ...row,
     currency: row.currency || "SAR",
@@ -792,8 +804,13 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     items,
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
-    vat: Number(row.vat ?? totals.vat),
-    total_with_vat: Number(row.total_with_vat ?? totals.total_with_vat),
+    vat: vatAmount,
+    vat_percent: Number(row.vat_percent ?? totals.vat_percent),
+    vat_amount: vatAmount,
+    total_without_vat: totalWithoutVat,
+    total_with_vat: Number(row.total_with_vat ?? totalWithoutVat + vatAmount),
+    seller_vat: String(row.seller_vat || sellerVatNumber).trim(),
+    seller_vat_number: sellerVatNumber,
   };
 }
 
@@ -834,7 +851,8 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       return;
     }
     const all = await listOwned("invoices", uid, undefined, 10000);
-    const totals = invoiceTotals(items, req.body?.discount);
+    const totals = invoiceTotals(items, req.body?.discount, req.body?.vat_percent);
+    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), all.length + 1),
       quote_id: req.body?.quote_id || null,
@@ -843,15 +861,19 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       customer_phone: String(req.body?.customer_phone || "").trim(),
       customer_city: String(req.body?.customer_city || "").trim(),
       customer_vat: String(req.body?.customer_vat || "").trim(),
+      title: String(req.body?.title || "").trim(),
       status: "issued",
       issue_date: req.body?.issue_date || todayInTimeZone(),
+      due_date: req.body?.due_date || null,
+      payment_method: String(req.body?.payment_method || "").trim(),
       currency: req.body?.currency || "SAR",
       items,
       notes: String(req.body?.notes || "").trim(),
       terms: String(req.body?.terms || "").trim(),
       ...totals,
       seller_name: String(req.body?.seller_name || "Breexe Pro International").trim(),
-      seller_vat: String(req.body?.seller_vat || "313049114100003").trim(),
+      seller_vat: sellerVatNumber,
+      seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || "").trim(),
       paid_at: null,
     });
@@ -877,22 +899,27 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       return;
     }
     const items = req.body?.items ? normalizeInvoiceItems(req.body.items) : normalizeInvoiceItems(existing.items);
-    const totals = invoiceTotals(items, req.body?.discount ?? existing.discount);
+    const totals = invoiceTotals(items, req.body?.discount ?? existing.discount, req.body?.vat_percent ?? existing.vat_percent);
+    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || existing.seller_vat_number || existing.seller_vat || "313049114100003").trim();
     const payload = clean({
       customer_id: req.body?.customer_id ?? existing.customer_id,
       customer_name: String(req.body?.customer_name || existing.customer_name || "").trim(),
       customer_phone: String(req.body?.customer_phone || existing.customer_phone || "").trim(),
       customer_city: String(req.body?.customer_city || existing.customer_city || "").trim(),
       customer_vat: String(req.body?.customer_vat || existing.customer_vat || "").trim(),
+      title: String(req.body?.title || existing.title || "").trim(),
       status: invoiceStatuses.has(req.body?.status) ? req.body.status : existing.status,
       issue_date: req.body?.issue_date || existing.issue_date,
+      due_date: req.body?.due_date ?? existing.due_date ?? null,
+      payment_method: String(req.body?.payment_method || existing.payment_method || "").trim(),
       currency: req.body?.currency || existing.currency || "SAR",
       items,
       notes: String(req.body?.notes ?? existing.notes ?? "").trim(),
       terms: String(req.body?.terms ?? existing.terms ?? "").trim(),
       ...totals,
       seller_name: String(req.body?.seller_name || existing.seller_name || "Breexe Pro International").trim(),
-      seller_vat: String(req.body?.seller_vat || existing.seller_vat || "313049114100003").trim(),
+      seller_vat: sellerVatNumber,
+      seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || existing.seller_address || "").trim(),
     });
     await updateOwned("invoices", req.params.id, uid, payload);
@@ -1002,7 +1029,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       invoice.seller_vat || "313049114100003",
       timestamp,
       invoice.total_with_vat || 0,
-      invoice.vat || 0,
+      invoice.vat_amount || invoice.vat || 0,
     );
     res.json({ qr_base64: qr });
   }));
@@ -1018,6 +1045,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     const all = await listOwned("invoices", uid, undefined, 10000);
     const items = normalizeInvoiceItems(quote.items || []);
     const totals = invoiceTotals(items, quote.discount);
+    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), all.length + 1),
       quote_id: req.params.id,
@@ -1033,7 +1061,8 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       terms: quote.terms || "",
       ...totals,
       seller_name: String(req.body?.seller_name || "Breexe Pro International").trim(),
-      seller_vat: String(req.body?.seller_vat || "313049114100003").trim(),
+      seller_vat: sellerVatNumber,
+      seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || "").trim(),
     });
     const id = await createOwned("invoices", uid, payload);

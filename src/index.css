@@ -19,7 +19,95 @@
   --text: #1a2332;
   --muted: #5a6b7e;
   --faint: #8a9baa;
+  --gold: #C9A47A;
+  --gold-2: #DCBE9A;
   --teal: #1a9e82;
+  --blue: #0B355C;
+  --red: #cc4444;
+  --orange: #d0903f;
+  --bg-gradient-start: rgba(40, 199, 160, 0.06);
+  --bg-gradient-end-1: rgba(77, 163, 255, 0.03);
+  --bg-gradient-end-2: rgba(214, 168, 79, 0.03);
+}
+
+/* ── Light mode overrides for components with hardcoded colors ── */
+.light-mode .sidebar {
+  background: rgba(240, 243, 247, 0.98);
+  border-left-color: #d0d8e0;
+}
+.light-mode .sidebar nav button.active {
+  background: linear-gradient(90deg, rgba(40, 199, 160, 0.10), rgba(214, 168, 79, 0.07));
+  color: #1a2332;
+}
+.light-mode .toast-container {
+  background: #0c1118;
+}
+.light-mode .toast-container,
+.light-mode .modal-overlay {
+  background: rgba(240, 243, 247, 0.85);
+}
+.light-mode .modal-content {
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(11, 53, 92, 0.10), 0 8px 22px rgba(11, 53, 92, 0.12);
+}
+.light-mode .card {
+  background: #ffffff;
+}
+.light-mode .stat-card {
+  background: #ffffff;
+}
+.light-mode .input-field,
+.light-mode textarea,
+.light-mode select {
+  background: #f7f9fc;
+  border-color: #d0d8e0;
+  color: #1a2332;
+}
+.light-mode .btn-ghost {
+  color: #5a6b7e;
+}
+.light-mode .btn-ghost:hover {
+  background: rgba(11, 53, 92, 0.06);
+}
+.light-mode .page-header {
+  border-bottom-color: #d0d8e0;
+}
+.light-mode .table th {
+  background: #f0f3f7;
+  color: #5a6b7e;
+}
+.light-mode .table td {
+  border-bottom-color: #e0e5ea;
+}
+.light-mode .search-input {
+  background: #f7f9fc;
+  border-color: #d0d8e0;
+}
+.light-mode .badge-success {
+  background: rgba(26, 158, 130, 0.12);
+  color: #1a6e5a;
+}
+.light-mode .badge-warning {
+  background: rgba(208, 144, 63, 0.14);
+  color: #9a6e28;
+}
+.light-mode .badge-error {
+  background: rgba(204, 68, 68, 0.12);
+  color: #992222;
+}
+.light-mode .brand {
+  border-bottom-color: #d0d8e0;
+}
+.light-mode .pill-nav {
+  background: #e8ecf0;
+}
+.light-mode .pill-nav button.active {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  color: #1a2332;
+}
+.light-mode .pill-nav button {
+  color: #5a6b7e;
 }
 
 :root {

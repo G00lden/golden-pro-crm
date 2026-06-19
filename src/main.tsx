@@ -1,4 +1,4 @@
-import {StrictMode} from 'react';
+import {StrictMode, type ReactElement} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import {LandingPage} from './pages/Landing.tsx';
@@ -26,7 +26,7 @@ if (metaPixelId) {
 const path = typeof window !== 'undefined' ? window.location.pathname : '';
 
 // Route: /landing → old page, /landing-v2 → new modern page, /legal/* → LegalPage
-let page: JSX.Element;
+let page: ReactElement;
 if (path.startsWith('/legal/')) {
   page = <LegalPage />;
 } else if (path === '/landing-v2') {

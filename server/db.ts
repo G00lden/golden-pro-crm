@@ -427,6 +427,45 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(owner_uid, status, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_quotes_follow_up ON quotes(owner_uid, follow_up_date);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_quotes_owner_number ON quotes(owner_uid, quote_number);
+
+  CREATE TABLE IF NOT EXISTS invoices (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    invoice_number TEXT NOT NULL DEFAULT '',
+    quote_id TEXT,
+    customer_id TEXT,
+    customer_name TEXT NOT NULL DEFAULT '',
+    customer_phone TEXT DEFAULT '',
+    customer_city TEXT DEFAULT '',
+    customer_vat TEXT DEFAULT '',
+    title TEXT DEFAULT '',
+    status TEXT DEFAULT 'issued',
+    issue_date TEXT DEFAULT (date('now')),
+    due_date TEXT,
+    paid_at TEXT,
+    payment_method TEXT DEFAULT '',
+    subtotal NUMERIC DEFAULT 0,
+    discount NUMERIC DEFAULT 0,
+    vat NUMERIC DEFAULT 0,
+    vat_percent NUMERIC DEFAULT 15,
+    vat_amount NUMERIC DEFAULT 0,
+    total_without_vat NUMERIC DEFAULT 0,
+    total_with_vat NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'SAR',
+    items TEXT DEFAULT '[]',
+    notes TEXT DEFAULT '',
+    terms TEXT DEFAULT '',
+    seller_name TEXT DEFAULT '',
+    seller_vat TEXT DEFAULT '',
+    seller_vat_number TEXT DEFAULT '',
+    seller_address TEXT DEFAULT '',
+    qr_code TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_invoices_owner ON invoices(owner_uid, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(owner_uid, status, created_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices(owner_uid, invoice_number);
 `);
 
 for (const col of [
@@ -461,6 +500,47 @@ for (const col of [
     db.exec(`ALTER TABLE quotes ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
+for (const col of [
+  ["invoice_number", "TEXT NOT NULL DEFAULT ''"],
+  ["quote_id", "TEXT"],
+  ["customer_id", "TEXT"],
+  ["customer_name", "TEXT NOT NULL DEFAULT ''"],
+  ["customer_phone", "TEXT DEFAULT ''"],
+  ["customer_city", "TEXT DEFAULT ''"],
+  ["customer_vat", "TEXT DEFAULT ''"],
+  ["title", "TEXT DEFAULT ''"],
+  ["status", "TEXT DEFAULT 'issued'"],
+  ["issue_date", "TEXT DEFAULT (date('now'))"],
+  ["due_date", "TEXT"],
+  ["paid_at", "TEXT"],
+  ["payment_method", "TEXT DEFAULT ''"],
+  ["subtotal", "NUMERIC DEFAULT 0"],
+  ["discount", "NUMERIC DEFAULT 0"],
+  ["vat", "NUMERIC DEFAULT 0"],
+  ["vat_percent", "NUMERIC DEFAULT 15"],
+  ["vat_amount", "NUMERIC DEFAULT 0"],
+  ["total_without_vat", "NUMERIC DEFAULT 0"],
+  ["total_with_vat", "NUMERIC DEFAULT 0"],
+  ["currency", "TEXT DEFAULT 'SAR'"],
+  ["items", "TEXT DEFAULT '[]'"],
+  ["notes", "TEXT DEFAULT ''"],
+  ["terms", "TEXT DEFAULT ''"],
+  ["seller_name", "TEXT DEFAULT ''"],
+  ["seller_vat", "TEXT DEFAULT ''"],
+  ["seller_vat_number", "TEXT DEFAULT ''"],
+  ["seller_address", "TEXT DEFAULT ''"],
+  ["qr_code", "TEXT DEFAULT ''"],
+  ["created_at", "TEXT DEFAULT (datetime('now'))"],
+  ["updated_at", "TEXT DEFAULT (datetime('now'))"],
+] as const) {
+  if (!hasColumn("invoices", col[0])) {
+    db.exec(`ALTER TABLE invoices ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_owner ON invoices(owner_uid, created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(owner_uid, status, created_at DESC)");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices(owner_uid, invoice_number)");
 
 for (const col of [
   ["store_provider", "TEXT"],

@@ -467,6 +467,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
         <InvoiceModal title={editing ? "تعديل الفاتورة" : "إصدار فاتورة ضريبية"} onClose={() => { setCreating(false); setEditing(null); }}>
           <InvoiceForm
             initial={editing || undefined}
+            notify={notify}
             onCancel={() => { setCreating(false); setEditing(null); }}
             onSave={saveInvoice}
           />
@@ -553,10 +554,12 @@ function InvoicePreview({ invoice, onCopy }: { invoice: api.Invoice; onCopy: () 
 
 function InvoiceForm({
   initial,
+  notify,
   onCancel,
   onSave,
 }: {
   initial?: api.Invoice;
+  notify: Notifier;
   onCancel: () => void;
   onSave: (payload: api.InvoiceInput) => Promise<void>;
 }) {

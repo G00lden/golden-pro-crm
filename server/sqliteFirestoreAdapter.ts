@@ -25,6 +25,7 @@ const collectionPrefixes: Record<string, string> = {
   store_webhook_events: "swe",
   technician_notifications: "tn",
   quotes: "quote",
+  invoices: "inv",
 };
 
 const primaryKeyByTable: Record<string, string> = {
@@ -57,6 +58,10 @@ function isValidColumn(field: string): boolean {
     "email", "status", "date", "scheduled_time",
     "quote_number", "title", "issue_date", "valid_until", "follow_up_date",
     "subtotal", "discount", "tax", "total", "currency", "confirmed_at",
+    "invoice_number", "quote_id", "customer_vat", "due_date", "paid_at",
+    "payment_method", "vat", "vat_percent", "vat_amount",
+    "total_without_vat", "total_with_vat", "seller_name", "seller_vat",
+    "seller_vat_number", "seller_address", "qr_code",
     "payment_method", "payment_down_percent", "payment_final_percent",
     "payment_down_text", "payment_final_text", "payment_bank",
     "payment_account", "payment_iban", "payment_note",
@@ -197,6 +202,20 @@ const fieldToColumn: Record<string, string> = {
   paymentAccount: "payment_account",
   paymentIban: "payment_iban",
   paymentNote: "payment_note",
+  invoiceNumber: "invoice_number",
+  quoteId: "quote_id",
+  customerVat: "customer_vat",
+  dueDate: "due_date",
+  paidAt: "paid_at",
+  vatPercent: "vat_percent",
+  vatAmount: "vat_amount",
+  totalWithoutVat: "total_without_vat",
+  totalWithVat: "total_with_vat",
+  sellerName: "seller_name",
+  sellerVat: "seller_vat",
+  sellerVatNumber: "seller_vat_number",
+  sellerAddress: "seller_address",
+  qrCode: "qr_code",
 };
 
 const jsonColumns = new Set([
