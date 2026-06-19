@@ -11,7 +11,7 @@ import {
   linkStoreOrderInstallation,
 } from "./storeWebhook";
 import { notifyTechnicianForBooking } from "./bookingNotifications";
-import type { AuthedRequest } from "./auth";
+import { requireFirebaseUser, type AuthedRequest } from "./auth";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -88,6 +88,7 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
   app.get(
     "/api/store/webhook/diagnostics",
+    requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       res.json(await getStoreWebhookDiagnostics(userReq.user.uid));
@@ -96,6 +97,7 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
   app.get(
     "/api/store/orders",
+    requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       res.json(await getStoreOrdersForUser(userReq.user.uid, String(req.query.type || "all")));
@@ -104,6 +106,7 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
   app.get(
     "/api/store/orders/:id",
+    requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       res.json(await getStoreOrderForUser(userReq.user.uid, req.params.id));
@@ -112,6 +115,7 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
   app.post(
     "/api/store/orders/:id/classify",
+    requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       res.json(await classifyStoreOrderItem(userReq.user.uid, req.params.id, {
@@ -123,6 +127,7 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
   app.post(
     "/api/store/orders/:id/assign-technician",
+    requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       const result = await assignStoreOrderTechnician(userReq.user.uid, req.params.id, {
@@ -143,6 +148,7 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
   app.post(
     "/api/store/orders/:id/link-installation",
+    requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       res.json(await linkStoreOrderInstallation(

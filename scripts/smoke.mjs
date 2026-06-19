@@ -24,7 +24,7 @@ async function readJson(path) {
 
 async function timedFetch(path, init = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timer = setTimeout(() => controller.abort(), 20000);
   try {
     return await fetch(new URL(path, baseUrl), { ...init, signal: controller.signal });
   } finally {
