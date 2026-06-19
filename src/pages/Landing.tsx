@@ -91,7 +91,7 @@ export function LandingPage() {
         throw new Error(text || `HTTP ${r.status}`);
       }
     } catch (err) {
-      setSubmitError("تعذر إرسال طلبك الآن. جرب واتساب أو الاتصال المباشر.");
+      setSubmitError("عذراً، تعذر إرسال طلبك الآن. جرّب التواصل عبر واتساب أو الاتصال المباشر.");
       // eslint-disable-next-line no-console
       console.error("[landing] lead submit failed", err);
     } finally {
@@ -234,8 +234,8 @@ export function LandingPage() {
         {submitted ? (
           <div className="lp-success">
             <CheckCircle2 size={28} aria-hidden="true" />
-            <h3>شكراً لتواصلك</h3>
-            <p>سنرد عليك قريباً. لو حاب تستعجل، تواصل عبر واتساب مباشرة.</p>
+            <h3>شكراً لتواصلك معنا</h3>
+            <p>سنرد عليك في أقرب وقت. لو حاب تستعجل، تواصل عبر واتساب مباشرة.</p>
             <a
               className="lp-btn primary"
               href={waHref}
@@ -290,7 +290,7 @@ export function LandingPage() {
                 rows={3}
                 value={form.message}
                 onChange={(e) => setForm({ ...form, message: e.target.value })}
-                placeholder="مثلاً: المنزل دور أرضي، فيه ٤ أفراد، أبي فلتر تحت المغسلة"
+                placeholder="مثلاً: المنزل دور أرضي، فيه ٤ أفراد، أبغى فلتر تحت المغسلة"
               />
             </label>
             {submitError && <div className="lp-form-error">{submitError}</div>}

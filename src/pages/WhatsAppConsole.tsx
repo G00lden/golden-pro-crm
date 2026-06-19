@@ -66,7 +66,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
   const lastQrSeenAt = useRef<number | null>(null);
 
   const [sendPhone, setSendPhone] = useState("");
-  const [sendMessage, setSendMessage] = useState("رسالة اختبار من نظام Breexe Pro CRM");
+  const [sendMessage, setSendMessage] = useState("رسالة اختبار من نظام BreeXe Pro CRM");
   const [sendTemplate, setSendTemplate] = useState<string>("");
   const [outboundCode, setOutboundCode] = useState("");
 

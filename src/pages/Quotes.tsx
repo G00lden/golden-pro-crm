@@ -70,7 +70,7 @@ const defaultPayment = {
   downText: "عند اعتماد العرض وبدء تنفيذ الطلب.",
   finalText: "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.",
   bank: "",
-  account: "Breexe Pro",
+  account: "BreeXe Pro",
   iban: "",
   note: "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.",
 };
@@ -203,7 +203,7 @@ function quoteShareText(quote: api.Quote) {
   const lines = quote.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, quote.currency)}`);
   const payment = paymentForQuote(quote);
   return [
-    "عرض سعر من Breexe Pro",
+    "عرض سعر من BreeXe Pro",
     `رقم العرض: ${quote.quote_number}`,
     quote.title || "عرض سعر",
     `العميل: ${quote.customer_name}`,
@@ -475,7 +475,7 @@ function QuotePreview({ quote, onCopy }: { quote: api.Quote; onCopy: () => void 
       <section className="quote-preview-paper">
         <header>
           <div>
-            <span>Breexe Pro</span>
+            <span>BreeXe Pro</span>
             <h2>{quote.title || "عرض سعر"}</h2>
           </div>
           <strong>{quote.quote_number}</strong>

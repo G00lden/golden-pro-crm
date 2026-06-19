@@ -132,7 +132,7 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
         <div>
           <span className="eyebrow">Cloud Design</span>
           <h1>إدارة المستخدمين</h1>
-          <p>أدوار وصلاحيات الوصول إلى Breexe Pro CRM</p>
+          <p>أدوار وصلاحيات الوصول إلى BreeXe Pro CRM</p>
         </div>
         <div className="actions">
           <button className="btn primary" type="button" onClick={refresh} disabled={loading}>

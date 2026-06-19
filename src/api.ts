@@ -738,7 +738,7 @@ function getNextReminderType(current?: string | null, countAfterSend = 1): Insta
 }
 
 function buildWhatsAppReminderMessage(installation: Installation) {
-  return `عزيزي ${installation.customer_name}، نود تذكيركم بموعد صيانة ${installation.product_name}. فريق Breexe Pro في خدمتكم.`;
+  return `عزيزي ${installation.customer_name}، نود تذكيركم بموعد صيانة ${installation.product_name}. فريق BreeXe Pro في خدمتكم.`;
 }
 
 async function sendLocalReminderViaWhatsApp(data: LocalDb, installationId: string, uid: string, type?: string, outboundCode?: string) {
@@ -845,7 +845,7 @@ function buildTechnicianBookingMessage(booking: Booking, technician: Technician,
         "تنبيه موعد مؤكد";
 
   return [
-    `Breexe Pro CRM - ${action}`,
+    `BreeXe Pro CRM - ${action}`,
     "",
     `الفني: ${technician.name}`,
     `العميل: ${booking.customer_name}`,
@@ -1236,7 +1236,7 @@ function quotePaymentFields(data: QuoteInput, existing?: Quote) {
     payment_down_text: String(data.payment_down_text || existing?.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim(),
     payment_final_text: String(data.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim(),
     payment_bank: String(data.payment_bank || existing?.payment_bank || "").trim(),
-    payment_account: String(data.payment_account || existing?.payment_account || "Breexe Pro").trim(),
+    payment_account: String(data.payment_account || existing?.payment_account || "BreeXe Pro").trim(),
     payment_iban: String(data.payment_iban || existing?.payment_iban || "").trim(),
     payment_note: String(data.payment_note || existing?.payment_note || "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.").trim(),
   };
