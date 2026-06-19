@@ -722,4 +722,322 @@ export function registerCrmApiRoutes(app: express.Express) {
 
     res.json({ customers: count, installations: count, bookings: count, products: 1, technicians: 1 });
   }));
+
+/* ── Invoice Routes (Firestore) ────────────────────────────────── */
+
+type InvoiceStatus = "draft" | "issued" | "paid" | "cancelled";
+const invoiceStatuses = new Set(["draft", "issued", "paid", "cancelled"]);
+
+function invoiceNumber(seed = Date.now(), index = 1) {
+  const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
+  return `INV-${ymd}-${String(index).padStart(3, "0")}`;
+}
+
+function generateTLV(tag: number, value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  const len = bytes.length;
+  const tagHex = tag.toString(16).padStart(2, "0");
+  const lenHex = len.toString(16).padStart(2, "0");
+  return tagHex + lenHex + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function generateZatcaBase64(sellerName: string, vatNumber: string, timestamp: string, total: number, vatTotal: number) {
+  const tlv =
+    generateTLV(1, sellerName) +
+    generateTLV(2, vatNumber) +
+    generateTLV(3, timestamp) +
+    generateTLV(4, total.toFixed(2)) +
+    generateTLV(5, vatTotal.toFixed(2));
+  const hexPairs = tlv.match(/.{1,2}/g) || [];
+  const bytes = new Uint8Array(hexPairs.map((h) => parseInt(h, 16)));
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function normalizeInvoiceItems(items: unknown) {
+  const raw = Array.isArray(items) ? items : [];
+  return raw
+    .map((item) => {
+      const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      const qty = Math.max(0, Number(row.quantity || 0));
+      const up = Math.max(0, Number(row.unit_price || row.unitPrice || 0));
+      return {
+        description: String(row.description || "").trim(),
+        quantity: qty,
+        unit_price: up,
+        total: qty * up,
+      };
+    })
+    .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
+}
+
+function invoiceTotals(items: Array<{ total: number }>, discount = 0) {
+  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const cleanDiscount = Math.max(0, Number(discount || 0));
+  const afterDiscount = subtotal - cleanDiscount;
+  const vat = Math.round(afterDiscount * 0.15 * 100) / 100;
+  return { subtotal, discount: cleanDiscount, vat, total_with_vat: afterDiscount + vat };
+}
+
+function normalizeInvoice(row: Record<string, any>): Record<string, any> {
+  const items = normalizeInvoiceItems(row.items);
+  const totals = invoiceTotals(items, row.discount);
+  return {
+    ...row,
+    currency: row.currency || "SAR",
+    status: invoiceStatuses.has(row.status) ? row.status : "draft",
+    items,
+    subtotal: Number(row.subtotal ?? totals.subtotal),
+    discount: Number(row.discount ?? totals.discount),
+    vat: Number(row.vat ?? totals.vat),
+    total_with_vat: Number(row.total_with_vat ?? totals.total_with_vat),
+  };
+}
+
+  app.get("/api/invoices", asyncRoute(async (req, res) => {
+    const search = String(req.query.search || "").trim();
+    const status = String(req.query.status || "").trim();
+    const all = (await listOwned("invoices", userId(req), undefined, 1000))
+      .map(normalizeInvoice)
+      .sort((a, b) => String(b.createdAt || b.created_at).localeCompare(String(a.createdAt || a.created_at)));
+    const data = all.filter((item) => {
+      const statusOk = !status || status === "all" || item.status === status;
+      if (!statusOk) return false;
+      if (!search) return true;
+      return `${item.invoice_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""}`.includes(search);
+    });
+    const stats = {
+      total: all.length,
+      draft: all.filter((item) => item.status === "draft").length,
+      issued: all.filter((item) => item.status === "issued").length,
+      paid: all.filter((item) => item.status === "paid").length,
+      cancelled: all.filter((item) => item.status === "cancelled").length,
+      total_value: all.reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+      paid_value: all.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+    };
+    res.json({ data, total: data.length, stats });
+  }));
+
+  app.post("/api/invoices", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const items = normalizeInvoiceItems(req.body?.items);
+    const customerName = String(req.body?.customer_name || "").trim();
+    if (!customerName) {
+      res.status(400).json({ error: "اسم العميل مطلوب." });
+      return;
+    }
+    if (!items.length) {
+      res.status(400).json({ error: "مطلوب بند واحد على الأقل في الفاتورة." });
+      return;
+    }
+    const all = await listOwned("invoices", uid, undefined, 10000);
+    const totals = invoiceTotals(items, req.body?.discount);
+    const payload = clean({
+      invoice_number: invoiceNumber(Date.now(), all.length + 1),
+      quote_id: req.body?.quote_id || null,
+      customer_id: req.body?.customer_id || null,
+      customer_name: customerName,
+      customer_phone: String(req.body?.customer_phone || "").trim(),
+      customer_city: String(req.body?.customer_city || "").trim(),
+      customer_vat: String(req.body?.customer_vat || "").trim(),
+      status: "issued",
+      issue_date: req.body?.issue_date || todayInTimeZone(),
+      currency: req.body?.currency || "SAR",
+      items,
+      notes: String(req.body?.notes || "").trim(),
+      terms: String(req.body?.terms || "").trim(),
+      ...totals,
+      seller_name: String(req.body?.seller_name || "Breexe Pro International").trim(),
+      seller_vat: String(req.body?.seller_vat || "313049114100003").trim(),
+      seller_address: String(req.body?.seller_address || "").trim(),
+      paid_at: null,
+    });
+    const id = await createOwned("invoices", uid, payload);
+    const invoice = await getOwned("invoices", id, uid);
+    res.status(201).json({ id, invoice: invoice ? normalizeInvoice(invoice) : null });
+  }));
+
+  app.get("/api/invoices/:id", asyncRoute(async (req, res) => {
+    const existing = await getOwned("invoices", req.params.id, userId(req));
+    if (!existing) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    res.json(normalizeInvoice(existing));
+  }));
+
+  app.put("/api/invoices/:id", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const existing = await getOwned("invoices", req.params.id, uid);
+    if (!existing) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    const items = req.body?.items ? normalizeInvoiceItems(req.body.items) : normalizeInvoiceItems(existing.items);
+    const totals = invoiceTotals(items, req.body?.discount ?? existing.discount);
+    const payload = clean({
+      customer_id: req.body?.customer_id ?? existing.customer_id,
+      customer_name: String(req.body?.customer_name || existing.customer_name || "").trim(),
+      customer_phone: String(req.body?.customer_phone || existing.customer_phone || "").trim(),
+      customer_city: String(req.body?.customer_city || existing.customer_city || "").trim(),
+      customer_vat: String(req.body?.customer_vat || existing.customer_vat || "").trim(),
+      status: invoiceStatuses.has(req.body?.status) ? req.body.status : existing.status,
+      issue_date: req.body?.issue_date || existing.issue_date,
+      currency: req.body?.currency || existing.currency || "SAR",
+      items,
+      notes: String(req.body?.notes ?? existing.notes ?? "").trim(),
+      terms: String(req.body?.terms ?? existing.terms ?? "").trim(),
+      ...totals,
+      seller_name: String(req.body?.seller_name || existing.seller_name || "Breexe Pro International").trim(),
+      seller_vat: String(req.body?.seller_vat || existing.seller_vat || "313049114100003").trim(),
+      seller_address: String(req.body?.seller_address || existing.seller_address || "").trim(),
+    });
+    await updateOwned("invoices", req.params.id, uid, payload);
+    const invoice = await getOwned("invoices", req.params.id, uid);
+    res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
+  }));
+
+  app.post("/api/invoices/:id/status", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const status = String(req.body?.status || "").trim() as InvoiceStatus;
+    if (!invoiceStatuses.has(status)) {
+      res.status(400).json({ error: "حالة غير صالحة." });
+      return;
+    }
+    const update = clean({
+      status,
+      paid_at: status === "paid" ? nowIso() : undefined,
+    });
+    if (!(await updateOwned("invoices", req.params.id, uid, update))) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    const invoice = await getOwned("invoices", req.params.id, uid);
+    res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
+  }));
+
+  app.delete("/api/invoices/:id", asyncRoute(async (req, res) => {
+    if (!(await deleteOwned("invoices", req.params.id, userId(req)))) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    res.json({ success: true });
+  }));
+
+  app.post("/api/invoices/:id/send-whatsapp", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const existing = await getOwned("invoices", req.params.id, uid);
+    if (!existing) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    const invoice = normalizeInvoice(existing);
+    const phone = String(req.body?.phone || invoice.customer_phone || "").trim();
+    if (!phone) {
+      res.status(400).json({ error: "رقم جوال العميل مطلوب." });
+      return;
+    }
+    const currency = String(invoice.currency || "SAR");
+    const lines = (Array.isArray(invoice.items) ? invoice.items : []).map(
+      (item: Record<string, any>) => `- ${item.description} × ${item.quantity}: ${Number(item.total || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+    );
+    const message = [
+      `فاتورة ضريبية - Breexe Pro International`,
+      `${invoice.invoice_number}`,
+      `العميل: ${invoice.customer_name}`,
+      "",
+      ...lines,
+      "",
+      `المجموع: ${Number(invoice.subtotal || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `الخصم: ${Number(invoice.discount || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `ضريبة ١٥٪: ${Number(invoice.vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `الإجمالي شامل الضريبة: ${Number(invoice.total_with_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      "",
+      `الرقم الضريبي: ${invoice.seller_vat || "313049114100003"}`,
+      invoice.notes ? `ملاحظات: ${invoice.notes}` : "",
+    ].filter(Boolean).join("\n");
+    let result: Awaited<ReturnType<typeof whatsappService.sendText>>;
+    try {
+      result = await whatsappService.sendText(phone, message, { confirmationCode: req.body?.outboundCode });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes("credentials are missing") || msg.includes("is not connected")) {
+        const err = new Error(msg) as Error & { status?: number };
+        err.status = 503;
+        throw err;
+      }
+      throw error;
+    }
+    recordWhatsAppMessage({
+      type: "sent",
+      provider: whatsappService.getStatus().provider,
+      direction: "outbound",
+      to_phone: phone,
+      message,
+      message_id: (result as { messageId?: string | null })?.messageId || null,
+      status: (result as { dryRun?: boolean })?.dryRun ? "dry_run" : "sent",
+      owner_uid: uid,
+      metadata: {
+        kind: "invoice",
+        invoice_id: req.params.id,
+        invoice_number: invoice.invoice_number,
+      },
+    });
+    res.json({ success: true, result });
+  }));
+
+  app.get("/api/invoices/:id/qr", asyncRoute(async (req, res) => {
+    const existing = await getOwned("invoices", req.params.id, userId(req));
+    if (!existing) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    const invoice = normalizeInvoice(existing);
+    const timestamp = new Date(invoice.createdAt || Date.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const qr = generateZatcaBase64(
+      invoice.seller_name || "Breexe Pro International",
+      invoice.seller_vat || "313049114100003",
+      timestamp,
+      invoice.total_with_vat || 0,
+      invoice.vat || 0,
+    );
+    res.json({ qr_base64: qr });
+  }));
+
+  app.post("/api/quotes/:id/convert-to-invoice", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const existing = await getOwned("quotes", req.params.id, uid);
+    if (!existing) {
+      res.status(404).json({ error: "عرض السعر غير موجود." });
+      return;
+    }
+    const quote = normalizeQuote(existing);
+    const all = await listOwned("invoices", uid, undefined, 10000);
+    const items = normalizeInvoiceItems(quote.items || []);
+    const totals = invoiceTotals(items, quote.discount);
+    const payload = clean({
+      invoice_number: invoiceNumber(Date.now(), all.length + 1),
+      quote_id: req.params.id,
+      customer_id: quote.customer_id || null,
+      customer_name: quote.customer_name || "",
+      customer_phone: quote.customer_phone || "",
+      customer_city: quote.customer_city || "",
+      status: "issued",
+      issue_date: todayInTimeZone(),
+      currency: quote.currency || "SAR",
+      items,
+      notes: quote.notes || "",
+      terms: quote.terms || "",
+      ...totals,
+      seller_name: String(req.body?.seller_name || "Breexe Pro International").trim(),
+      seller_vat: String(req.body?.seller_vat || "313049114100003").trim(),
+      seller_address: String(req.body?.seller_address || "").trim(),
+    });
+    const id = await createOwned("invoices", uid, payload);
+    const invoice = await getOwned("invoices", id, uid);
+    res.status(201).json({ id, invoice: invoice ? normalizeInvoice(invoice) : null });
+  }));
 }
