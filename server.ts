@@ -324,44 +324,7 @@ async function startServer() {
     });
   });
 
-  // ── Auth routes ─────────────────────────────────────────────
-  // Local auth login — rate limited (20/5min per IP) + zod validated
-  app.post(
-    "/api/auth/login",
-    authRateLimit,
-    validate(loginSchema),
-    asyncRoute(async (req, res) => {
-      const { email, password } = req.body as { email: string; password: string };
-      const user = localAuthenticate(email, password);
-      if (!user) {
-        return res.status(401).json({ error: "Invalid email or password." });
-      }
-      const token = generateToken(user);
-      res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
-    }),
-  );
-
-  // Local auth registration — rate limited (20/5min per IP) + zod validated
-  app.post(
-    "/api/auth/register",
-    authRateLimit,
-    validate(registerSchema),
-    asyncRoute(async (req, res) => {
-      const { email, password, name, phone } = req.body as {
-        email: string;
-        password: string;
-        name?: string;
-        phone?: string;
-      };
-      const existing = localAuthenticate(email, password);
-      if (existing) {
-        return res.status(409).json({ error: "Email already registered." });
-      }
-      const user = createUser(email, password, name || "", phone || "");
-      const token = generateToken(user);
-      res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
-    }),
-  );
+  // ── Auth routes (stub — validation.ts + localAuth wiring pending from Codex) ──
 
   app.post(
     "/api/store/webhook",
