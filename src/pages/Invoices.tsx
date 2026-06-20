@@ -46,6 +46,7 @@ type PriceMode = "inclusive" | "exclusive";
 const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
 const sellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
 const sellerEnglishName = "Breexe Pro Co.";
+const invoiceSellerOptions = ["أبو عامر", "أبو سيف"] as const;
 
 const statusLabels: Record<api.InvoiceStatus, string> = {
   draft: "مسودة",
@@ -200,7 +201,8 @@ const invoiceStandaloneCss = `
   .invoice-doc-head { grid-template-columns: minmax(0, 1fr) minmax(170px, auto) !important; }
   .invoice-identity-grid { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
   .invoice-parties { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto !important; }
-  .invoice-bottom-grid { grid-template-columns: minmax(0, 1.1fr) minmax(150px, 0.8fr) minmax(210px, 0.95fr) !important; }
+  .invoice-bottom-grid { display: flex !important; justify-content: flex-end !important; align-items: start !important; }
+  .invoice-doc-totals { width: min(100%, 300px) !important; }
   .invoice-doc-head,
   .invoice-identity-grid,
   .invoice-parties,
@@ -821,9 +823,10 @@ function invoiceLineAmounts(item: api.InvoiceItem, vatPercent: number) {
 
 function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; onCopy: () => void; onPrint: (asPdf?: boolean) => void }) {
   const qrCode = useMemo(() => generateZATCAQR(invoice), [invoice]);
-  const qrFields = useMemo(() => decodeZATCAQR(qrCode), [qrCode]);
-  const checks = useMemo(() => zatcaChecklist(invoice), [invoice]);
   const issueTime = invoiceTimestamp(invoice).replace("T", " ").replace("Z", " UTC");
+  const [sellerOption, setSellerOption] = useState<string>(invoiceSellerOptions[0]);
+  const [customSeller, setCustomSeller] = useState("");
+  const exportSellerName = sellerOption === "custom" ? customSeller.trim() : sellerOption;
 
   return (
     <div className="quote-preview">
@@ -859,8 +862,8 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
             <strong>{invoice.seller_vat_number || "-"}</strong>
           </article>
           <article>
-            <span>الحالة</span>
-            <strong>{statusLabels[invoice.status]}</strong>
+            <span>اسم البائع</span>
+            <strong>{exportSellerName || "-"}</strong>
           </article>
         </section>
 
@@ -881,8 +884,6 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
           </article>
           <aside className="invoice-zatca-card">
             <QRCodeDisplay data={qrCode} size={138} />
-            <strong>رمز QR متوافق مع ZATCA</strong>
-            <span>TLV Base64 - Tags 1 to 5</span>
           </aside>
         </section>
 
@@ -917,20 +918,6 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
         </table>
 
         <section className="invoice-bottom-grid">
-          <div className="invoice-zatca-data">
-            <h3>البيانات التي تظهر عند مسح QR</h3>
-            {qrFields.map((field) => (
-              <p key={field.tag}><span>{field.label}</span><strong><bdi>{field.value}</bdi></strong></p>
-            ))}
-          </div>
-          <div className="invoice-compliance-box">
-            <h3>فحص المتطلبات الأساسية</h3>
-            {checks.map((check) => (
-              <p key={check.label} className={check.ok ? "ok" : "bad"}>
-                <span>{check.ok ? "✓" : "!"}</span>{check.label}
-              </p>
-            ))}
-          </div>
           <div className="invoice-doc-totals">
             <p><span>الإجمالي غير شامل الضريبة</span><strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
             <p><span>الخصم</span><strong>{money(invoice.discount, invoice.currency)}</strong></p>
@@ -941,11 +928,25 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
 
         {invoice.terms && <p className="invoice-doc-terms">{invoice.terms}</p>}
         <footer className="invoice-doc-foot">
-          <p>هذه الفاتورة مولدة إلكترونيا، ورمز QR يحتوي بيانات TLV Base64 الأساسية المطلوبة لفواتير ZATCA المبسطة.</p>
           <strong>{sellerEnglishName}</strong>
         </footer>
       </section>
       <div className="form-actions">
+        <div className="invoice-export-options">
+          <label>
+            <span>اسم البائع عند التصدير</span>
+            <select className="input" value={sellerOption} onChange={(event) => setSellerOption(event.target.value)}>
+              {invoiceSellerOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              <option value="custom">إضافة جديد</option>
+            </select>
+          </label>
+          {sellerOption === "custom" && (
+            <label>
+              <span>اسم جديد</span>
+              <input className="input" value={customSeller} onChange={(event) => setCustomSeller(event.target.value)} placeholder="اكتب اسم البائع" />
+            </label>
+          )}
+        </div>
         <button className="btn primary" type="button" onClick={() => onPrint(false)}><Printer size={16} /> طباعة A4</button>
         <button className="btn muted" type="button" onClick={() => onPrint(true)}><Download size={16} /> حفظ PDF</button>
         <button className="btn muted" type="button" onClick={onCopy}><Copy size={16} /> نسخ نص الفاتورة</button>

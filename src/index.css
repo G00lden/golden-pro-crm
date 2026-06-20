@@ -1589,6 +1589,29 @@ main {
   gap: 12px;
 }
 
+.invoice-export-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.invoice-export-options label {
+  display: grid;
+  min-width: 150px;
+  gap: 4px;
+}
+
+.invoice-export-options span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .quote-document-stage {
   display: grid;
   gap: 18px;
@@ -2230,7 +2253,8 @@ main {
 }
 
 .invoice-bottom-grid {
-  grid-template-columns: minmax(0, 1.1fr) minmax(150px, 0.8fr) minmax(210px, 0.95fr);
+  display: flex;
+  justify-content: flex-end;
   align-items: start;
 }
 
@@ -2288,6 +2312,7 @@ main {
 .invoice-doc-totals {
   display: grid;
   gap: 8px;
+  width: min(100%, 300px);
   background: #0b355c;
 }
 
@@ -2805,7 +2830,13 @@ main {
   }
 
   body.quote-print-mode .invoice-bottom-grid {
-    grid-template-columns: minmax(0, 1.1fr) minmax(150px, 0.8fr) minmax(210px, 0.95fr) !important;
+    display: flex !important;
+    justify-content: flex-end !important;
+    align-items: start !important;
+  }
+
+  body.quote-print-mode .invoice-doc-totals {
+    width: min(100%, 300px) !important;
   }
 
   body.quote-print-mode .invoice-doc-head,
