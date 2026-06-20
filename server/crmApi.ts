@@ -15,6 +15,9 @@ const defaultSettings = {
   jobs_per_tech: 4,
   response_rate: 50,
   maxDaily: 24,
+  seller_name: "Breexe Pro Co.",
+  seller_vat_number: "313049114100003",
+  seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض",
 };
 
 function asyncRoute(
@@ -728,8 +731,8 @@ export function registerCrmApiRoutes(app: express.Express) {
 
 /* ── Invoice Routes (Firestore) ────────────────────────────────── */
 
-type InvoiceStatus = "draft" | "issued" | "paid" | "cancelled";
-const invoiceStatuses = new Set(["draft", "issued", "paid", "cancelled"]);
+type InvoiceStatus = "draft" | "issued" | "paid" | "cancelled" | "refunded";
+const invoiceStatuses = new Set(["draft", "issued", "paid", "cancelled", "refunded"]);
 
 function invoiceNumber(seed = Date.now(), index = 1) {
   const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
@@ -758,6 +761,22 @@ function generateZatcaBase64(sellerName: string, vatNumber: string, timestamp: s
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
+}
+
+function zatcaQrFields(sellerName: string, vatNumber: string, timestamp: string, total: number, vatTotal: number) {
+  return [
+    { tag: 1, label: "Seller name", value: sellerName },
+    { tag: 2, label: "VAT registration number", value: vatNumber },
+    { tag: 3, label: "Invoice timestamp", value: timestamp },
+    { tag: 4, label: "Invoice total including VAT", value: total.toFixed(2) },
+    { tag: 5, label: "VAT total", value: vatTotal.toFixed(2) },
+  ];
+}
+
+function invoiceQrTimestamp(invoice: Record<string, any>) {
+  const source = invoice.createdAt || invoice.created_at || (invoice.issue_date ? `${invoice.issue_date}T00:00:00Z` : new Date().toISOString());
+  const parsed = new Date(source);
+  return (Number.isNaN(parsed.getTime()) ? new Date() : parsed).toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 function normalizeInvoiceItems(items: unknown) {
@@ -861,8 +880,9 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       return;
     }
     const all = await listOwned("invoices", uid, undefined, 10000);
+    const settings = await getSettings(uid);
     const totals = invoiceTotals(items, req.body?.discount, req.body?.vat_percent);
-    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || "313049114100003").trim();
+    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), all.length + 1),
       quote_id: req.body?.quote_id || null,
@@ -872,7 +892,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       customer_city: String(req.body?.customer_city || "").trim(),
       customer_vat: String(req.body?.customer_vat || "").trim(),
       title: String(req.body?.title || "").trim(),
-      status: "issued",
+      status: invoiceStatuses.has(req.body?.status) ? req.body.status : "issued",
       issue_date: req.body?.issue_date || todayInTimeZone(),
       due_date: req.body?.due_date || null,
       payment_method: String(req.body?.payment_method || "").trim(),
@@ -881,10 +901,10 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       notes: String(req.body?.notes || "").trim(),
       terms: String(req.body?.terms || "").trim(),
       ...totals,
-      seller_name: String(req.body?.seller_name || "Breexe Pro Co.").trim(),
+      seller_name: String(req.body?.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
-      seller_address: String(req.body?.seller_address || "").trim(),
+      seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
       paid_at: null,
     });
     const id = await createOwned("invoices", uid, payload);
@@ -909,8 +929,9 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       return;
     }
     const items = req.body?.items ? normalizeInvoiceItems(req.body.items) : normalizeInvoiceItems(existing.items);
+    const settings = await getSettings(uid);
     const totals = invoiceTotals(items, req.body?.discount ?? existing.discount, req.body?.vat_percent ?? existing.vat_percent);
-    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || existing.seller_vat_number || existing.seller_vat || "313049114100003").trim();
+    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || existing.seller_vat_number || existing.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       customer_id: req.body?.customer_id ?? existing.customer_id,
       customer_name: String(req.body?.customer_name || existing.customer_name || "").trim(),
@@ -927,10 +948,10 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       notes: String(req.body?.notes ?? existing.notes ?? "").trim(),
       terms: String(req.body?.terms ?? existing.terms ?? "").trim(),
       ...totals,
-      seller_name: String(req.body?.seller_name || existing.seller_name || "Breexe Pro Co.").trim(),
+      seller_name: String(req.body?.seller_name || existing.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
-      seller_address: String(req.body?.seller_address || existing.seller_address || "").trim(),
+      seller_address: String(req.body?.seller_address || existing.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
     });
     await updateOwned("invoices", req.params.id, uid, payload);
     const invoice = await getOwned("invoices", req.params.id, uid);
@@ -1033,15 +1054,24 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       return;
     }
     const invoice = normalizeInvoice(existing);
-    const timestamp = new Date(invoice.createdAt || Date.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const timestamp = invoiceQrTimestamp(invoice);
+    const sellerName = invoice.seller_name || "Breexe Pro Co.";
+    const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
+    const total = Number(invoice.total_with_vat || 0);
+    const vatTotal = Number(invoice.vat_amount || invoice.vat || 0);
     const qr = generateZatcaBase64(
-      invoice.seller_name || "Breexe Pro Co.",
-      invoice.seller_vat || "313049114100003",
+      sellerName,
+      sellerVat,
       timestamp,
-      invoice.total_with_vat || 0,
-      invoice.vat_amount || invoice.vat || 0,
+      total,
+      vatTotal,
     );
-    res.json({ qr_base64: qr });
+    res.json({
+      qr_base64: qr,
+      format: "TLV_BASE64",
+      phase: "ZATCA phase 1 QR fields",
+      fields: zatcaQrFields(sellerName, sellerVat, timestamp, total, vatTotal),
+    });
   }));
 
   app.post("/api/quotes/:id/convert-to-invoice", asyncRoute(async (req, res) => {
@@ -1053,9 +1083,10 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     }
     const quote = normalizeQuote(existing);
     const all = await listOwned("invoices", uid, undefined, 10000);
+    const settings = await getSettings(uid);
     const items = normalizeInvoiceItems(quote.items || []);
     const totals = invoiceTotals(items, quote.discount);
-    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || "313049114100003").trim();
+    const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), all.length + 1),
       quote_id: req.params.id,
@@ -1070,10 +1101,10 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       notes: quote.notes || "",
       terms: quote.terms || "",
       ...totals,
-      seller_name: String(req.body?.seller_name || "Breexe Pro Co.").trim(),
+      seller_name: String(req.body?.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
-      seller_address: String(req.body?.seller_address || "").trim(),
+      seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
     });
     const id = await createOwned("invoices", uid, payload);
     const invoice = await getOwned("invoices", id, uid);

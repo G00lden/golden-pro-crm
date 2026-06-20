@@ -473,6 +473,7 @@ export type Quote = {
   customer_name: string;
   customer_phone?: string;
   customer_city?: string;
+  customer_vat?: string;
   title?: string;
   status: QuoteStatus;
   issue_date: string;
@@ -544,6 +545,7 @@ export type Invoice = {
   customer_name: string;
   customer_phone?: string;
   customer_city?: string;
+  customer_vat?: string;
   title?: string;
   status: InvoiceStatus;
   issue_date: string;
@@ -1356,6 +1358,7 @@ function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quo
     customer_name: String(data.customer_name || existing?.customer_name || "").trim(),
     customer_phone: String(data.customer_phone || existing?.customer_phone || "").trim(),
     customer_city: String(data.customer_city || existing?.customer_city || "").trim(),
+    customer_vat: String(data.customer_vat || existing?.customer_vat || "").trim(),
     title: String(data.title || existing?.title || "").trim(),
     status: (data.status || existing?.status || "issued") as QuoteStatus,
     issue_date: data.issue_date || existing?.issue_date || today(),
@@ -1652,6 +1655,7 @@ function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings
     customer_name: String(data.customer_name || existing?.customer_name || "").trim(),
     customer_phone: String(data.customer_phone || existing?.customer_phone || "").trim(),
     customer_city: String(data.customer_city || existing?.customer_city || "").trim(),
+    customer_vat: String(data.customer_vat || existing?.customer_vat || "").trim(),
     title: String(data.title || existing?.title || "").trim(),
     status: (data.status || existing?.status || "issued") as InvoiceStatus,
     issue_date: data.issue_date || existing?.issue_date || today(),
@@ -1864,7 +1868,9 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
 };
 
 export const generateInvoiceQRCode = (invoice: Invoice): string => {
-  const timestamp = invoice.issue_date + "T00:00:00Z";
+  const source = invoice.createdAt || `${invoice.issue_date}T00:00:00Z`;
+  const parsed = new Date(source);
+  const timestamp = (Number.isNaN(parsed.getTime()) ? new Date(`${invoice.issue_date}T00:00:00Z`) : parsed).toISOString().replace(/\.\d{3}Z$/, "Z");
   const total = invoice.total_with_vat.toFixed(2);
   const vatAmount = invoice.vat_amount.toFixed(2);
 

@@ -16,6 +16,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import QRCode from "qrcode";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import * as api from "../api";
 
@@ -40,6 +41,8 @@ const money = (value?: number, currency = "SAR") =>
 type PriceMode = "inclusive" | "exclusive";
 
 const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
+const sellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
+const sellerEnglishName = "Breexe Pro Co.";
 
 const statusLabels: Record<api.InvoiceStatus, string> = {
   draft: "مسودة",
@@ -59,7 +62,7 @@ const statusTone: Record<api.InvoiceStatus, "muted" | "success" | "danger" | "wa
 
 const defaultTerms = [
   "فاتورة ضريبية مبسطة - متوافقة مع متطلبات هيئة الزكاة والضريبة والجمارك.",
-  "جميع الأسعار شاملة ضريبة القيمة المضافة 15%.",
+  "تحتسب ضريبة القيمة المضافة حسب طريقة إدخال السعر الموضحة في بنود الفاتورة.",
   "الدفع حسب الاتفاق المبرم بين الطرفين.",
 ].join("\n");
 
@@ -72,13 +75,28 @@ const safeFilePart = (value?: string) =>
 
 /* ── ZATCA QR Code Generation (TLV format) ─────────────── */
 
+const zatcaFieldLabels: Record<number, string> = {
+  1: "اسم البائع",
+  2: "الرقم الضريبي",
+  3: "وقت إصدار الفاتورة",
+  4: "الإجمالي شامل الضريبة",
+  5: "إجمالي ضريبة القيمة المضافة",
+};
+
+function invoiceTimestamp(invoice: api.Invoice): string {
+  const source = invoice.createdAt || `${invoice.issue_date}T00:00:00Z`;
+  const parsed = new Date(source);
+  if (Number.isNaN(parsed.getTime())) return `${invoice.issue_date}T00:00:00Z`;
+  return parsed.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 function generateZATCAQR(invoice: api.Invoice): string {
-  const timestamp = invoice.issue_date + "T00:00:00Z";
+  const timestamp = invoiceTimestamp(invoice);
   const total = invoice.total_with_vat.toFixed(2);
   const vatAmount = invoice.vat_amount.toFixed(2);
 
   const tlvData: Array<[number, string]> = [
-    [1, invoice.seller_name],
+    [1, invoice.seller_name || sellerEnglishName],
     [2, invoice.seller_vat_number],
     [3, timestamp],
     [4, total],
@@ -97,49 +115,60 @@ function generateZATCAQR(invoice: api.Invoice): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
+function decodeZATCAQR(base64: string) {
+  try {
+    const raw = atob(base64);
+    const bytes = Uint8Array.from(raw, (char) => char.charCodeAt(0));
+    const decoder = new TextDecoder();
+    const fields: Array<{ tag: number; label: string; value: string }> = [];
+    for (let index = 0; index < bytes.length;) {
+      const tag = bytes[index++];
+      const length = bytes[index++];
+      const valueBytes = bytes.slice(index, index + length);
+      index += length;
+      fields.push({ tag, label: zatcaFieldLabels[tag] || `Tag ${tag}`, value: decoder.decode(valueBytes) });
+    }
+    return fields;
+  } catch {
+    return [];
+  }
+}
+
+function zatcaChecklist(invoice: api.Invoice) {
+  return [
+    { label: "اسم البائع داخل QR", ok: Boolean(invoice.seller_name) },
+    { label: "رقم ضريبي 15 رقم", ok: /^\d{15}$/.test(invoice.seller_vat_number || "") },
+    { label: "وقت إصدار بصيغة ISO", ok: Boolean(invoiceTimestamp(invoice)) },
+    { label: "الإجمالي شامل الضريبة", ok: Number(invoice.total_with_vat || 0) > 0 },
+    { label: "إجمالي الضريبة", ok: Number(invoice.vat_amount || 0) >= 0 },
+  ];
+}
+
 /* ── QR Code component ─────────────────────────────────── */
 
 function QRCodeDisplay({ data, size = 80 }: { data: string; size?: number }) {
-  // Generate a simple visual QR representation using the data as seed
-  // In production, replace with a proper QR library like qrcode.js
-  const cells = useMemo(() => {
-    const hash = data.split("").reduce((acc, ch) => ((acc << 5) - acc + ch.charCodeAt(0)) | 0, 0);
-    const grid: boolean[][] = [];
-    for (let y = 0; y < 11; y++) {
-      grid[y] = [];
-      for (let x = 0; x < 11; x++) {
-        const val = ((hash * (y * 13 + x * 7 + 1)) % 100) > 50;
-        // Always fill corners for QR look
-        const isCorner =
-          (x < 3 && y < 3) || (x > 7 && y < 3) || (x < 3 && y > 7);
-        grid[y][x] = isCorner ? true : val;
-      }
-    }
-    return grid;
-  }, [data]);
+  const [src, setSrc] = useState("");
 
-  const cellSize = size / 13;
-  const offset = cellSize * 1;
+  useEffect(() => {
+    let active = true;
+    QRCode.toDataURL(data, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: size,
+      color: { dark: "#000000", light: "#ffffff" },
+    }).then((value) => {
+      if (active) setSrc(value);
+    }).catch(() => {
+      if (active) setSrc("");
+    });
+    return () => {
+      active = false;
+    };
+  }, [data, size]);
 
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="zatca-qr-code">
-      <rect width={size} height={size} fill="white" rx={4} />
-      {cells.map((row, y) =>
-        row.map((filled, x) =>
-          filled ? (
-            <rect
-              key={`${x}-${y}`}
-              x={offset + x * cellSize}
-              y={offset + y * cellSize}
-              width={cellSize}
-              height={cellSize}
-              fill="black"
-            />
-          ) : null,
-        ),
-      )}
-    </svg>
-  );
+  return src
+    ? <img src={src} width={size} height={size} className="zatca-qr-code" alt="ZATCA QR code" />
+    : <div className="zatca-qr-code qr-fallback" style={{ width: size, height: size }}>QR</div>;
 }
 
 /* ── Data hook ─────────────────────────────────────────── */
@@ -207,18 +236,24 @@ function invoiceSummaryRows(stats: api.InvoiceStats) {
 
 function invoiceShareText(invoice: api.Invoice) {
   const lines = invoice.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, invoice.currency)}`);
+  const qrFields = decodeZATCAQR(generateZATCAQR(invoice))
+    .map((field) => `${field.label}: ${field.value}`);
   return [
-    "فاتورة ضريبية - BreeXe Pro",
+    `فاتورة ضريبية - ${invoice.seller_name || sellerEnglishName}`,
     `رقم الفاتورة: ${invoice.invoice_number}`,
     invoice.title || "فاتورة",
     `العميل: ${invoice.customer_name}`,
     invoice.customer_phone ? `الجوال: ${invoice.customer_phone}` : "",
+    invoice.customer_vat ? `الرقم الضريبي للعميل: ${invoice.customer_vat}` : "",
     "",
     ...lines,
     "",
     `المجموع (بدون ضريبة): ${money(invoice.total_without_vat, invoice.currency)}`,
     `ضريبة القيمة المضافة (${invoice.vat_percent}%): ${money(invoice.vat_amount, invoice.currency)}`,
     `الإجمالي شامل الضريبة: ${money(invoice.total_with_vat, invoice.currency)}`,
+    "",
+    "بيانات QR عند المسح بتطبيق زاتكا:",
+    ...qrFields,
     invoice.terms ? `الشروط: ${invoice.terms}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -488,66 +523,150 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
 
 /* ── Preview ───────────────────────────────────────────── */
 
+function invoiceLineAmounts(item: api.InvoiceItem, vatPercent: number) {
+  const rate = Math.max(0, Number(vatPercent || 0)) / 100;
+  const quantity = Math.max(0, Number(item.quantity || 0));
+  const enteredTotal = Math.max(0, Number(item.total || quantity * Number(item.unit_price || 0)));
+  const net = item.vat_excluded === false && rate > 0 ? enteredTotal / (1 + rate) : enteredTotal;
+  const gross = item.vat_excluded === false ? enteredTotal : enteredTotal * (1 + rate);
+  return {
+    quantity,
+    net: Math.round(net * 100) / 100,
+    unitNet: quantity ? Math.round((net / quantity) * 100) / 100 : 0,
+    vat: Math.round((gross - net) * 100) / 100,
+    gross: Math.round(gross * 100) / 100,
+  };
+}
+
 function InvoicePreview({ invoice, onCopy }: { invoice: api.Invoice; onCopy: () => void }) {
   const qrCode = useMemo(() => generateZATCAQR(invoice), [invoice]);
+  const qrFields = useMemo(() => decodeZATCAQR(qrCode), [qrCode]);
+  const checks = useMemo(() => zatcaChecklist(invoice), [invoice]);
+  const issueTime = invoiceTimestamp(invoice).replace("T", " ").replace("Z", " UTC");
 
   return (
     <div className="quote-preview">
-      <section className="quote-preview-paper invoice-paper">
-        <header>
-          <div>
-            <span>{invoice.seller_name || "BreeXe Pro"}</span>
-            <h2>{invoice.title || "فاتورة ضريبية"}</h2>
+      <section className="invoice-a4-doc" dir="rtl">
+        <header className="invoice-doc-head">
+          <div className="invoice-brand-block">
+            <div className="quote-logo-mark">BP</div>
+            <div>
+              <span dir="ltr">{invoice.seller_name || sellerEnglishName}</span>
+              <strong>{sellerLegalName}</strong>
+              <small>{invoice.seller_address || "الرياض، المملكة العربية السعودية"}</small>
+            </div>
           </div>
-          <div className="invoice-qr-section">
-            <QRCodeDisplay data={qrCode} size={70} />
+          <div className="invoice-title-block">
+            <span>Tax Invoice</span>
+            <h2>{invoice.title || "فاتورة ضريبية"}</h2>
             <strong>{invoice.invoice_number}</strong>
           </div>
         </header>
-        {invoice.seller_vat_number && (
-          <div className="invoice-vat-badge">
-            <span>الرقم الضريبي: {invoice.seller_vat_number}</span>
-            {invoice.seller_address && <span> | {invoice.seller_address}</span>}
-          </div>
-        )}
-        <div className="quote-preview-meta">
-          <span>العميل: {invoice.customer_name}</span>
-          <span>الجوال: {invoice.customer_phone || "-"}</span>
-          <span>المدينة: {invoice.customer_city || "-"}</span>
-          <span>تاريخ الإصدار: {invoice.issue_date}</span>
-          <span>تاريخ الاستحقاق: {invoice.due_date || "-"}</span>
-          <span>الحالة: {statusLabels[invoice.status]}</span>
-        </div>
-        <table>
+
+        <section className="invoice-identity-grid">
+          <article>
+            <span>رقم الفاتورة</span>
+            <strong>{invoice.invoice_number}</strong>
+          </article>
+          <article>
+            <span>تاريخ الإصدار</span>
+            <strong>{invoice.issue_date}</strong>
+            <small>{issueTime}</small>
+          </article>
+          <article>
+            <span>الرقم الضريبي للبائع</span>
+            <strong>{invoice.seller_vat_number || "-"}</strong>
+          </article>
+          <article>
+            <span>الحالة</span>
+            <strong>{statusLabels[invoice.status]}</strong>
+          </article>
+        </section>
+
+        <section className="invoice-parties">
+          <article>
+            <h3>بيانات البائع</h3>
+            <p><span>الاسم:</span> <bdi>{invoice.seller_name || sellerEnglishName}</bdi></p>
+            <p><span>السجل/الاسم القانوني:</span> {sellerLegalName}</p>
+            <p><span>الرقم الضريبي:</span> {invoice.seller_vat_number || "-"}</p>
+            <p><span>العنوان:</span> {invoice.seller_address || "-"}</p>
+          </article>
+          <article>
+            <h3>بيانات العميل</h3>
+            <p><span>الاسم:</span> {invoice.customer_name}</p>
+            <p><span>الجوال:</span> {invoice.customer_phone || "-"}</p>
+            <p><span>المدينة:</span> {invoice.customer_city || "-"}</p>
+            <p><span>الرقم الضريبي:</span> {invoice.customer_vat || "-"}</p>
+          </article>
+          <aside className="invoice-zatca-card">
+            <QRCodeDisplay data={qrCode} size={138} />
+            <strong>رمز QR متوافق مع ZATCA</strong>
+            <span>TLV Base64 - Tags 1 to 5</span>
+          </aside>
+        </section>
+
+        <table className="invoice-doc-table">
           <thead>
             <tr>
-              <th>البند</th>
+              <th>#</th>
+              <th>البيان</th>
               <th>الكمية</th>
-              <th>سعر الوحدة</th>
-              <th>الإجمالي</th>
+              <th>سعر الوحدة قبل الضريبة</th>
+              <th>الخاضع للضريبة</th>
+              <th>VAT</th>
+              <th>الإجمالي شامل الضريبة</th>
             </tr>
           </thead>
           <tbody>
-            {invoice.items.map((item, index) => (
-              <tr key={`${item.description}-${index}`}>
-                <td>{item.description}</td>
-                <td>{item.quantity}</td>
-                <td>{money(item.unit_price, invoice.currency)}</td>
-                <td>{money(item.total, invoice.currency)}</td>
-              </tr>
-            ))}
+            {invoice.items.map((item, index) => {
+              const line = invoiceLineAmounts(item, invoice.vat_percent);
+              return (
+                <tr key={`${item.description}-${index}`}>
+                  <td>{index + 1}</td>
+                  <td>{item.description}</td>
+                  <td>{line.quantity}</td>
+                  <td>{money(line.unitNet, invoice.currency)}</td>
+                  <td>{money(line.net, invoice.currency)}</td>
+                  <td>{money(line.vat, invoice.currency)}</td>
+                  <td>{money(line.gross, invoice.currency)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
-        <div className="quote-preview-totals invoice-totals">
-          <span>المجموع (بدون ضريبة): {money(invoice.total_without_vat, invoice.currency)}</span>
-          <span>الخصم: {money(invoice.discount, invoice.currency)}</span>
-          <span>ضريبة القيمة المضافة ({invoice.vat_percent}%): {money(invoice.vat_amount, invoice.currency)}</span>
-          <strong>الإجمالي شامل الضريبة: {money(invoice.total_with_vat, invoice.currency)}</strong>
-        </div>
-        {invoice.terms && <p className="quote-preview-terms">{invoice.terms}</p>}
+
+        <section className="invoice-bottom-grid">
+          <div className="invoice-zatca-data">
+            <h3>البيانات التي تظهر عند مسح QR</h3>
+            {qrFields.map((field) => (
+              <p key={field.tag}><span>{field.label}</span><strong><bdi>{field.value}</bdi></strong></p>
+            ))}
+          </div>
+          <div className="invoice-compliance-box">
+            <h3>فحص المتطلبات الأساسية</h3>
+            {checks.map((check) => (
+              <p key={check.label} className={check.ok ? "ok" : "bad"}>
+                <span>{check.ok ? "✓" : "!"}</span>{check.label}
+              </p>
+            ))}
+          </div>
+          <div className="invoice-doc-totals">
+            <p><span>الإجمالي غير شامل الضريبة</span><strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
+            <p><span>الخصم</span><strong>{money(invoice.discount, invoice.currency)}</strong></p>
+            <p><span>ضريبة القيمة المضافة ({invoice.vat_percent}%)</span><strong>{money(invoice.vat_amount, invoice.currency)}</strong></p>
+            <p className="grand"><span>الإجمالي شامل الضريبة</span><strong>{money(invoice.total_with_vat, invoice.currency)}</strong></p>
+          </div>
+        </section>
+
+        {invoice.terms && <p className="invoice-doc-terms">{invoice.terms}</p>}
+        <footer className="invoice-doc-foot">
+          <p>هذه الفاتورة مولدة إلكترونيا، ورمز QR يحتوي بيانات TLV Base64 الأساسية المطلوبة لفواتير ZATCA المبسطة.</p>
+          <strong>{sellerEnglishName}</strong>
+        </footer>
       </section>
       <div className="form-actions">
-        <button className="btn primary" type="button" onClick={() => window.print()}><Printer size={16} /> طباعة</button>
+        <button className="btn primary" type="button" onClick={() => window.print()}><Printer size={16} /> طباعة A4</button>
+        <button className="btn muted" type="button" onClick={() => window.print()}><Download size={16} /> حفظ PDF</button>
         <button className="btn muted" type="button" onClick={onCopy}><Copy size={16} /> نسخ نص الفاتورة</button>
       </div>
     </div>
@@ -569,16 +688,21 @@ function InvoiceForm({
 }) {
   const customers = useAsyncData(() => api.getCustomers(""), []);
   const products = useAsyncData(() => api.getProducts(), []);
+  const settings = useAsyncData(() => api.getSettings(), []);
   const [customerId, setCustomerId] = useState(initial?.customer_id || "");
   const [customerName, setCustomerName] = useState(initial?.customer_name || "");
   const [customerPhone, setCustomerPhone] = useState(initial?.customer_phone || "");
   const [customerCity, setCustomerCity] = useState(initial?.customer_city || "");
+  const [customerVat, setCustomerVat] = useState(initial?.customer_vat || "");
   const [title, setTitle] = useState(initial?.title || "");
   const [status, setStatus] = useState<api.InvoiceStatus>(initial?.status || "issued");
   const [issueDate, setIssueDate] = useState(initial?.issue_date || today());
   const [dueDate, setDueDate] = useState(initial?.due_date || addDays(today(), 30));
   const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent || 15));
   const [discount, setDiscount] = useState(String(initial?.discount || 0));
+  const [sellerName, setSellerName] = useState(initial?.seller_name || "");
+  const [sellerVat, setSellerVat] = useState(initial?.seller_vat_number || "");
+  const [sellerAddress, setSellerAddress] = useState(initial?.seller_address || "");
   const [priceMode, setPriceMode] = useState<PriceMode>(
     initial?.items?.some((item) => item.vat_excluded === false) ? "inclusive" : "exclusive",
   );
@@ -600,6 +724,13 @@ function InvoiceForm({
     setCustomerPhone(selectedCustomer.phone);
     setCustomerCity(selectedCustomer.city || "");
   }, [selectedCustomer]);
+
+  useEffect(() => {
+    if (!settings.data || initial) return;
+    setSellerName(settings.data.seller_name || sellerEnglishName);
+    setSellerVat(settings.data.seller_vat_number || "");
+    setSellerAddress(settings.data.seller_address || `${sellerLegalName} - الرياض`);
+  }, [settings.data, initial]);
 
   const normalizedItems = useMemo(
     () =>
@@ -650,6 +781,7 @@ function InvoiceForm({
         customer_name: customerName.trim(),
         customer_phone: customerPhone.trim(),
         customer_city: customerCity.trim(),
+        customer_vat: customerVat.trim(),
         title: title.trim(),
         status,
         issue_date: issueDate,
@@ -660,6 +792,9 @@ function InvoiceForm({
         items: normalizedItems.filter((item) => item.description.trim()),
         notes: notes.trim(),
         terms: terms.trim(),
+        seller_name: sellerName.trim() || sellerEnglishName,
+        seller_vat_number: sellerVat.trim(),
+        seller_address: sellerAddress.trim(),
       });
     } catch (err) {
       notify(err instanceof Error ? err.message : "فشل حفظ الفاتورة", false);
@@ -702,6 +837,34 @@ function InvoiceForm({
           <span>المدينة</span>
           <input className="input" value={customerCity} onChange={(event) => setCustomerCity(event.target.value)} />
         </label>
+        <label className="field">
+          <span>الرقم الضريبي للعميل (اختياري)</span>
+          <input className="input" inputMode="numeric" value={customerVat} onChange={(event) => setCustomerVat(event.target.value.replace(/\D/g, "").slice(0, 15))} placeholder="15 رقم" />
+        </label>
+      </div>
+
+      <div className="invoice-seller-form">
+        <div className="quote-lines-head">
+          <strong>بيانات المنشأة على الفاتورة</strong>
+          <span>تظهر في QR والفاتورة المطبوعة</span>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>اسم البائع</span>
+            <input className="input" value={sellerName} onChange={(event) => setSellerName(event.target.value)} placeholder={sellerEnglishName} required />
+          </label>
+          <label className="field">
+            <span>الرقم الضريبي للبائع</span>
+            <input className="input" inputMode="numeric" value={sellerVat} onChange={(event) => setSellerVat(event.target.value.replace(/\D/g, "").slice(0, 15))} placeholder="15 رقم" required />
+          </label>
+        </div>
+        <label className="field">
+          <span>عنوان البائع</span>
+          <input className="input" value={sellerAddress} onChange={(event) => setSellerAddress(event.target.value)} placeholder={`${sellerLegalName} - الرياض`} />
+        </label>
+      </div>
+
+      <div className="form-grid">
         <label className="field">
           <span>حالة الفاتورة</span>
           <select className="input" value={status} onChange={(event) => setStatus(event.target.value as api.InvoiceStatus)}>
