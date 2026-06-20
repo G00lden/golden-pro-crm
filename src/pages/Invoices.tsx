@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import QRCode from "qrcode";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import * as api from "../api";
 
 type Notifier = (message: string, ok?: boolean) => void;
@@ -329,8 +330,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     }
   };
 
-  const printInvoice = (invoice: api.Invoice, asPdf = false) => {
-    setPreview(invoice);
+  const openInvoicePrintDialog = (invoice: api.Invoice, asPdf = false) => {
     const previousTitle = document.title;
     document.title = `فاتورة إلى ${safeFilePart(invoice.customer_name)}`;
     document.body.classList.add("quote-print-mode");
@@ -340,8 +340,15 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       window.removeEventListener("afterprint", restore);
     };
     window.addEventListener("afterprint", restore);
-    window.setTimeout(() => window.print(), 120);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => window.print());
+    });
     notify(asPdf ? "اختر حفظ كـ PDF من نافذة الطباعة" : "تم تجهيز الفاتورة للطباعة A4");
+  };
+
+  const printInvoice = (invoice: api.Invoice, asPdf = false) => {
+    flushSync(() => setPreview(invoice));
+    openInvoicePrintDialog(invoice, asPdf);
   };
 
   const sendInvoiceWhatsApp = async (invoice: api.Invoice) => {
@@ -514,7 +521,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       )}
       {preview && (
         <InvoiceModal title={`معاينة ${preview.invoice_number}`} onClose={() => setPreview(null)}>
-          <InvoicePreview invoice={preview} onCopy={() => copyInvoice(preview)} />
+          <InvoicePreview invoice={preview} onCopy={() => copyInvoice(preview)} onPrint={(asPdf) => openInvoicePrintDialog(preview, asPdf)} />
         </InvoiceModal>
       )}
     </div>
@@ -538,7 +545,7 @@ function invoiceLineAmounts(item: api.InvoiceItem, vatPercent: number) {
   };
 }
 
-function InvoicePreview({ invoice, onCopy }: { invoice: api.Invoice; onCopy: () => void }) {
+function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; onCopy: () => void; onPrint: (asPdf?: boolean) => void }) {
   const qrCode = useMemo(() => generateZATCAQR(invoice), [invoice]);
   const qrFields = useMemo(() => decodeZATCAQR(qrCode), [qrCode]);
   const checks = useMemo(() => zatcaChecklist(invoice), [invoice]);
@@ -665,8 +672,8 @@ function InvoicePreview({ invoice, onCopy }: { invoice: api.Invoice; onCopy: () 
         </footer>
       </section>
       <div className="form-actions">
-        <button className="btn primary" type="button" onClick={() => window.print()}><Printer size={16} /> طباعة A4</button>
-        <button className="btn muted" type="button" onClick={() => window.print()}><Download size={16} /> حفظ PDF</button>
+        <button className="btn primary" type="button" onClick={() => onPrint(false)}><Printer size={16} /> طباعة A4</button>
+        <button className="btn muted" type="button" onClick={() => onPrint(true)}><Download size={16} /> حفظ PDF</button>
         <button className="btn muted" type="button" onClick={onCopy}><Copy size={16} /> نسخ نص الفاتورة</button>
       </div>
     </div>
