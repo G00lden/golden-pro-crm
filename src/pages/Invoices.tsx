@@ -74,6 +74,13 @@ const safeFilePart = (value?: string) =>
     .replace(/\s+/g, " ")
     .slice(0, 80) || "العميل";
 
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
 /* ── ZATCA QR Code Generation (TLV format) ─────────────── */
 
 const zatcaFieldLabels: Record<number, string> = {
@@ -330,20 +337,95 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     }
   };
 
-  const openInvoicePrintDialog = (invoice: api.Invoice, asPdf = false) => {
+  const openInvoicePrintDialog = async (invoice: api.Invoice, asPdf = false) => {
     const previousTitle = document.title;
     document.title = `فاتورة إلى ${safeFilePart(invoice.customer_name)}`;
     document.body.classList.add("quote-print-mode");
+    let printFrame: HTMLIFrameElement | null = null;
     const restore = () => {
       document.title = previousTitle;
       document.body.classList.remove("quote-print-mode");
-      window.removeEventListener("afterprint", restore);
+      printFrame?.remove();
     };
-    window.addEventListener("afterprint", restore);
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => window.print());
-    });
-    notify(asPdf ? "اختر حفظ كـ PDF من نافذة الطباعة" : "تم تجهيز الفاتورة للطباعة A4");
+    try {
+      const invoiceNode = document.querySelector<HTMLElement>(".invoice-a4-doc");
+      if (!invoiceNode) throw new Error("Invoice preview is not ready.");
+      const clone = invoiceNode.cloneNode(true) as HTMLElement;
+      const qrTarget = clone.querySelector<HTMLElement>(".zatca-qr-code");
+      if (qrTarget) {
+        const qrSrc = await QRCode.toDataURL(generateZATCAQR(invoice), {
+          errorCorrectionLevel: "M",
+          margin: 1,
+          width: 120,
+          color: { dark: "#000000", light: "#ffffff" },
+        });
+        if (qrTarget instanceof HTMLImageElement) {
+          qrTarget.src = qrSrc;
+        } else {
+          const qrImage = document.createElement("img");
+          qrImage.src = qrSrc;
+          qrImage.width = 120;
+          qrImage.height = 120;
+          qrImage.className = "zatca-qr-code";
+          qrImage.alt = "ZATCA QR code";
+          qrTarget.replaceWith(qrImage);
+        }
+      }
+      const styles = Array.from(document.querySelectorAll<HTMLLinkElement | HTMLStyleElement>('link[rel="stylesheet"], style'))
+        .map((element) => element.outerHTML)
+        .join("\n");
+      printFrame = document.createElement("iframe");
+      printFrame.title = "invoice-print-frame";
+      Object.assign(printFrame.style, {
+        position: "fixed",
+        inset: "auto 0 0 auto",
+        width: "0",
+        height: "0",
+        border: "0",
+        opacity: "0",
+      });
+      document.body.appendChild(printFrame);
+      const frameDoc = printFrame.contentDocument;
+      const frameWindow = printFrame.contentWindow;
+      if (!frameDoc || !frameWindow) throw new Error("Print frame is not available.");
+      frameDoc.open();
+      frameDoc.write(`<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <base href="${window.location.origin}/" />
+  <title>${escapeHtml(document.title)}</title>
+  ${styles}
+  <style>
+    @page { size: A4; margin: 0; }
+    html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+    body { width: 210mm !important; min-height: 297mm !important; overflow: visible !important; }
+    .invoice-print-shell { width: 210mm !important; margin: 0 !important; padding: 0 !important; background: #fff !important; }
+    .invoice-a4-doc { width: 210mm !important; min-height: 297mm !important; margin: 0 !important; padding: 10mm 12mm !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
+  </style>
+</head>
+<body class="quote-print-mode">
+  <main class="invoice-print-shell">${clone.outerHTML}</main>
+</body>
+</html>`);
+      frameDoc.close();
+      frameWindow.addEventListener("afterprint", restore, { once: true });
+      const runPrint = () => {
+        frameWindow.focus();
+        frameWindow.print();
+        window.setTimeout(restore, 3000);
+      };
+      if (frameDoc.readyState === "complete") {
+        window.setTimeout(runPrint, 150);
+      } else {
+        printFrame.addEventListener("load", () => window.setTimeout(runPrint, 150), { once: true });
+      }
+      notify(asPdf ? "اختر حفظ كـ PDF من نافذة الطباعة" : "تم تجهيز الفاتورة للطباعة A4");
+    } catch {
+      restore();
+      notify("تعذر تجهيز الفاتورة للطباعة. افتح المعاينة ثم حاول مرة أخرى.", false);
+    }
   };
 
   const printInvoice = (invoice: api.Invoice, asPdf = false) => {
@@ -521,7 +603,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       )}
       {preview && (
         <InvoiceModal title={`معاينة ${preview.invoice_number}`} onClose={() => setPreview(null)}>
-          <InvoicePreview invoice={preview} onCopy={() => copyInvoice(preview)} onPrint={(asPdf) => openInvoicePrintDialog(preview, asPdf)} />
+          <InvoicePreview invoice={preview} onCopy={() => copyInvoice(preview)} onPrint={(asPdf) => void openInvoicePrintDialog(preview, asPdf)} />
         </InvoiceModal>
       )}
     </div>
