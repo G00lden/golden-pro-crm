@@ -525,7 +525,7 @@ export type QuoteListResponse = {
   stats: QuoteStats;
 };
 
-export type InvoiceStatus = "draft" | "issued" | "paid" | "cancelled" | "refunded";
+export type InvoiceStatus = "draft" | "issued" | "sent" | "paid" | "cancelled" | "refunded";
 
 export type InvoiceItem = {
   product_id?: string | null;
@@ -580,8 +580,10 @@ export type InvoiceStats = {
   total: number;
   draft: number;
   issued: number;
+  sent: number;
   paid: number;
   cancelled: number;
+  refunded: number;
   total_value: number;
   paid_value: number;
 };
@@ -1636,8 +1638,10 @@ function invoiceStats(invoices: Invoice[]): InvoiceStats {
     total: invoices.length,
     draft: invoices.filter((item) => item.status === "draft").length,
     issued: invoices.filter((item) => item.status === "issued").length,
+    sent: invoices.filter((item) => item.status === "sent").length,
     paid: invoices.filter((item) => item.status === "paid").length,
     cancelled: invoices.filter((item) => item.status === "cancelled").length,
+    refunded: invoices.filter((item) => item.status === "refunded").length,
     total_value: invoices.reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
     paid_value: invoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
   };
@@ -1822,12 +1826,16 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
   const user = getUserOrThrow();
   const uid = user.uid;
 
+  if (!user.local && serverDataEnabled()) {
+    return apiFetch<{ id: string }>(`/api/quotes/${quoteId}/convert-to-invoice`, {
+      method: "POST",
+    }).then((result) => result.id);
+  }
+
   let quote: Quote | null = null;
   if (user.local) {
     const localDb = loadLocalDb(uid);
     quote = localDb.quotes.find((q) => q.id === quoteId) || null;
-  } else if (serverDataEnabled()) {
-    quote = await apiFetch<Quote>(`/api/quotes/${quoteId}`);
   } else {
     const snap = await getDoc(doc(db, "quotes", quoteId));
     if (snap.exists()) quote = { id: snap.id, ...snap.data() } as Quote;
@@ -1851,11 +1859,13 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
     discount: quote.discount,
     vat_percent: 15,
     items: quote.items.map((item) => ({
+      product_id: item.product_id || null,
+      product_sku: item.product_sku || "",
       description: item.description,
       quantity: item.quantity,
       unit_price: item.unit_price,
       total: item.total,
-      vat_excluded: true,
+      vat_excluded: item.vat_excluded !== false,
     })),
     notes: quote.notes,
     terms: quote.terms,

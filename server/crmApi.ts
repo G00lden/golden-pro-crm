@@ -1,4 +1,6 @@
 import type express from "express";
+import crypto from "crypto";
+import QRCode from "qrcode";
 import { adminDb } from "./firebaseAdmin";
 import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
@@ -731,8 +733,8 @@ export function registerCrmApiRoutes(app: express.Express) {
 
 /* ── Invoice Routes (Firestore) ────────────────────────────────── */
 
-type InvoiceStatus = "draft" | "issued" | "paid" | "cancelled" | "refunded";
-const invoiceStatuses = new Set(["draft", "issued", "paid", "cancelled", "refunded"]);
+type InvoiceStatus = "draft" | "issued" | "sent" | "paid" | "cancelled" | "refunded";
+const invoiceStatuses = new Set(["draft", "issued", "sent", "paid", "cancelled", "refunded"]);
 
 function invoiceNumber(seed = Date.now(), index = 1) {
   const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
@@ -771,6 +773,46 @@ function zatcaQrFields(sellerName: string, vatNumber: string, timestamp: string,
     { tag: 4, label: "Invoice total including VAT", value: total.toFixed(2) },
     { tag: 5, label: "VAT total", value: vatTotal.toFixed(2) },
   ];
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function invoiceShareSecret() {
+  return process.env.INVOICE_SHARE_SECRET || process.env.JWT_SECRET || process.env.SESSION_SECRET || "local-dev-invoice-share";
+}
+
+function invoiceShareToken(invoiceId: string, ownerUid: string) {
+  return crypto
+    .createHmac("sha256", invoiceShareSecret())
+    .update(`${invoiceId}:${ownerUid}`)
+    .digest("hex");
+}
+
+function validInvoiceShareToken(invoiceId: string, ownerUid: string, token: string) {
+  const expected = invoiceShareToken(invoiceId, ownerUid);
+  const received = String(token || "");
+  if (expected.length !== received.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received));
+}
+
+function publicBaseUrl(req: express.Request) {
+  const configured = String(process.env.PUBLIC_APP_URL || process.env.APP_URL || "").replace(/\/+$/, "");
+  if (configured) return configured;
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "http").split(",")[0];
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0];
+  return `${proto}://${host}`;
+}
+
+function invoiceShareUrl(req: express.Request, invoice: Record<string, any>) {
+  const ownerUid = String(invoice.createdBy || invoice.owner_uid || "");
+  const token = invoiceShareToken(String(invoice.id), ownerUid);
+  return `${publicBaseUrl(req)}/public/invoices/${encodeURIComponent(String(invoice.id))}?token=${token}`;
 }
 
 function invoiceQrTimestamp(invoice: Record<string, any>) {
@@ -843,6 +885,153 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
   };
 }
 
+function invoiceLineAmounts(item: Record<string, any>, vatPercent: number) {
+  const rate = Math.max(0, Number(vatPercent || 0)) / 100;
+  const quantity = Math.max(0, Number(item.quantity || 0));
+  const enteredTotal = Math.max(0, Number(item.total || quantity * Number(item.unit_price || 0)));
+  const net = item.vat_excluded === false && rate > 0 ? enteredTotal / (1 + rate) : enteredTotal;
+  const gross = item.vat_excluded === false ? enteredTotal : enteredTotal * (1 + rate);
+  return {
+    quantity,
+    net: Math.round(net * 100) / 100,
+    unitNet: quantity ? Math.round((net / quantity) * 100) / 100 : 0,
+    vat: Math.round((gross - net) * 100) / 100,
+    gross: Math.round(gross * 100) / 100,
+  };
+}
+
+async function publicInvoiceHtml(invoice: Record<string, any>) {
+  const timestamp = invoiceQrTimestamp(invoice);
+  const sellerName = invoice.seller_name || "Breexe Pro Co.";
+  const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
+  const qrBase64 = generateZatcaBase64(
+    sellerName,
+    sellerVat,
+    timestamp,
+    Number(invoice.total_with_vat || 0),
+    Number(invoice.vat_amount || invoice.vat || 0),
+  );
+  const qrSrc = await QRCode.toDataURL(qrBase64, {
+    errorCorrectionLevel: "M",
+    margin: 1,
+    width: 132,
+    color: { dark: "#000000", light: "#ffffff" },
+  });
+  const currency = String(invoice.currency || "SAR");
+  const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
+    const line = invoiceLineAmounts(item, Number(invoice.vat_percent || 15));
+    return `<tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(item.description)}</td>
+      <td>${line.quantity}</td>
+      <td>${escapeHtml(formatMoney(line.unitNet, currency))}</td>
+      <td>${escapeHtml(formatMoney(line.net, currency))}</td>
+      <td>${escapeHtml(formatMoney(line.vat, currency))}</td>
+      <td>${escapeHtml(formatMoney(line.gross, currency))}</td>
+    </tr>`;
+  }).join("");
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(invoice.invoice_number || "Tax invoice")}</title>
+  <style>
+    @page { size: A4; margin: 0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #eef2f5; color: #17212b; font-family: Arial, Tahoma, sans-serif; }
+    .doc { width: 210mm; min-height: 297mm; margin: 0 auto; padding: 12mm; background: #fff; }
+    .head { display: flex; justify-content: space-between; gap: 16px; align-items: start; padding-bottom: 12px; border-bottom: 3px solid #d6a84f; }
+    .brand strong { display: block; font-size: 21px; color: #0f3f54; }
+    .brand span, .title span, .box span { color: #64748b; font-size: 11px; font-weight: 800; }
+    .title { text-align: left; }
+    .title h1 { margin: 4px 0; color: #0f3f54; font-size: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 14px 0; }
+    .box { border: 1px solid #d7e0ea; border-radius: 8px; padding: 8px; min-height: 58px; }
+    .box strong { display: block; margin-top: 4px; color: #10212c; font-size: 13px; }
+    .parties { display: grid; grid-template-columns: 1fr 1fr 150px; gap: 10px; margin-bottom: 14px; }
+    .party, .qr { border: 1px solid #d7e0ea; border-radius: 10px; padding: 10px; }
+    .party h2 { margin: 0 0 8px; color: #0f6a86; font-size: 14px; }
+    .party p { margin: 5px 0; color: #334155; font-size: 12px; }
+    .qr { display: grid; place-items: center; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+    th { padding: 9px; background: #0f6a86; color: #fff; font-size: 11px; }
+    td { padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 11px; text-align: center; }
+    td:nth-child(2) { text-align: right; white-space: pre-line; }
+    .totals { width: 330px; margin-right: auto; border: 1px solid #d7e0ea; border-radius: 10px; overflow: hidden; }
+    .totals p { display: flex; justify-content: space-between; margin: 0; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
+    .totals p:last-child { border-bottom: 0; background: #12314a; color: #fff; font-weight: 900; }
+    .terms { margin-top: 14px; padding: 10px; border: 1px solid #d7e0ea; border-radius: 10px; color: #475569; font-size: 11px; white-space: pre-line; }
+    @media print { body { background: #fff; } .doc { margin: 0; box-shadow: none; } }
+  </style>
+</head>
+<body>
+  <main class="doc">
+    <header class="head">
+      <div class="brand">
+        <strong>${escapeHtml(sellerName)}</strong>
+        <span>شركة بريكس برو شخص واحد ذات مسؤولية محدودة</span>
+        <p>${escapeHtml(invoice.seller_address || "")}</p>
+      </div>
+      <div class="title">
+        <span>Tax Invoice</span>
+        <h1>${escapeHtml(invoice.title || "فاتورة ضريبية")}</h1>
+        <strong>${escapeHtml(invoice.invoice_number || "")}</strong>
+      </div>
+    </header>
+    <section class="grid">
+      <div class="box"><span>رقم الفاتورة</span><strong>${escapeHtml(invoice.invoice_number || "")}</strong></div>
+      <div class="box"><span>تاريخ الإصدار</span><strong>${escapeHtml(invoice.issue_date || "")}</strong></div>
+      <div class="box"><span>الرقم الضريبي للبائع</span><strong>${escapeHtml(sellerVat)}</strong></div>
+      <div class="box"><span>الحالة</span><strong>${escapeHtml(invoice.status || "")}</strong></div>
+    </section>
+    <section class="parties">
+      <article class="party">
+        <h2>بيانات البائع</h2>
+        <p>الاسم: ${escapeHtml(sellerName)}</p>
+        <p>الرقم الضريبي: ${escapeHtml(sellerVat)}</p>
+        <p>العنوان: ${escapeHtml(invoice.seller_address || "-")}</p>
+      </article>
+      <article class="party">
+        <h2>بيانات العميل</h2>
+        <p>الاسم: ${escapeHtml(invoice.customer_name || "-")}</p>
+        <p>الجوال: ${escapeHtml(invoice.customer_phone || "-")}</p>
+        <p>المدينة: ${escapeHtml(invoice.customer_city || "-")}</p>
+        <p>الرقم الضريبي: ${escapeHtml(invoice.customer_vat || "-")}</p>
+      </article>
+      <aside class="qr"><img src="${qrSrc}" width="132" height="132" alt="ZATCA QR" /></aside>
+    </section>
+    <table>
+      <thead><tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th><th>الخاضع للضريبة</th><th>VAT</th><th>الإجمالي شامل الضريبة</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <section class="totals">
+      <p><span>الإجمالي غير شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
+      <p><span>الخصم</span><strong>${escapeHtml(formatMoney(invoice.discount, currency))}</strong></p>
+      <p><span>ضريبة القيمة المضافة (${escapeHtml(invoice.vat_percent || 15)}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
+      <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
+    </section>
+    ${invoice.terms ? `<section class="terms">${escapeHtml(invoice.terms)}</section>` : ""}
+  </main>
+</body>
+</html>`;
+}
+
+  app.get("/public/invoices/:id", asyncRoute(async (req, res) => {
+    const snap = await adminDb.collection("invoices").doc(req.params.id).get() as DocSnapshot;
+    if (!snap.exists) {
+      res.status(404).type("text/plain").send("Invoice not found.");
+      return;
+    }
+    const invoice = normalizeInvoice(docData(snap));
+    const ownerUid = String(invoice.createdBy || invoice.owner_uid || "");
+    if (!ownerUid || !validInvoiceShareToken(req.params.id, ownerUid, String(req.query.token || ""))) {
+      res.status(403).type("text/plain").send("Invalid invoice link.");
+      return;
+    }
+    res.type("html").send(await publicInvoiceHtml(invoice));
+  }));
+
   app.get("/api/invoices", asyncRoute(async (req, res) => {
     const search = String(req.query.search || "").trim();
     const status = String(req.query.status || "").trim();
@@ -859,8 +1048,10 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       total: all.length,
       draft: all.filter((item) => item.status === "draft").length,
       issued: all.filter((item) => item.status === "issued").length,
+      sent: all.filter((item) => item.status === "sent").length,
       paid: all.filter((item) => item.status === "paid").length,
       cancelled: all.filter((item) => item.status === "cancelled").length,
+      refunded: all.filter((item) => item.status === "refunded").length,
       total_value: all.reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
       paid_value: all.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
     };
@@ -919,6 +1110,16 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       return;
     }
     res.json(normalizeInvoice(existing));
+  }));
+
+  app.get("/api/invoices/:id/share-link", asyncRoute(async (req, res) => {
+    const existing = await getOwned("invoices", req.params.id, userId(req));
+    if (!existing) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    const invoice = normalizeInvoice(existing);
+    res.json({ url: invoiceShareUrl(req, invoice) });
   }));
 
   app.put("/api/invoices/:id", asyncRoute(async (req, res) => {
@@ -999,6 +1200,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       return;
     }
     const currency = String(invoice.currency || "SAR");
+    const documentUrl = invoiceShareUrl(req, invoice);
     const lines = (Array.isArray(invoice.items) ? invoice.items : []).map(
       (item: Record<string, any>) => `- ${item.description} × ${item.quantity}: ${Number(item.total || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
@@ -1015,6 +1217,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       `الإجمالي شامل الضريبة: ${Number(invoice.total_with_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       "",
       `الرقم الضريبي: ${invoice.seller_vat || "313049114100003"}`,
+      `رابط الفاتورة للطباعة أو الحفظ PDF: ${documentUrl}`,
       invoice.notes ? `ملاحظات: ${invoice.notes}` : "",
     ].filter(Boolean).join("\n");
     let result: Awaited<ReturnType<typeof whatsappService.sendText>>;
@@ -1042,9 +1245,14 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
         kind: "invoice",
         invoice_id: req.params.id,
         invoice_number: invoice.invoice_number,
+        document_url: documentUrl,
       },
     });
-    res.json({ success: true, result });
+    if (invoice.status === "draft" || invoice.status === "issued") {
+      await updateOwned("invoices", req.params.id, uid, { status: "sent" });
+    }
+    const updatedInvoice = await getOwned("invoices", req.params.id, uid);
+    res.json({ success: true, result, invoice: updatedInvoice ? normalizeInvoice(updatedInvoice) : null });
   }));
 
   app.get("/api/invoices/:id/qr", asyncRoute(async (req, res) => {

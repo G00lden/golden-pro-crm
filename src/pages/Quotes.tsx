@@ -17,7 +17,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import html2canvas from "html2canvas";
+import { jsPDF } from "jspdf";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import * as api from "../api";
 
 type Notifier = (message: string, ok?: boolean) => void;
@@ -39,6 +42,8 @@ const money = (value?: number, currency = "SAR") =>
   `${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
 
 const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
+const quoteSellerEnglishName = "Breexe Pro Co.";
+const quoteSellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
 
 const statusLabels: Record<api.QuoteStatus, string> = {
   draft: "مسودة",
@@ -137,6 +142,13 @@ const safeFilePart = (value?: string) =>
     .replace(/\s+/g, " ")
     .slice(0, 80) || "العميل";
 
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
 const paymentForQuote = (quote: api.Quote) => ({
   method: quote.payment_method || defaultPayment.method,
   downPercent: Number(quote.payment_down_percent ?? defaultPayment.downPercent),
@@ -148,6 +160,143 @@ const paymentForQuote = (quote: api.Quote) => ({
   iban: quote.payment_iban || defaultPayment.iban,
   note: quote.payment_note || defaultPayment.note,
 });
+
+const quoteStandaloneCss = `
+  @page { size: A4; margin: 0; }
+  html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+  body { width: 210mm !important; overflow: visible !important; }
+  .quote-print-shell { width: 210mm !important; margin: 0 !important; padding: 0 !important; background: #fff !important; }
+  .quote-document-stage {
+    display: block !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+  }
+  .quote-a4-doc {
+    width: 210mm !important;
+    min-height: 297mm !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+  .quote-a4-doc:last-child { page-break-after: auto !important; break-after: auto !important; }
+  .quote-cover-page,
+  .quote-doc-head,
+  .quote-doc-title,
+  .quote-doc-table th,
+  .quote-payment-block h3,
+  .quote-terms-block h3 {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+`;
+
+function quoteStylesMarkup() {
+  return Array.from(document.querySelectorAll<HTMLLinkElement | HTMLStyleElement>('link[rel="stylesheet"], style'))
+    .map((element) => element.outerHTML)
+    .join("\n");
+}
+
+function waitForQuoteDocumentAssets(doc: Document) {
+  const fontsReady = doc.fonts?.ready?.catch(() => undefined) || Promise.resolve();
+  const imagesReady = Promise.all(Array.from(doc.images).map((image) => {
+    if (image.complete) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      image.onload = () => resolve();
+      image.onerror = () => resolve();
+    });
+  }));
+  return Promise.all([fontsReady, imagesReady]);
+}
+
+function buildQuoteDocumentHtml(quote: api.Quote) {
+  const quoteNode = document.querySelector<HTMLElement>(".quote-document-stage");
+  if (!quoteNode) throw new Error("Quote preview is not ready.");
+  const clone = quoteNode.cloneNode(true) as HTMLElement;
+  const title = `عرض سعر إلى ${safeFilePart(quote.customer_name)}`;
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <base href="${window.location.origin}/" />
+  <title>${escapeHtml(title)}</title>
+  ${quoteStylesMarkup()}
+  <style>${quoteStandaloneCss}</style>
+</head>
+<body class="quote-print-body">
+  <main class="quote-print-shell">${clone.outerHTML}</main>
+</body>
+</html>`;
+}
+
+async function writeQuoteHtmlToFrame(frame: HTMLIFrameElement, html: string) {
+  const doc = frame.contentDocument;
+  if (!doc) throw new Error("Quote frame is not available.");
+  await new Promise<void>((resolve) => {
+    frame.onload = () => resolve();
+    doc.open();
+    doc.write(html);
+    doc.close();
+    window.setTimeout(resolve, 500);
+  });
+  await waitForQuoteDocumentAssets(doc);
+  return doc;
+}
+
+async function saveQuotePdfFile(quote: api.Quote) {
+  const html = buildQuoteDocumentHtml(quote);
+  const frame = document.createElement("iframe");
+  frame.title = "quote-pdf-frame";
+  Object.assign(frame.style, {
+    position: "fixed",
+    left: "-10000px",
+    top: "0",
+    width: "210mm",
+    height: "297mm",
+    border: "0",
+    background: "#fff",
+  });
+  document.body.appendChild(frame);
+  try {
+    const doc = await writeQuoteHtmlToFrame(frame, html);
+    const pages = Array.from(doc.querySelectorAll<HTMLElement>(".quote-a4-doc"));
+    if (!pages.length) throw new Error("Quote PDF pages are not available.");
+    const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    for (const [index, page] of pages.entries()) {
+      const canvas = await html2canvas(page, {
+        backgroundColor: "#ffffff",
+        logging: false,
+        scale: Math.min(3, Math.max(2, window.devicePixelRatio || 2)),
+        useCORS: true,
+        windowWidth: page.scrollWidth,
+        windowHeight: page.scrollHeight,
+      });
+      if (index > 0) pdf.addPage();
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, 210, 297);
+    }
+    pdf.save(`${safeFilePart(quote.quote_number)}-${safeFilePart(quote.customer_name)}.pdf`);
+  } finally {
+    frame.remove();
+  }
+}
+
+async function printQuoteInNewWindow(quote: api.Quote, printWindow: Window | null) {
+  if (!printWindow) throw new Error("Popup blocked.");
+  const html = buildQuoteDocumentHtml(quote);
+  const doc = printWindow.document;
+  doc.open();
+  doc.write(html);
+  doc.close();
+  await waitForQuoteDocumentAssets(doc);
+  printWindow.focus();
+  window.setTimeout(() => printWindow.print(), 250);
+}
 
 function useAsyncData<T>(fetcher: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -293,19 +442,29 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
     }
   };
 
-  const printQuote = (quote: api.Quote, asPdf = false) => {
-    setPreview(quote);
+  const openQuotePrintDialog = async (quote: api.Quote, asPdf = false, printWindow: Window | null = null) => {
     const previousTitle = document.title;
     document.title = `عرض سعر إلى ${safeFilePart(quote.customer_name)}`;
-    document.body.classList.add("quote-print-mode");
-    const restore = () => {
+    try {
+      if (asPdf) {
+        await saveQuotePdfFile(quote);
+        notify("تم حفظ ملف PDF لعرض السعر فقط");
+      } else {
+        await printQuoteInNewWindow(quote, printWindow);
+        notify("تم فتح مستند طباعة مستقل لعرض السعر فقط");
+      }
+    } catch {
+      printWindow?.close();
+      notify(asPdf ? "تعذر حفظ PDF لعرض السعر." : "تعذر فتح مستند الطباعة. اسمح بفتح النوافذ المنبثقة ثم حاول مرة أخرى.", false);
+    } finally {
       document.title = previousTitle;
-      document.body.classList.remove("quote-print-mode");
-      window.removeEventListener("afterprint", restore);
-    };
-    window.addEventListener("afterprint", restore);
-    window.setTimeout(() => window.print(), 120);
-    notify(asPdf ? "اختر حفظ كـ PDF من نافذة الطباعة" : "تم تجهيز عرض السعر للطباعة A4");
+    }
+  };
+
+  const printQuote = (quote: api.Quote, asPdf = false) => {
+    const printWindow = asPdf ? null : window.open("", "_blank");
+    flushSync(() => setPreview(quote));
+    void openQuotePrintDialog(quote, asPdf, printWindow);
   };
 
   const sendQuoteWhatsApp = async (quote: api.Quote) => {
@@ -436,7 +595,7 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                 <button className="icon-btn" type="button" title="متابعة" onClick={() => setQuoteStatus(quote, "follow_up")}>
                   <Clock3 size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="طباعة" onClick={() => window.print()}>
+                <button className="icon-btn" type="button" title="طباعة" onClick={() => printQuote(quote)}>
                   <Printer size={15} />
                 </button>
                 <button className="icon-btn" type="button" title="معاينة" onClick={() => setPreview(quote)}>
@@ -476,34 +635,72 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
       )}
       {preview && (
         <QuoteModal title={`معاينة ${preview.quote_number}`} onClose={() => setPreview(null)}>
-          <QuotePreview quote={preview} onCopy={() => copyQuote(preview)} />
+          <QuotePreview
+            quote={preview}
+            onCopy={() => copyQuote(preview)}
+            onPrint={(asPdf) => {
+              const printWindow = asPdf ? null : window.open("", "_blank");
+              void openQuotePrintDialog(preview, asPdf, printWindow);
+            }}
+          />
         </QuoteModal>
       )}
     </div>
   );
 }
 
-function QuotePreview({ quote, onCopy }: { quote: api.Quote; onCopy: () => void }) {
+function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: () => void; onPrint: (asPdf?: boolean) => void }) {
+  const payment = paymentForQuote(quote);
+  const terms = String(quote.terms || defaultTerms).split(/\n+/).map((line) => line.trim()).filter(Boolean);
+
   return (
     <div className="quote-preview">
-      <section className="quote-preview-paper">
-        <header>
-          <div>
-            <span>BreeXe Pro</span>
+      <div className="quote-document-stage">
+        <section className="quote-a4-doc quote-cover-page" dir="rtl">
+          <header className="quote-cover-top">
+            <div>
+              <strong>{quoteSellerEnglishName}</strong>
+              <span>{quoteSellerLegalName}</span>
+            </div>
+            <div className="quote-logo-mark">BP</div>
+          </header>
+          <div className="quote-cover-body">
+            <div className="quote-cover-logo">BP</div>
+            <span className="quote-cover-badge">{quote.quote_number}</span>
             <h2>{quote.title || "عرض سعر"}</h2>
+            <p>{quote.customer_name} · {quote.issue_date}</p>
           </div>
-          <strong>{quote.quote_number}</strong>
-        </header>
-        <div className="quote-preview-meta">
-          <span>العميل: {quote.customer_name}</span>
-          <span>الجوال: {quote.customer_phone || "-"}</span>
-          <span>المدينة: {quote.customer_city || "-"}</span>
-          <span>تاريخ الإصدار: {quote.issue_date}</span>
-          <span>صالح حتى: {quote.valid_until || "-"}</span>
-        </div>
-        <table>
+          <footer className="quote-cover-foot">
+            <span>قيمة العرض: <strong>{money(quote.total, quote.currency)}</strong></span>
+            <span>صالح حتى: <strong>{quote.valid_until || "-"}</strong></span>
+          </footer>
+        </section>
+
+        <section className="quote-a4-doc quote-detail-page" dir="rtl">
+          <header className="quote-doc-head">
+            <div>
+              <strong>{quoteSellerEnglishName}</strong>
+              <span>{quoteSellerLegalName}</span>
+            </div>
+            <div className="quote-logo-mark">BP</div>
+          </header>
+
+          <div className="quote-doc-title">
+            <h2>{quote.title || "عرض سعر"}</h2>
+            <p>{quote.quote_number}</p>
+          </div>
+
+          <div className="quote-client-grid">
+            <span>العميل<br /><strong>{quote.customer_name}</strong></span>
+            <span>الجوال<br /><strong>{quote.customer_phone || "-"}</strong></span>
+            <span>المدينة<br /><strong>{quote.customer_city || "-"}</strong></span>
+            <span>الصلاحية<br /><strong>{quote.valid_until || "-"}</strong></span>
+          </div>
+
+          <table className="quote-doc-table">
           <thead>
             <tr>
+              <th>#</th>
               <th>البند</th>
               <th>الكمية</th>
               <th>السعر</th>
@@ -513,6 +710,7 @@ function QuotePreview({ quote, onCopy }: { quote: api.Quote; onCopy: () => void 
           <tbody>
             {quote.items.map((item, index) => (
               <tr key={`${item.description}-${index}`}>
+                <td>{index + 1}</td>
                 <td>{item.description}</td>
                 <td>{item.quantity}</td>
                 <td>{money(item.unit_price, quote.currency)}</td>
@@ -520,17 +718,53 @@ function QuotePreview({ quote, onCopy }: { quote: api.Quote; onCopy: () => void 
               </tr>
             ))}
           </tbody>
-        </table>
-        <div className="quote-preview-totals">
-          <span>المجموع: {money(quote.subtotal, quote.currency)}</span>
-          <span>الخصم: {money(quote.discount, quote.currency)}</span>
-          <span>الضريبة/الرسوم: {money(quote.tax, quote.currency)}</span>
-          <strong>الإجمالي: {money(quote.total, quote.currency)}</strong>
-        </div>
-        {quote.terms && <p className="quote-preview-terms">{quote.terms}</p>}
-      </section>
+          <tfoot>
+            <tr>
+              <td colSpan={2}>الإجمالي</td>
+              <td>{money(quote.subtotal, quote.currency)}</td>
+              <td>{money(quote.discount, quote.currency)}</td>
+              <td>{money(quote.total, quote.currency)}</td>
+            </tr>
+          </tfoot>
+          </table>
+
+          <section className="quote-payment-block">
+            <h3>طريقة الدفع</h3>
+            <div className="quote-payment-summary">
+              <article><span>الطريقة</span><strong>{payment.method}</strong></article>
+              <article><span>الدفعة الأولى</span><strong>{payment.downPercent}% · {money((quote.total || 0) * payment.downPercent / 100, quote.currency)}</strong></article>
+              <article><span>الدفعة النهائية</span><strong>{payment.finalPercent}% · {money((quote.total || 0) * payment.finalPercent / 100, quote.currency)}</strong></article>
+            </div>
+            <div className="quote-payment-grid">
+              <p><strong>الدفعة الأولى:</strong><br />{payment.downText}</p>
+              <p><strong>الدفعة النهائية:</strong><br />{payment.finalText}</p>
+            </div>
+            {(payment.bank || payment.account || payment.iban || payment.note) && (
+              <div className="quote-bank-box">
+                <span>البنك: <strong>{payment.bank || "-"}</strong></span>
+                <span>الحساب: <strong>{payment.account || "-"}</strong></span>
+                <span>IBAN: <strong>{payment.iban || "-"}</strong></span>
+                <p>{payment.note}</p>
+              </div>
+            )}
+          </section>
+
+          <section className="quote-terms-block">
+            <h3>الشروط والأحكام</h3>
+            <ol>
+              {terms.map((term) => <li key={term}>{term}</li>)}
+            </ol>
+          </section>
+
+          <footer className="quote-doc-foot">
+            <p>{quoteSellerLegalName}</p>
+            <div className="quote-foot-seal">Breexe<br />Pro</div>
+          </footer>
+        </section>
+      </div>
       <div className="form-actions">
-        <button className="btn primary" type="button" onClick={() => window.print()}><Printer size={16} /> طباعة</button>
+        <button className="btn primary" type="button" onClick={() => onPrint(false)}><Printer size={16} /> طباعة A4</button>
+        <button className="btn muted" type="button" onClick={() => onPrint(true)}><Download size={16} /> حفظ PDF</button>
         <button className="btn muted" type="button" onClick={onCopy}><Copy size={16} /> نسخ نص العرض</button>
       </div>
     </div>
@@ -564,7 +798,7 @@ function QuoteForm({
   const [items, setItems] = useState<api.QuoteItem[]>(
     initial?.items?.length
       ? initial.items
-      : [{ description: "", quantity: 1, unit_price: 0, total: 0 }],
+      : [{ description: "", quantity: 1, unit_price: 0, total: 0, vat_excluded: true }],
   );
   const [saving, setSaving] = useState(false);
 
@@ -584,6 +818,7 @@ function QuoteForm({
         quantity: Math.max(0, Number(item.quantity || 0)),
         unit_price: Math.max(0, Number(item.unit_price || 0)),
         total: Math.max(0, Number(item.quantity || 0)) * Math.max(0, Number(item.unit_price || 0)),
+        vat_excluded: item.vat_excluded !== false,
       })),
     [items],
   );
@@ -703,7 +938,7 @@ function QuoteForm({
           <button
             className="btn muted"
             type="button"
-            onClick={() => setItems((current) => [...current, { description: "", quantity: 1, unit_price: 0, total: 0 }])}
+            onClick={() => setItems((current) => [...current, { description: "", quantity: 1, unit_price: 0, total: 0, vat_excluded: true }])}
           >
             <Plus size={16} /> بند
           </button>
@@ -719,7 +954,10 @@ function QuoteForm({
               <option value="">منتج من النظام</option>
               {(products.data || []).map((product) => (
                 <option key={product.id} value={product.id}>
-                  {product.name} {productPrice(product) ? `- ${money(productPrice(product), product.currency || "SAR")}` : ""}
+                  {product.name}
+                  {product.sku ? ` | SKU ${product.sku}` : ""}
+                  {product.source ? ` | ${product.source}` : ""}
+                  {productPrice(product) ? ` - ${money(productPrice(product), product.currency || "SAR")}` : ""}
                 </option>
               ))}
             </select>
@@ -748,6 +986,15 @@ function QuoteForm({
               onChange={(event) => updateItem(index, { unit_price: Number(event.target.value) })}
               aria-label="سعر الوحدة"
             />
+            <select
+              className="input line-tax-mode"
+              value={item.vat_excluded === false ? "inclusive" : "exclusive"}
+              onChange={(event) => updateItem(index, { vat_excluded: event.target.value !== "inclusive" })}
+              aria-label="طريقة ضريبة البند"
+            >
+              <option value="exclusive">قبل الضريبة</option>
+              <option value="inclusive">شامل الضريبة</option>
+            </select>
             <strong>{money(normalizedItems[index]?.total || 0)}</strong>
             <button
               className="icon-btn danger"

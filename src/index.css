@@ -1489,13 +1489,17 @@ main {
 
 .quote-line {
   display: grid;
-  grid-template-columns: minmax(150px, 0.9fr) minmax(180px, 1.2fr) 86px 116px 120px auto;
+  grid-template-columns: minmax(150px, 0.9fr) minmax(180px, 1.2fr) 86px 116px 118px 120px auto;
   gap: 8px;
   align-items: center;
 }
 
 .quote-line strong {
   white-space: nowrap;
+}
+
+.line-tax-mode {
+  min-width: 112px;
 }
 
 .quote-price-mode {
