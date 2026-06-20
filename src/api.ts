@@ -457,10 +457,13 @@ export type CustomerCareItem = {
 export type QuoteStatus = "draft" | "issued" | "confirmed" | "declined" | "expired" | "follow_up";
 
 export type QuoteItem = {
+  product_id?: string | null;
+  product_sku?: string;
   description: string;
   quantity: number;
   unit_price: number;
   total: number;
+  vat_excluded?: boolean;
 };
 
 export type Quote = {
@@ -524,6 +527,8 @@ export type QuoteListResponse = {
 export type InvoiceStatus = "draft" | "issued" | "paid" | "cancelled" | "refunded";
 
 export type InvoiceItem = {
+  product_id?: string | null;
+  product_sku?: string;
   description: string;
   quantity: number;
   unit_price: number;
@@ -627,7 +632,7 @@ type LocalDb = {
   settings: Settings;
 };
 
-const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24, seller_name: "Breexe Pro International", seller_vat_number: "313049114100003", seller_address: "الرياض - حي لوفياء - شارع فيا" });
+const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24, seller_name: "Breexe Pro Co.", seller_vat_number: "313049114100003", seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض" });
 const localDbKey = (uid: string) => `golden-pro-crm-local-db:${uid}`;
 const localId = (prefix: string) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const withoutId = <T extends { id: string }>(item: T): Omit<T, "id"> => {
@@ -1277,10 +1282,13 @@ function normalizeQuoteItems(items: QuoteItem[] = []) {
       const quantity = Math.max(0, Number(item.quantity || 0));
       const unitPrice = Math.max(0, Number(item.unit_price || 0));
       return {
+        product_id: item.product_id || null,
+        product_sku: String(item.product_sku || "").trim(),
         description: String(item.description || "").trim(),
         quantity,
         unit_price: unitPrice,
         total: quantity * unitPrice,
+        vat_excluded: item.vat_excluded !== false,
       };
     })
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
@@ -1577,6 +1585,8 @@ function normalizeInvoiceItems(items: InvoiceItem[] = []) {
       const quantity = Math.max(0, Number(item.quantity || 0));
       const unitPrice = Math.max(0, Number(item.unit_price || 0));
       return {
+        product_id: item.product_id || null,
+        product_sku: String(item.product_sku || "").trim(),
         description: String(item.description || "").trim(),
         quantity,
         unit_price: unitPrice,
@@ -1588,14 +1598,19 @@ function normalizeInvoiceItems(items: InvoiceItem[] = []) {
 }
 
 function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const cleanVatPercent = Math.max(0, Number(vat_percent || 15));
+  const vatRate = cleanVatPercent / 100;
+  const subtotal = items.reduce((sum, item) => {
+    const total = Number(item.total || 0);
+    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
+  }, 0);
   const cleanDiscount = Math.max(0, Number(discount || 0));
-  const withoutVat = subtotal - cleanDiscount;
-  const vatAmount = withoutVat * (vat_percent / 100);
+  const withoutVat = Math.max(0, subtotal - cleanDiscount);
+  const vatAmount = withoutVat * vatRate;
   return {
-    subtotal,
+    subtotal: Math.round(subtotal * 100) / 100,
     discount: cleanDiscount,
-    vat_percent,
+    vat_percent: cleanVatPercent,
     vat_amount: Math.round(vatAmount * 100) / 100,
     total_with_vat: Math.round((withoutVat + vatAmount) * 100) / 100,
     total_without_vat: Math.round(withoutVat * 100) / 100,
@@ -2649,7 +2664,7 @@ function buildDemoDataSet(uid: string, count = 10) {
     total_without_vat: 800,
     notes: "",
     terms: "فاتورة ضريبية مبسطة - متوافقة مع ZATCA",
-    seller_name: "BreeXe Pro",
+    seller_name: "Breexe Pro Co.",
     seller_vat_number: "300000000000003",
     seller_address: "الرياض، المملكة العربية السعودية",
     qr_code: "",

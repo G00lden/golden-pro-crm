@@ -37,6 +37,10 @@ const addDays = (date: string, days: number) => {
 const money = (value?: number, currency = "SAR") =>
   `${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
 
+type PriceMode = "inclusive" | "exclusive";
+
+const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
+
 const statusLabels: Record<api.InvoiceStatus, string> = {
   draft: "مسودة",
   issued: "مصدرة",
@@ -564,6 +568,7 @@ function InvoiceForm({
   onSave: (payload: api.InvoiceInput) => Promise<void>;
 }) {
   const customers = useAsyncData(() => api.getCustomers(""), []);
+  const products = useAsyncData(() => api.getProducts(), []);
   const [customerId, setCustomerId] = useState(initial?.customer_id || "");
   const [customerName, setCustomerName] = useState(initial?.customer_name || "");
   const [customerPhone, setCustomerPhone] = useState(initial?.customer_phone || "");
@@ -574,6 +579,9 @@ function InvoiceForm({
   const [dueDate, setDueDate] = useState(initial?.due_date || addDays(today(), 30));
   const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent || 15));
   const [discount, setDiscount] = useState(String(initial?.discount || 0));
+  const [priceMode, setPriceMode] = useState<PriceMode>(
+    initial?.items?.some((item) => item.vat_excluded === false) ? "inclusive" : "exclusive",
+  );
   const [notes, setNotes] = useState(initial?.notes || "");
   const [terms, setTerms] = useState(initial?.terms || defaultTerms);
   const [items, setItems] = useState<api.InvoiceItem[]>(
@@ -584,6 +592,7 @@ function InvoiceForm({
   const [saving, setSaving] = useState(false);
 
   const selectedCustomer = customers.data?.data.find((item) => item.id === customerId);
+  const vatExcluded = priceMode === "exclusive";
 
   useEffect(() => {
     if (!selectedCustomer) return;
@@ -599,19 +608,36 @@ function InvoiceForm({
         quantity: Math.max(0, Number(item.quantity || 0)),
         unit_price: Math.max(0, Number(item.unit_price || 0)),
         total: Math.max(0, Number(item.quantity || 0)) * Math.max(0, Number(item.unit_price || 0)),
-        vat_excluded: item.vat_excluded !== undefined ? item.vat_excluded : true,
+        vat_excluded: vatExcluded,
       })),
-    [items],
+    [items, vatExcluded],
   );
-  const subtotal = normalizedItems.reduce((sum, item) => sum + item.total, 0);
   const cleanDiscount = Math.max(0, Number(discount || 0));
   const vatPct = Math.max(0, Number(vatPercent || 15));
-  const withoutVat = subtotal - cleanDiscount;
+  const vatRate = vatPct / 100;
+  const subtotal = normalizedItems.reduce((sum, item) => (
+    sum + (item.vat_excluded === false && vatRate > 0 ? item.total / (1 + vatRate) : item.total)
+  ), 0);
+  const withoutVat = Math.max(0, subtotal - cleanDiscount);
   const vatAmount = withoutVat * (vatPct / 100);
   const totalWithVat = withoutVat + vatAmount;
 
   const updateItem = (index: number, patch: Partial<api.InvoiceItem>) => {
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
+  };
+
+  const applyProduct = (index: number, productId: string) => {
+    const product = products.data?.find((item) => item.id === productId);
+    if (!product) {
+      updateItem(index, { product_id: null, product_sku: "" });
+      return;
+    }
+    updateItem(index, {
+      product_id: product.id,
+      product_sku: product.sku || "",
+      description: product.name,
+      unit_price: productPrice(product),
+    });
   };
 
   const submit = async (event: FormEvent) => {
@@ -710,19 +736,55 @@ function InvoiceForm({
         </label>
       </div>
 
+      <div className="quote-price-mode" role="group" aria-label="طريقة إدخال السعر">
+        <span>طريقة إدخال السعر</span>
+        <button
+          className={priceMode === "inclusive" ? "active" : ""}
+          type="button"
+          onClick={() => setPriceMode("inclusive")}
+        >
+          السعر شامل الضريبة
+        </button>
+        <button
+          className={priceMode === "exclusive" ? "active" : ""}
+          type="button"
+          onClick={() => setPriceMode("exclusive")}
+        >
+          السعر بدون ضريبة
+        </button>
+        <small>
+          {priceMode === "inclusive"
+            ? "مثال: 5000 تبقى 5000 شامل الضريبة."
+            : "مثال: 5000 يضاف عليها VAT في الإجمالي."}
+        </small>
+      </div>
+
       <div className="quote-lines">
         <div className="quote-lines-head">
           <strong>بنود الفاتورة</strong>
           <button
             className="btn muted"
             type="button"
-            onClick={() => setItems((current) => [...current, { description: "", quantity: 1, unit_price: 0, total: 0, vat_excluded: true }])}
+            onClick={() => setItems((current) => [...current, { description: "", quantity: 1, unit_price: 0, total: 0, vat_excluded: vatExcluded }])}
           >
             <Plus size={16} /> بند
           </button>
         </div>
         {items.map((item, index) => (
           <div className="quote-line" key={index}>
+            <select
+              className="input"
+              value={item.product_id || ""}
+              onChange={(event) => applyProduct(index, event.target.value)}
+              aria-label="اختيار منتج"
+            >
+              <option value="">منتج من النظام</option>
+              {(products.data || []).map((product) => (
+                <option key={product.id} value={product.id}>
+                  {product.name} {productPrice(product) ? `- ${money(productPrice(product), product.currency || "SAR")}` : ""}
+                </option>
+              ))}
+            </select>
             <input
               className="input"
               value={item.description}
@@ -748,7 +810,11 @@ function InvoiceForm({
               onChange={(event) => updateItem(index, { unit_price: Number(event.target.value) })}
               aria-label="سعر الوحدة"
             />
-            <strong>{money(normalizedItems[index]?.total || 0)}</strong>
+            <strong>{money(
+              normalizedItems[index]?.vat_excluded === false
+                ? normalizedItems[index]?.total || 0
+                : (normalizedItems[index]?.total || 0) * (1 + vatRate),
+            )}</strong>
             <button
               className="icon-btn danger"
               type="button"

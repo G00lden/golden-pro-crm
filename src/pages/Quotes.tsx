@@ -38,6 +38,8 @@ const addDays = (date: string, days: number) => {
 const money = (value?: number, currency = "SAR") =>
   `${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
 
+const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
+
 const statusLabels: Record<api.QuoteStatus, string> = {
   draft: "مسودة",
   issued: "مصدر",
@@ -545,6 +547,7 @@ function QuoteForm({
   onSave: (payload: api.QuoteInput) => Promise<void>;
 }) {
   const customers = useAsyncData(() => api.getCustomers(""), []);
+  const products = useAsyncData(() => api.getProducts(), []);
   const [customerId, setCustomerId] = useState(initial?.customer_id || "");
   const [customerName, setCustomerName] = useState(initial?.customer_name || "");
   const [customerPhone, setCustomerPhone] = useState(initial?.customer_phone || "");
@@ -589,6 +592,20 @@ function QuoteForm({
 
   const updateItem = (index: number, patch: Partial<api.QuoteItem>) => {
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
+  };
+
+  const applyProduct = (index: number, productId: string) => {
+    const product = products.data?.find((item) => item.id === productId);
+    if (!product) {
+      updateItem(index, { product_id: null, product_sku: "" });
+      return;
+    }
+    updateItem(index, {
+      product_id: product.id,
+      product_sku: product.sku || "",
+      description: product.name,
+      unit_price: productPrice(product),
+    });
   };
 
   const submit = async (event: FormEvent) => {
@@ -693,6 +710,19 @@ function QuoteForm({
         </div>
         {items.map((item, index) => (
           <div className="quote-line" key={index}>
+            <select
+              className="input"
+              value={item.product_id || ""}
+              onChange={(event) => applyProduct(index, event.target.value)}
+              aria-label="اختيار منتج"
+            >
+              <option value="">منتج من النظام</option>
+              {(products.data || []).map((product) => (
+                <option key={product.id} value={product.id}>
+                  {product.name} {productPrice(product) ? `- ${money(productPrice(product), product.currency || "SAR")}` : ""}
+                </option>
+              ))}
+            </select>
             <input
               className="input"
               value={item.description}

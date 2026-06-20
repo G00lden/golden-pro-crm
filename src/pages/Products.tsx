@@ -15,6 +15,18 @@ import {
   type ModalState,
 } from "../shared";
 
+const money = (value?: number | null, currency = "SAR") =>
+  typeof value === "number" && Number.isFinite(value)
+    ? new Intl.NumberFormat("ar-SA", { style: "currency", currency }).format(value)
+    : "بدون سعر";
+
+const parseMoneyInput = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : null;
+};
+
 export default function ProductsPage({
   notify,
   refreshStats,
@@ -66,6 +78,7 @@ export default function ProductsPage({
               <div>
                 <strong>{product.name}</strong>
                 <span>كل {product.interval_months} شهر · {product.category || "عام"}</span>
+                <span>{money(product.sale_price ?? product.price, product.currency || "SAR")}</span>
               </div>
               <p>{product.remind_text || "رسالة التذكير الافتراضية"}</p>
               <div className="row-actions">
@@ -94,6 +107,10 @@ function ProductForm({
   const [interval, setInterval] = useState(initial?.interval_months || 3);
   const [category, setCategory] = useState(initial?.category || "");
   const [sku, setSku] = useState(initial?.sku || "");
+  const [price, setPrice] = useState(initial?.price === null || initial?.price === undefined ? "" : String(initial.price));
+  const [salePrice, setSalePrice] = useState(
+    initial?.sale_price === null || initial?.sale_price === undefined ? "" : String(initial.sale_price),
+  );
   const [remindText, setRemindText] = useState(initial?.remind_text || "");
   const [saving, setSaving] = useState(false);
 
@@ -106,6 +123,9 @@ function ProductForm({
         interval_months: Number(interval || 1),
         category: category.trim(),
         sku: sku.trim(),
+        price: parseMoneyInput(price),
+        sale_price: parseMoneyInput(salePrice),
+        currency: initial?.currency || "SAR",
         remind_text: remindText.trim(),
       });
     } finally {
@@ -121,6 +141,10 @@ function ProductForm({
         <Field label="التصنيف"><TextInput value={category} onChange={(e) => setCategory(e.target.value)} /></Field>
       </div>
       <Field label="SKU"><TextInput value={sku} onChange={(e) => setSku(e.target.value)} /></Field>
+      <div className="form-grid">
+        <Field label="السعر الأساسي"><TextInput min={0} step="0.01" type="number" value={price} onChange={(e) => setPrice(e.target.value)} /></Field>
+        <Field label="سعر البيع"><TextInput min={0} step="0.01" type="number" value={salePrice} onChange={(e) => setSalePrice(e.target.value)} /></Field>
+      </div>
       <Field label="نص تذكير اختياري"><TextArea rows={3} value={remindText} onChange={(e) => setRemindText(e.target.value)} /></Field>
       <div className="form-actions">
         <Button type="submit" loading={saving}><Save size={16} /> حفظ</Button>

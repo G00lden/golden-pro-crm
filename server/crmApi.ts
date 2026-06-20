@@ -171,10 +171,13 @@ function normalizeQuoteItems(items: unknown) {
       const quantity = Math.max(0, Number(row.quantity || 0));
       const unitPrice = Math.max(0, Number(row.unit_price || row.unitPrice || 0));
       return {
+        product_id: row.product_id || row.productId || null,
+        product_sku: String(row.product_sku || row.productSku || "").trim(),
         description: String(row.description || "").trim(),
         quantity,
         unit_price: unitPrice,
         total: quantity * unitPrice,
+        vat_excluded: row.vat_excluded !== false,
       };
     })
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
@@ -765,29 +768,36 @@ function normalizeInvoiceItems(items: unknown) {
       const qty = Math.max(0, Number(row.quantity || 0));
       const up = Math.max(0, Number(row.unit_price || row.unitPrice || 0));
       return {
+        product_id: row.product_id || row.productId || null,
+        product_sku: String(row.product_sku || row.productSku || "").trim(),
         description: String(row.description || "").trim(),
         quantity: qty,
         unit_price: up,
         total: qty * up,
+        vat_excluded: row.vat_excluded !== false,
       };
     })
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function invoiceTotals(items: Array<{ total: number }>, discount = 0, vatPercent = 15) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const afterDiscount = subtotal - cleanDiscount;
+function invoiceTotals(items: Array<{ total: number; vat_excluded?: boolean }>, discount = 0, vatPercent = 15) {
   const cleanVatPercent = Math.max(0, Number(vatPercent || 15));
+  const vatRate = cleanVatPercent / 100;
+  const subtotal = items.reduce((sum, item) => {
+    const total = Number(item.total || 0);
+    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
+  }, 0);
+  const cleanDiscount = Math.max(0, Number(discount || 0));
+  const afterDiscount = Math.max(0, subtotal - cleanDiscount);
   const vatAmount = Math.round(afterDiscount * (cleanVatPercent / 100) * 100) / 100;
   return {
-    subtotal,
+    subtotal: Math.round(subtotal * 100) / 100,
     discount: cleanDiscount,
     vat: vatAmount,
     vat_percent: cleanVatPercent,
     vat_amount: vatAmount,
-    total_without_vat: afterDiscount,
-    total_with_vat: afterDiscount + vatAmount,
+    total_without_vat: Math.round(afterDiscount * 100) / 100,
+    total_with_vat: Math.round((afterDiscount + vatAmount) * 100) / 100,
   };
 }
 
@@ -871,7 +881,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       notes: String(req.body?.notes || "").trim(),
       terms: String(req.body?.terms || "").trim(),
       ...totals,
-      seller_name: String(req.body?.seller_name || "Breexe Pro International").trim(),
+      seller_name: String(req.body?.seller_name || "Breexe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || "").trim(),
@@ -917,7 +927,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       notes: String(req.body?.notes ?? existing.notes ?? "").trim(),
       terms: String(req.body?.terms ?? existing.terms ?? "").trim(),
       ...totals,
-      seller_name: String(req.body?.seller_name || existing.seller_name || "Breexe Pro International").trim(),
+      seller_name: String(req.body?.seller_name || existing.seller_name || "Breexe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || existing.seller_address || "").trim(),
@@ -972,7 +982,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       (item: Record<string, any>) => `- ${item.description} × ${item.quantity}: ${Number(item.total || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
     const message = [
-      `فاتورة ضريبية - Breexe Pro International`,
+      `فاتورة ضريبية - Breexe Pro Co.`,
       `${invoice.invoice_number}`,
       `العميل: ${invoice.customer_name}`,
       "",
@@ -1025,7 +1035,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     const invoice = normalizeInvoice(existing);
     const timestamp = new Date(invoice.createdAt || Date.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
     const qr = generateZatcaBase64(
-      invoice.seller_name || "Breexe Pro International",
+      invoice.seller_name || "Breexe Pro Co.",
       invoice.seller_vat || "313049114100003",
       timestamp,
       invoice.total_with_vat || 0,
@@ -1060,7 +1070,7 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
       notes: quote.notes || "",
       terms: quote.terms || "",
       ...totals,
-      seller_name: String(req.body?.seller_name || "Breexe Pro International").trim(),
+      seller_name: String(req.body?.seller_name || "Breexe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || "").trim(),

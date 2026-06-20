@@ -262,7 +262,7 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authed, setAuthed] = useState(false);
-  const [lightMode, setLightMode] = useState(() => localStorage.getItem("gp_light_mode") === "true");
+  const [lightMode, setLightMode] = useState(() => localStorage.getItem("gp_light_mode") !== "false");
 
   useEffect(() => {
     document.documentElement.classList.toggle("light-mode", lightMode);

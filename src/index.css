@@ -57,6 +57,7 @@
   background: #ffffff;
 }
 .light-mode .input-field,
+.light-mode .input,
 .light-mode textarea,
 .light-mode select {
   background: #f7f9fc;
@@ -110,6 +111,80 @@
   color: #5a6b7e;
 }
 
+.light-mode .app-shell {
+  background:
+    linear-gradient(180deg, rgba(205, 232, 250, 0.48), transparent 260px),
+    linear-gradient(90deg, rgba(201, 164, 122, 0.10), rgba(255, 255, 255, 0.72)),
+    #f0f3f7;
+}
+
+.light-mode .topbar,
+.light-mode .mobile-bar,
+.light-mode .quote-card,
+.light-mode .quote-lines,
+.light-mode .quote-total-box,
+.light-mode .quote-template-panel,
+.light-mode .quote-payment-form,
+.light-mode .quote-price-mode,
+.light-mode .wa-qr-card,
+.light-mode .wa-panel,
+.light-mode .settings-card,
+.light-mode .mini-card,
+.light-mode .table-card {
+  background: #ffffff;
+  border-color: #d8e0e8;
+  box-shadow: 0 10px 24px rgba(11, 53, 92, 0.07);
+}
+
+.light-mode .cloud-hero,
+.light-mode .operations-strip {
+  background:
+    linear-gradient(135deg, rgba(11, 53, 92, 0.94), rgba(7, 34, 61, 0.94)),
+    #0B355C;
+  color: #f8fbff;
+}
+
+.light-mode .cloud-hero h1,
+.light-mode .operations-strip strong,
+.light-mode .hero-status-grid strong {
+  color: #f8fbff;
+}
+
+.light-mode .cloud-hero p,
+.light-mode .operations-strip span,
+.light-mode .hero-status-grid span {
+  color: #d7e5f1;
+}
+
+.light-mode .hero-status-grid article {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.light-mode .quote-total-summary article,
+.light-mode .quote-price-mode button.active {
+  background: rgba(201, 164, 122, 0.14);
+  border-color: rgba(201, 164, 122, 0.38);
+}
+
+.light-mode .quote-price-mode button {
+  background: #f7f9fc;
+  border-color: #d0d8e0;
+  color: #5a6b7e;
+}
+
+.light-mode .quote-total-box strong,
+.light-mode .quote-total-summary strong,
+.light-mode .quote-price-mode button.active {
+  color: #9a6e28;
+}
+
+.light-mode .badge,
+.light-mode .chip,
+.light-mode .icon-btn {
+  box-shadow: none;
+}
+
 :root {
 
   /* -- Brand palette (canonical) -- */
@@ -147,6 +222,23 @@
 
 /* Latin glyphs render in Montserrat per the brand kit. */
 [lang="en"], .latin, code, kbd, samp { font-family: var(--brand-font-en); }
+
+.light-mode {
+  color-scheme: light;
+  --bg: #f0f3f7;
+  --surface: #ffffff;
+  --surface-2: #f7f9fc;
+  --line: #d0d8e0;
+  --text: #1a2332;
+  --muted: #5a6b7e;
+  --faint: #8a9baa;
+  --gold: #C9A47A;
+  --gold-2: #9a6e28;
+  --teal: #1a9e82;
+  --blue: #0B355C;
+  --red: #cc4444;
+  --orange: #d0903f;
+}
 
 * {
   box-sizing: border-box;
@@ -1396,13 +1488,51 @@ main {
 
 .quote-line {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 90px 120px 120px auto;
+  grid-template-columns: minmax(150px, 0.9fr) minmax(180px, 1.2fr) 86px 116px 120px auto;
   gap: 8px;
   align-items: center;
 }
 
 .quote-line strong {
   white-space: nowrap;
+}
+
+.quote-price-mode {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(160px, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(94, 159, 214, 0.05);
+}
+
+.quote-price-mode > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.quote-price-mode button {
+  min-height: 36px;
+  border: 1px solid rgba(154, 167, 182, 0.22);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.quote-price-mode button.active {
+  border-color: rgba(201, 164, 122, 0.62);
+  background: rgba(201, 164, 122, 0.14);
+  color: var(--gold-2);
+}
+
+.quote-price-mode small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .quote-total-summary {
@@ -2156,6 +2286,10 @@ main {
 
   .quote-line {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .quote-price-mode {
+    grid-template-columns: 1fr;
   }
 
   .hero-status-grid {
