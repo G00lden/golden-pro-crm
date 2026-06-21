@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<title>فاتورة ضريبية INV-20260619-001 - BreeXe Pro</title>
+<style>
+@page { size: A4; margin: 0; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #fff; color: #393A3F; font-family: Tahoma, Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.page { width: 210mm; height: 297mm; overflow: hidden; position: relative; background: #fff; page-break-after: always; }
+.page:last-child { page-break-after: auto; }
+.ltr { direction: ltr; unicode-bidi: embed; }
+.cover { background: linear-gradient(156deg, #0B355C 0%, #07223D 68%, #061a2e 100%); color: #fff; padding: 32mm 24mm 22mm; display: flex; flex-direction: column; }
+.cover::before { content: ""; position: absolute; right: -54mm; top: -42mm; width: 134mm; height: 134mm; border: 1px solid rgba(201,164,122,.28); border-radius: 50%; }
+.cover::after { content: ""; position: absolute; left: -22mm; bottom: 30mm; width: 92mm; height: 92mm; border: 15mm solid rgba(201,164,122,.09); border-radius: 50%; }
+.cover-top { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: center; gap: 16mm; padding-bottom: 16mm; border-bottom: 1.6px solid rgba(201,164,122,.58); }
+.logo-card { width: 82mm; min-height: 26mm; background: #fff; border-radius: 4mm; padding: 5mm 6mm; display: flex; align-items: center; justify-content: center; }
+.brand-name { direction: ltr; text-align: center; font-size: 26px; line-height: 1; font-weight: 900; letter-spacing: 0; white-space: nowrap; }
+.brand-name span { color: #0B355C; }
+.brand-name em { color: #C9A47A; font-style: normal; }
+.brand-tagline { margin-top: 2.8mm; color: #0B355C; font-size: 9.5px; font-weight: 800; text-align: center; white-space: nowrap; }
+.company-title { font-size: 22px; line-height: 1.35; font-weight: 900; text-align: right; }
+.company-title span { display: block; color: #DCBE9A; font-size: 12px; font-weight: 700; margin-top: 3mm; }
+.cover-main { position: relative; z-index: 1; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.cover-main .icon { width: 34mm; height: 34mm; border-radius: 8mm; background: #fff; padding: 5mm; object-fit: contain; margin-bottom: 15mm; }
+.cover-monogram { width: 34mm; height: 34mm; border-radius: 8mm; background: #fff; color: #0B355C; display: flex; align-items: center; justify-content: center; direction: ltr; font-size: 28px; font-weight: 900; margin-bottom: 15mm; }
+.cover-monogram em { color: #C9A47A; font-style: normal; }
+.cover-kicker { border: 1.3px solid rgba(201,164,122,.68); border-radius: 999px; color: #DCBE9A; padding: 3mm 11mm; font-size: 14px; font-weight: 900; margin-bottom: 9mm; }
+.cover h1 { margin: 0; color: #fff; font-size: 40px; line-height: 1.22; font-weight: 900; letter-spacing: 0; }
+.cover h2 { margin: 6mm 0 0; color: #CDE8FA; font-size: 17px; font-weight: 700; }
+.cover-footer { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 31mm; gap: 9mm; align-items: center; background: rgba(0,0,0,.20); border: 1px solid rgba(255,255,255,.10); border-radius: 5mm; padding: 7mm 8mm; }
+.cover-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm 10mm; font-size: 11.5px; color: rgba(255,255,255,.88); }
+.cover-meta strong { color: #DCBE9A; font-weight: 900; display: inline-block; min-width: 23mm; }
+.seal { width: 28mm; height: 28mm; border: 2px solid #C9A47A; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #DCBE9A; font-weight: 900; line-height: 1.22; text-align: center; font-size: 8.5px; }
+.invoice { padding: 20mm 17mm 14mm; display: flex; flex-direction: column; }
+.doc-head { display: flex; justify-content: space-between; align-items: center; gap: 10mm; padding-bottom: 7mm; border-bottom: 2.2px solid #C9A47A; }
+.doc-head .logo-card { width: 66mm; min-height: 21mm; padding: 4mm; border: 1px solid #eef1f4; }
+.doc-head .brand-name { font-size: 21px; }
+.doc-head .brand-tagline { font-size: 8px; }
+.doc-company { text-align: right; font-size: 10px; line-height: 1.85; color: #5a6673; }
+.doc-company strong { display: block; font-size: 14px; color: #0B355C; margin-bottom: 1mm; }
+.invoice-bar { margin: 7mm 0 5mm; background: linear-gradient(135deg, #0B355C, #07223D); color: #fff; border-radius: 4mm; min-height: 24mm; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8mm; padding: 5.5mm 7mm; }
+.invoice-bar h2 { margin: 0; font-size: 19px; line-height: 1.35; font-weight: 900; }
+.invoice-bar p { margin: 2mm 0 0; color: #CDE8FA; font-size: 10.5px; }
+.status-pill { border: 1px solid rgba(220,190,154,.72); background: rgba(201,164,122,.15); color: #DCBE9A; border-radius: 999px; padding: 3mm 8mm; font-size: 12px; font-weight: 900; white-space: nowrap; }
+.info-grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 5mm; margin-bottom: 5mm; }
+.panel { border: 1.2px solid #e1e6eb; border-radius: 4mm; padding: 4.5mm; background: #fff; min-height: 31mm; }
+.panel h3 { margin: 0 0 3mm; color: #0B355C; font-size: 12.5px; font-weight: 900; }
+.kv { display: grid; grid-template-columns: 28mm 1fr; gap: 1.5mm 4mm; align-items: baseline; font-size: 10px; line-height: 1.55; }
+.kv span { color: #6b7280; font-weight: 800; }
+.kv strong { color: #393A3F; font-weight: 800; }
+.doc-row { display: grid; grid-template-columns: 34mm 1fr; gap: 5mm; margin-bottom: 5mm; }
+.qr-card { border: 1.2px solid #d9dee5; border-radius: 4mm; padding: 3.4mm; text-align: center; background: #fff; }
+.qr-card img { width: 26mm; height: 26mm; object-fit: contain; display: block; margin: 0 auto 1.5mm; }
+.qr-card strong { display: block; color: #0B355C; font-size: 8.5px; }
+.qr-card span { display: block; color: #6b7280; font-size: 6.8px; margin-top: .8mm; line-height: 1.35; }
+.dates { background: #F4F4F4; border: 1.2px solid #e1e6eb; border-radius: 4mm; padding: 4mm 5mm; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+.date-item { border-left: 1px solid #d8dee6; padding: 0 3.5mm; }
+.date-item:first-child { border-left: 0; }
+.date-item span { display: block; color: #6b7280; font-size: 8.6px; font-weight: 800; margin-bottom: 1.3mm; }
+.date-item strong { display: block; color: #0B355C; font-size: 10.2px; font-weight: 900; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 0 0 5mm; direction: rtl; }
+th { background: #0B355C; color: #fff; font-size: 10.5px; font-weight: 900; padding: 3.2mm 2.4mm; text-align: center; }
+th:first-child { border-radius: 0 3mm 0 0; }
+th:last-child { border-radius: 3mm 0 0 0; }
+td { border-bottom: 1px solid #e3e8ee; color: #393A3F; font-size: 9.7px; line-height: 1.58; padding: 3mm 2.4mm; text-align: center; }
+tbody tr:nth-child(even) td { background: #f8fafc; }
+td.desc { text-align: right; font-weight: 800; }
+td.num { color: #0B355C; font-weight: 900; width: 11mm; }
+tfoot td { border: 0; background: linear-gradient(135deg, #07223D, #0B355C); color: #fff; font-size: 11.5px; font-weight: 900; padding: 3.8mm 3mm; }
+.total-section { display: grid; grid-template-columns: 1fr 72mm; gap: 6mm; align-items: stretch; margin-top: auto; }
+.notes { background: #F4F4F4; border: 1.2px solid #e1e6eb; border-radius: 4mm; padding: 4.6mm; }
+.notes h3 { margin: 0 0 3mm; font-size: 12px; color: #0B355C; }
+.notes p { margin: 0 0 2.4mm; font-size: 9.2px; line-height: 1.78; color: #5f6874; }
+.totals { border: 1.2px solid #d9dee5; border-radius: 4mm; overflow: hidden; background: #fff; }
+.total-line { display: flex; justify-content: space-between; align-items: center; gap: 5mm; padding: 3mm 5mm; border-bottom: 1px solid #edf0f3; font-size: 10px; }
+.total-line span { color: #6b7280; font-weight: 800; }
+.total-line strong { color: #393A3F; direction: ltr; unicode-bidi: embed; }
+.grand { display: flex; justify-content: space-between; align-items: center; gap: 5mm; background: #0B355C; color: #fff; padding: 4mm 5mm; font-size: 11.5px; font-weight: 900; }
+.grand strong { color: #DCBE9A; direction: ltr; unicode-bidi: embed; font-size: 12.8px; }
+.doc-foot { margin-top: 5mm; padding-top: 4mm; border-top: 1px solid #e1e6eb; display: flex; justify-content: center; align-items: center; gap: 8mm; color: #6b7280; font-size: 8.3px; line-height: 1.65; text-align: center; }
+.doc-foot strong { color: #0B355C; }
+.mini-seal { width: 18mm; height: 18mm; border: 1.5px solid #C9A47A; border-radius: 50%; color: #b99049; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 6.3px; line-height: 1.22; font-weight: 900; flex: 0 0 auto; }
+</style>
+</head>
+<body>
+<section class="page cover">
+  <div class="cover-top">
+    <div class="company-title">BreeXe Pro International<span>تابعة للمجموعة الذهبية المتحدة</span></div>
+    <div class="logo-card"><div><div class="brand-name"><span>BreeXe</span> <em>Pro</em></div><div class="brand-tagline">تابعة للمجموعة الذهبية المتحدة</div></div></div>
+  </div>
+  <main class="cover-main">
+    <div class="cover-monogram">B<em>X</em></div>
+    <div class="cover-kicker">فاتورة ضريبية رسمية</div>
+    <h1>فاتورة ضريبية</h1>
+    <h2>فاتورة اختبار نظام Breexe Pro CRM</h2>
+  </main>
+  <footer class="cover-footer">
+    <div class="cover-meta">
+      <div><strong>رقم الفاتورة:</strong> <span class="ltr">INV-20260619-001</span></div>
+      <div><strong>التاريخ:</strong> 2026-06-19</div>
+      <div><strong>العميل:</strong> عبدالله - فاتورة اختبار</div>
+      <div><strong>الإجمالي:</strong> <span class="ltr">1,035.00 SAR</span></div>
+    </div>
+    <div class="seal">BreeXe<br>Pro<br>VAT</div>
+  </footer>
+</section>
+<section class="page invoice">
+  <header class="doc-head">
+    <div class="doc-company">
+      <strong>BreeXe Pro International</strong>
+      الرياض - المملكة العربية السعودية<br>
+      الرقم الضريبي: <span class="ltr">313049114100003</span><br>
+      الرياض، المملكة العربية السعودية
+    </div>
+    <div class="logo-card"><div><div class="brand-name"><span>BreeXe</span> <em>Pro</em></div><div class="brand-tagline">تابعة للمجموعة الذهبية المتحدة</div></div></div>
+  </header>
+  <section class="invoice-bar">
+    <div><h2>فاتورة ضريبية - <span class="ltr">INV-20260619-001</span></h2><p>رمز الاستجابة السريعة بصيغة ZATCA TLV مرفق للتحقق من بيانات الفاتورة.</p></div>
+    <div class="status-pill">صادرة</div>
+  </section>
+  <section class="info-grid">
+    <div class="panel">
+      <h3>بيانات العميل</h3>
+      <div class="kv">
+        <span>الاسم</span><strong>عبدالله - فاتورة اختبار</strong>
+        <span>الجوال</span><strong class="ltr">0500000000</strong>
+        <span>المدينة</span><strong>الرياض</strong>
+        <span>الرقم الضريبي</span><strong class="ltr">-</strong>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>بيانات البائع</h3>
+      <div class="kv">
+        <span>الاسم</span><strong>Breexe Pro International</strong>
+        <span>VAT</span><strong class="ltr">313049114100003</strong>
+        <span>العنوان</span><strong>الرياض، المملكة العربية السعودية</strong>
+        <span>العملة</span><strong class="ltr">SAR</strong>
+      </div>
+    </div>
+  </section>
+  <section class="doc-row">
+    <div class="qr-card"><img src="data:image/png;base64,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" alt="ZATCA QR"><strong>ZATCA QR</strong><span>امسح الكود لقراءة بيانات الفاتورة الضريبية</span></div>
+    <div class="dates">
+      <div class="date-item"><span>تاريخ الإصدار</span><strong>2026-06-19</strong></div>
+      <div class="date-item"><span>تاريخ الاستحقاق</span><strong>2026-07-19</strong></div>
+      <div class="date-item"><span>طريقة الدفع</span><strong>غير محددة</strong></div>
+      <div class="date-item"><span>الحالة</span><strong>صادرة</strong></div>
+    </div>
+  </section>
+  <table aria-label="بنود الفاتورة">
+    <thead><tr><th>#</th><th>الوصف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead>
+    <tbody>
+            <tr>
+              <td class="num">1</td>
+              <td class="desc">فلتر Breexe Pro - اختبار</td>
+              <td>1</td>
+              <td>750.00 SAR</td>
+              <td>750.00 SAR</td>
+            </tr>
+            
+
+            <tr>
+              <td class="num">2</td>
+              <td class="desc">خدمة تركيب وتشغيل - اختبار</td>
+              <td>1</td>
+              <td>150.00 SAR</td>
+              <td>150.00 SAR</td>
+            </tr>
+            </tbody>
+    <tfoot><tr><td colspan="4">الإجمالي شامل ضريبة القيمة المضافة</td><td>1,035.00 SAR</td></tr></tfoot>
+  </table>
+  <section class="total-section">
+    <div class="notes">
+      <h3>ملاحظات وشروط</h3>
+      <p>فاتورة اختبار للتأكد من أن إنشاء الفواتير الضريبية يعمل بعد تحديث SQLite schema.</p>
+      <p>هذه فاتورة اختبار داخل نظام CRM للتحقق فقط.</p>
+    </div>
+    <div class="totals">
+      <div class="total-line"><span>الإجمالي قبل الضريبة</span><strong>900.00 SAR</strong></div>
+      <div class="total-line"><span>الخصم</span><strong>0.00 SAR</strong></div>
+      <div class="total-line"><span>ضريبة القيمة المضافة 15%</span><strong>135.00 SAR</strong></div>
+      <div class="grand"><span>الإجمالي النهائي</span><strong>1,035.00 SAR</strong></div>
+    </div>
+  </section>
+  <footer class="doc-foot">
+    <p>تم إنشاء هذه الفاتورة من نظام <strong>BreeXe Pro CRM</strong>. هذه النسخة مهيأة للطباعة على A4 وتتضمن QR ضريبي بصيغة TLV.</p>
+  </footer>
+</section>
+</body>
+</html>

@@ -1,0 +1,8 @@
+User-agent: *
+Disallow: /api/
+Disallow: /src/
+Disallow: /node_modules/
+Disallow: /*.ts
+Disallow: /*.tsx
+
+Sitemap: https://crm.breexe-pro.com/sitemap.xml

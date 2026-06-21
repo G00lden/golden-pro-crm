@@ -14,9 +14,22 @@ export default defineConfig(() => {
     },
     server: {
       allowedHosts: true as const,
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
+    },
+    build: {
+      // إخفاء source maps في الإنتاج — يمنع تسريب الكود المصدري للزوار
+      sourcemap: false,
+      // تصغير الإخراج لتقليل الحجم
+      minify: 'esbuild',
+      // تقسيم الملفات لتقليل حجم التحميل الأولي
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            vendor: ['react', 'react-dom'],
+            ui: ['lucide-react', 'motion'],
+          },
+        },
+      },
     },
   };
 });
