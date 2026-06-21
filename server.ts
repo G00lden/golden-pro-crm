@@ -26,6 +26,7 @@ import { registerSallaRoutes } from "./server/routes-salla";
 import { registerMaintenanceRoutes } from "./server/routes-maintenance";
 import { registerReminderRoutes } from "./server/routes-reminders";
 import { registerStoreRoutes } from "./server/routes-store";
+import { registerOdooCrmRoutes } from "./server/odooCrm";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
@@ -263,6 +264,7 @@ async function startServer() {
   registerUserAdminRoutes(app);
   registerCrmApiRoutes(app);
   registerWhatsAppRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
+  registerOdooCrmRoutes(app);
 
   registerSallaRoutes(app);
 

@@ -8,6 +8,7 @@ type Notifier = (message: string, ok?: boolean) => void;
 const ROLE_OPTIONS: Array<{ value: api.AppUserRole; label: string }> = [
   { value: "admin", label: "مسؤول" },
   { value: "manager", label: "مدير" },
+  { value: "sales", label: "مبيعات" },
   { value: "technician", label: "فني" },
   { value: "user", label: "مستخدم" },
 ];

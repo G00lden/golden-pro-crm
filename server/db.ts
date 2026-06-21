@@ -466,6 +466,73 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_invoices_owner ON invoices(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(owner_uid, status, created_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices(owner_uid, invoice_number);
+
+  CREATE TABLE IF NOT EXISTS crm_deals (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    customer_id TEXT,
+    customer_name TEXT DEFAULT '',
+    customer_phone TEXT DEFAULT '',
+    stage TEXT DEFAULT 'lead',
+    amount NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'SAR',
+    probability INTEGER DEFAULT 10,
+    expected_close TEXT,
+    assigned_to TEXT,
+    source TEXT DEFAULT 'manual',
+    quote_id TEXT,
+    invoice_id TEXT,
+    notes TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_deals_owner_stage ON crm_deals(owner_uid, stage, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_crm_deals_customer ON crm_deals(owner_uid, customer_id);
+
+  CREATE TABLE IF NOT EXISTS crm_tasks (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    status TEXT DEFAULT 'open',
+    priority TEXT DEFAULT 'normal',
+    due_date TEXT,
+    assigned_to TEXT,
+    related_type TEXT,
+    related_id TEXT,
+    customer_id TEXT,
+    notes TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_tasks_owner_status ON crm_tasks(owner_uid, status, due_date);
+  CREATE INDEX IF NOT EXISTS idx_crm_tasks_customer ON crm_tasks(owner_uid, customer_id);
+
+  CREATE TABLE IF NOT EXISTS crm_notes (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    customer_id TEXT,
+    body TEXT NOT NULL DEFAULT '',
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_notes_customer ON crm_notes(owner_uid, customer_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    actor_uid TEXT,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT,
+    summary TEXT DEFAULT '',
+    before_data TEXT,
+    after_data TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_owner ON audit_logs(owner_uid, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(owner_uid, entity_type, entity_id, created_at DESC);
 `);
 
 for (const col of [

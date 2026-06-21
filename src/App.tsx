@@ -51,6 +51,7 @@ import InstallationsPage from "./pages/Installations";
 import BookingsPage from "./pages/Bookings";
 import StoreOrdersPage from "./pages/StoreOrders";
 import CustomerCarePage from "./pages/CustomerCare";
+import OdooCrmPage from "./pages/OdooCrm";
 import TechniciansPage from "./pages/Technicians";
 import SettingsPage from "./pages/Settings";
 import {
@@ -333,6 +334,7 @@ export default function App() {
     { id: "customers" as Page, label: "العملاء", icon: Users },
     { id: "quotes" as Page, label: "عروض الأسعار", icon: FileText, badge: summary.quoteFollowUps },
     { id: "invoices" as Page, label: "الفواتير", icon: Receipt },
+    { id: "odooCrm" as Page, label: "CRM Odoo", icon: ClipboardList },
     { id: "products" as Page, label: "المنتجات", icon: Package },
     { id: "installations" as Page, label: "الصيانة", icon: Wrench, badge: summary.overdue },
     { id: "bookings" as Page, label: "الحجوزات", icon: CalendarDays },
@@ -359,6 +361,7 @@ export default function App() {
     customers: <CustomersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     quotes: <QuotesPage notify={notify} refreshStats={stats.refresh} />,
     invoices: <InvoicesPage notify={notify} refreshStats={stats.refresh} />,
+    odooCrm: <OdooCrmPage notify={notify} />,
     products: <ProductsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     installations: <InstallationsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     bookings: <BookingsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,

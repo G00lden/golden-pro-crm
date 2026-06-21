@@ -377,6 +377,61 @@ try {
     ], "frontend workflows");
   });
 
+  await check("odoo-style CRM workspace is wired", async () => {
+    const server = await readText("server.ts");
+    const routes = await readText("server/odooCrm.ts");
+    const db = await readText("server/db.ts");
+    const adapter = await readText("server/sqliteFirestoreAdapter.ts");
+    const api = await readText("src/api.ts");
+    const app = await readText("src/App.tsx");
+    const page = await readText("src/pages/OdooCrm.tsx");
+    const roles = await readText("server/userManagement.ts");
+
+    assertIncludes(server, ["registerOdooCrmRoutes"], "odoo route registration");
+    assertIncludes(db, ["crm_deals", "crm_tasks", "crm_notes", "audit_logs"], "odoo sqlite schema");
+    assertIncludes(adapter, ["crm_deals", "crm_tasks", "crm_notes", "audit_logs"], "odoo sqlite adapter");
+    assertIncludes(roles, ["\"sales\"", "\"technician\""], "odoo roles");
+    assertIncludes(routes, [
+      "/api/odoo/dashboard",
+      "/api/odoo/pipeline",
+      "/api/odoo/tasks",
+      "/api/odoo/customer-360/:id",
+      "/api/odoo/search",
+      "/api/odoo/audit",
+      "quote_id",
+      "invoice_id",
+      "recordAudit",
+    ], "odoo backend routes");
+    assertIncludes(api, [
+      "getOdooDashboard",
+      "getOdooPipeline",
+      "createOdooDeal",
+      "updateOdooTask",
+      "getCustomer360",
+      "searchOdoo",
+    ], "odoo frontend API");
+    assertIncludes(app, ["odooCrm", "CRM Odoo", "OdooCrmPage"], "odoo nav");
+    assertIncludes(page, [
+      "CRM مثل Odoo",
+      "Pipeline المبيعات",
+      "المهام والمتابعات",
+      "عميل 360",
+      "سجل النشاط",
+    ], "odoo page");
+
+    const headers = { Authorization: "Bearer local-dev:local-dev-owner" };
+    const dashboardResponse = await timedFetch("/api/odoo/dashboard", { headers });
+    assert.equal(dashboardResponse.status, 200);
+    const dashboard = await dashboardResponse.json();
+    assert.ok(Array.isArray(dashboard.pipeline), "dashboard must expose pipeline");
+    assert.ok(dashboard.financial && typeof dashboard.financial === "object", "dashboard must expose financial metrics");
+
+    const pipelineResponse = await timedFetch("/api/odoo/pipeline", { headers });
+    assert.equal(pipelineResponse.status, 200);
+    const pipeline = await pipelineResponse.json();
+    assert.ok(Array.isArray(pipeline.stages), "pipeline must expose stages");
+  });
+
   await check("firestore rules and indexes cover CRM data", async () => {
     const rules = await readText("firestore.rules");
     const indexes = await readJson("firestore.indexes.json");

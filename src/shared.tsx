@@ -28,6 +28,7 @@ export type Page =
   | "customers"
   | "quotes"
   | "invoices"
+  | "odooCrm"
   | "products"
   | "installations"
   | "bookings"

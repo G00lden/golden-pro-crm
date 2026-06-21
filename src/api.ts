@@ -2869,7 +2869,7 @@ export const assignStoreOrderTechnician = async (
 // User management (admin panel)
 // ============================================================
 
-export type AppUserRole = "admin" | "manager" | "technician" | "user";
+export type AppUserRole = "admin" | "manager" | "sales" | "technician" | "user";
 
 export type ManagedAppUser = {
   id: string;
@@ -3080,6 +3080,116 @@ export const getConversationByPhone = (phone: string, limit = 200) =>
   apiFetch<{ phone: string; count: number; messages: WhatsAppMessage[] }>(
     `/api/whatsapp/conversations/${encodeURIComponent(phone)}?limit=${limit}`,
   );
+
+// ============================================================
+// Odoo-style CRM workspace
+// ============================================================
+export type OdooCrmStage = "lead" | "opportunity" | "quote" | "invoice" | "paid" | "lost";
+
+export type OdooDeal = {
+  id: string;
+  record_type?: "deal" | "quote" | "invoice";
+  title: string;
+  customer_id?: string | null;
+  customer_name?: string | null;
+  customer_phone?: string | null;
+  stage: OdooCrmStage;
+  amount?: number;
+  currency?: string;
+  probability?: number;
+  expected_close?: string | null;
+  assigned_to?: string | null;
+  source?: string;
+  quote_id?: string | null;
+  invoice_id?: string | null;
+  status?: string;
+  notes?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type OdooTask = {
+  id: string;
+  title: string;
+  status: "open" | "done" | "cancelled";
+  priority?: string;
+  due_date?: string | null;
+  assigned_to?: string | null;
+  related_type?: string | null;
+  related_id?: string | null;
+  customer_id?: string | null;
+  notes?: string;
+  completed_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type OdooDashboard = {
+  pipeline: Array<{ stage: OdooCrmStage; count: number; amount: number }>;
+  financial: {
+    paid_sales: number;
+    paid_invoices: number;
+    open_invoice_total: number;
+    open_invoices: number;
+    overdue_invoice_total: number;
+    overdue_invoices: number;
+    quote_followups_due: number;
+  };
+  operations: {
+    open_tasks: number;
+    overdue_tasks: number;
+  };
+};
+
+export type OdooSearchItem = {
+  type: "customer" | "store_order" | "quote" | "invoice" | "whatsapp";
+  id: string;
+  title: string;
+  subtitle?: string;
+  meta?: string;
+};
+
+export type OdooAuditLog = {
+  id: string;
+  action: string;
+  entity_type: string;
+  entity_id?: string | null;
+  summary?: string;
+  actor_uid?: string | null;
+  created_at?: string;
+};
+
+export type Customer360 = {
+  customer: Customer;
+  store_orders: StoreOrder[];
+  quotes: Quote[];
+  invoices: Invoice[];
+  installations: Installation[];
+  bookings: Booking[];
+  conversations: WhatsAppMessage[];
+  notes: Array<{ id: string; body: string; created_by?: string; created_at?: string }>;
+  tasks: OdooTask[];
+  audit: OdooAuditLog[];
+};
+
+export const getOdooDashboard = () => apiFetch<OdooDashboard>("/api/odoo/dashboard");
+export const getOdooPipeline = () =>
+  apiFetch<{ stages: Array<{ stage: OdooCrmStage; count: number; amount: number; items: OdooDeal[] }>; items: OdooDeal[] }>("/api/odoo/pipeline");
+export const createOdooDeal = (data: Partial<OdooDeal> & { title: string }) =>
+  apiFetch<{ deal: OdooDeal }>("/api/odoo/pipeline", { method: "POST", body: JSON.stringify(data) });
+export const updateOdooDeal = (id: string, data: Partial<OdooDeal>) =>
+  apiFetch<{ deal: OdooDeal }>(`/api/odoo/pipeline/${id}`, { method: "PUT", body: JSON.stringify(data) });
+export const getOdooTasks = (status: "open" | "done" | "cancelled" | "all" = "open") =>
+  apiFetch<{ data: OdooTask[]; total: number }>(`/api/odoo/tasks?status=${status}`);
+export const createOdooTask = (data: Partial<OdooTask> & { title: string }) =>
+  apiFetch<{ task: OdooTask }>("/api/odoo/tasks", { method: "POST", body: JSON.stringify(data) });
+export const updateOdooTask = (id: string, data: Partial<OdooTask>) =>
+  apiFetch<{ task: OdooTask }>(`/api/odoo/tasks/${id}`, { method: "PUT", body: JSON.stringify(data) });
+export const searchOdoo = (q: string) => apiFetch<{ items: OdooSearchItem[] }>(`/api/odoo/search?q=${encodeURIComponent(q)}`);
+export const getCustomer360 = (id: string) => apiFetch<Customer360>(`/api/odoo/customer-360/${id}`);
+export const addCustomer360Note = (id: string, body: string) =>
+  apiFetch<{ note: { id: string; body: string } }>(`/api/odoo/customer-360/${id}/notes`, { method: "POST", body: JSON.stringify({ body }) });
+export const getOdooAudit = () => apiFetch<{ data: OdooAuditLog[] }>("/api/odoo/audit");
 
 export const importText = async (text: string) => {
   const lines = text.trim().split("\n");

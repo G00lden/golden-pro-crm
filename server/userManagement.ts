@@ -3,9 +3,9 @@ import type { Express, NextFunction, Request, Response } from "express";
 import db from "./db";
 import type { AuthedRequest } from "./auth";
 
-export type UserRole = "admin" | "manager" | "technician" | "user";
+export type UserRole = "admin" | "manager" | "sales" | "technician" | "user";
 
-const ROLES: ReadonlyArray<UserRole> = ["admin", "manager", "technician", "user"];
+const ROLES: ReadonlyArray<UserRole> = ["admin", "manager", "sales", "technician", "user"];
 
 export type ManagedUser = {
   id: string;
