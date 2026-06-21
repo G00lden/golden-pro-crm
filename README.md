@@ -187,7 +187,7 @@ npm run deploy:cloudrun
 npm run deploy:firebase
 ```
 
-ط®ط·ظˆط§طھ ط§ظ„ظ†ط´ط± ط§ظ„طھظپطµظٹظ„ظٹط© ظˆط¥ط¹ط¯ط§ط¯ Secret Manager ظˆط±ط¨ط· ط³ظ„ط© ظ…ظˆط«ظ‚ط© ظپظٹ `docs/cloud-deployment.md`.
+خطوات النشر التفصيلية وإعداد Secret Manager وربط سلة موثقة في `docs/cloud-deployment.md`.
 
 ## أوامر الفحص
 

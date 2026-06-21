@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { adminAuth } from "./firebaseAdmin";
 import { ensureUserRecord, getUserByUid, type UserRole } from "./userManagement";
+import { logError } from "./logger";
 
 export type AuthedRequest = Request & {
   user: {
@@ -64,7 +65,7 @@ export async function requireFirebaseUser(
       });
       return next();
     } catch (err) {
-      console.error("ensureUserRecord failed:", err);
+      logError("auth.ensure_user_record_failed", err, { uid });
       // Fallback: create user with basic info directly
       attachUser(req, {
         uid,

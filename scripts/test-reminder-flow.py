@@ -178,7 +178,7 @@ def main() -> int:
             }],
         }],
     }
-    s, body = http("POST", f"{base}/api/whatsapp/webhook", token=None, body=incoming)
+    s, body = http("POST", f"{base}/webhooks/whatsapp", token=None, body=incoming)
     step("post_inbound_yes", ok=s == 200, status=s, response=body)
 
     # 7. Verify confirmation effect: most recent reminder for the phone is now 'confirmed'

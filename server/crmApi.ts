@@ -5,6 +5,7 @@ import { adminDb } from "./firebaseAdmin";
 import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
+import { publicInvoiceShareQuerySchema, validateQuery } from "./validation";
 
 type DocSnapshot = {
   id: string;
@@ -1017,7 +1018,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
 </html>`;
 }
 
-  app.get("/public/invoices/:id", asyncRoute(async (req, res) => {
+  app.get("/public/invoices/:id", validateQuery(publicInvoiceShareQuerySchema), asyncRoute(async (req, res) => {
     const snap = await adminDb.collection("invoices").doc(req.params.id).get() as DocSnapshot;
     if (!snap.exists) {
       res.status(404).type("text/plain").send("Invoice not found.");

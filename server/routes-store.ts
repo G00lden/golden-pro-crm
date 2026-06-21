@@ -12,6 +12,7 @@ import {
 } from "./storeWebhook";
 import { notifyTechnicianForBooking } from "./bookingNotifications";
 import { requireFirebaseUser, type AuthedRequest } from "./auth";
+import { validate, storeWebhookSchema } from "./validation";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -64,6 +65,8 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
   app.post(
     "/api/store/webhook",
+    webhookRateLimit,
+    validate(storeWebhookSchema),
     asyncRoute(async (req, res) => {
       try {
         const result = await processStoreWebhook(req as Request & { rawBody?: Buffer });

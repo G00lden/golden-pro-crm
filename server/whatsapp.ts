@@ -1,13 +1,7 @@
 import crypto from "crypto";
 import { rm } from "fs/promises";
 import path from "path";
-import { Boom } from "@hapi/boom";
-import makeWASocket, {
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  useMultiFileAuthState,
-} from "@whiskeysockets/baileys";
-import pino from "pino";
+import type { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
 import db from "./db";
 import { decideOutbound, dryRunSendResult, outboundSafetyStatus, type OutboundSendOptions } from "./outboundSafety";
@@ -167,6 +161,19 @@ export class WhatsAppService {
   }
 
   private async createSocket() {
+    const [
+      {
+        default: makeWASocket,
+        DisconnectReason,
+        fetchLatestBaileysVersion,
+        useMultiFileAuthState,
+      },
+      { default: pino },
+    ] = await Promise.all([
+      import("@whiskeysockets/baileys"),
+      import("pino"),
+    ]);
+
     const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir);
     const { version } = await fetchLatestBaileysVersion();
 

@@ -15,10 +15,19 @@ import {
 } from "./whatsappWebhook";
 import { recordCustomerConfirmation } from "./maintenanceLifecycle";
 import { parseConfirmation } from "./whatsapp";
-import { validate, sendTestSchema } from "./validation";
+import {
+  validate,
+  validateQuery,
+  sendTestSchema,
+  whatsappConversationQuerySchema,
+  whatsappTemplateSendSchema,
+  whatsappWebhookBodySchema,
+  whatsappWebhookVerifyQuerySchema,
+} from "./validation";
 import { appendFileSync } from "fs";
 import path from "path";
 import type { AuthedRequest } from "./auth";
+import { logError, logEvent, redactValue } from "./logger";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -64,28 +73,35 @@ export interface WhatsAppRouteOptions {
   whatsappOwnerUid: () => string;
 }
 
-export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptions) {
+export function registerWhatsAppWebhookRoutes(app: Express, options: WhatsAppRouteOptions) {
   const { webhookRateLimit, whatsappOwnerUid } = options;
 
   // WhatsApp Cloud API webhook (works for direct Meta callbacks AND Kapso.ai
   // forwarded webhooks). GET handles Meta's hub.challenge verification handshake;
   // POST receives message status callbacks and incoming user messages.
-  app.get("/api/whatsapp/webhook", (req, res) => verifyWhatsAppWebhook(req, res));
+  app.get(
+    "/webhooks/whatsapp",
+    webhookRateLimit,
+    validateQuery(whatsappWebhookVerifyQuerySchema),
+    (req, res) => verifyWhatsAppWebhook(req, res),
+  );
 
   app.post(
-    "/api/whatsapp/webhook",
+    "/webhooks/whatsapp",
     webhookRateLimit,
+    validate(whatsappWebhookBodySchema),
     asyncRoute(async (req, res) => {
       await handleWhatsAppWebhook(req, res, { ownerUid: whatsappOwnerUid() });
     }),
   );
 
   // Legacy inline body retained below for the qa-suite scenario that posts to
-  // /api/whatsapp/webhook with the old shape. The new module above already
+  // the old shape. The new module above already
   // ACKs the request, so the catch-all below never executes on a real call.
   app.post(
-    "/api/whatsapp/webhook-legacy",
+    "/webhooks/whatsapp/legacy",
     webhookRateLimit,
+    validate(whatsappWebhookBodySchema),
     asyncRoute(async (req, res) => {
       const body = (req.body || {}) as Record<string, unknown>;
       try {
@@ -120,7 +136,7 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
                   const result = recordCustomerConfirmation(adminUid, String(message?.from || ""), text);
                   summary.push({ kind: "confirmation", phone: message?.from, matched_keyword: matched, ...result });
                 } catch (confErr) {
-                  console.error("[wa-webhook] confirmation save failed:", confErr);
+                  logError("whatsapp.webhook.confirmation_save_failed", confErr);
                 }
               }
               summary.push({
@@ -166,17 +182,21 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
         }
 
         if (summary.length > 0) {
-          const line = `${new Date().toISOString()} ${JSON.stringify(summary)}\n`;
+          const safeSummary = redactValue(summary);
+          const line = `${new Date().toISOString()} ${JSON.stringify(safeSummary)}\n`;
           appendFileSync(path.join(process.cwd(), ".whatsapp-webhook.log"), line, "utf8");
-          console.log("[wa-webhook]", JSON.stringify(summary));
+          logEvent("info", "whatsapp.webhook.legacy_events", { events: summary.length, summary });
         }
         res.status(200).json({ received: true, events: summary.length });
       } catch (error) {
-        console.error("[wa-webhook] handler failed:", error);
+        logError("whatsapp.webhook.legacy_handler_failed", error);
         res.status(200).json({ received: false });
       }
     }),
   );
+}
+
+export function registerWhatsAppRoutes(app: Express, _options: WhatsAppRouteOptions) {
 
   app.get("/api/whatsapp/status", requireAdmin, (_req, res) => {
     res.json(whatsappService.getStatus());
@@ -258,6 +278,7 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
 
   app.post(
     "/api/whatsapp/send-template",
+    validate(whatsappTemplateSendSchema),
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       const body = (req.body || {}) as {
@@ -292,9 +313,10 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
 
   app.get(
     "/api/whatsapp/conversations/:phone",
+    validateQuery(whatsappConversationQuerySchema),
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      const limit = Math.min(500, Number(req.query.limit ?? 200) || 200);
+      const limit = Number(req.query.limit ?? 200);
       const restrictByOwner = userReq.user.role !== "admin";
       const ownerUid = restrictByOwner ? userReq.user.uid : undefined;
       const messages = getWhatsAppConversation(req.params.phone, ownerUid, limit);
@@ -304,9 +326,10 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
 
   app.get(
     "/api/whatsapp/messages",
+    validateQuery(whatsappConversationQuerySchema),
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      const limit = Math.min(500, Number(req.query.limit ?? 50) || 50);
+      const limit = Number(req.query.limit ?? 50);
       const ownerUid = userReq.user.role === "admin" ? undefined : userReq.user.uid;
       const items = listRecentWhatsAppMessages({ ownerUid, limit });
       res.json({ count: items.length, items });

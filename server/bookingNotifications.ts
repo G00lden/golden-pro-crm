@@ -1,6 +1,7 @@
 import { adminDb } from "./firebaseAdmin";
 import { isDryRunSendResult } from "./outboundSafety";
 import { whatsappService } from "./whatsapp";
+import { logError } from "./logger";
 
 type Booking = {
   id: string;
@@ -205,7 +206,10 @@ export async function sendTechnicianPreAlerts() {
       );
       dispatched.push({ booking_id: String(row.id), technician_id: String(row.technician_id), due_at: due.toISOString() });
     } catch (error) {
-      console.error("[tech-prealert] dispatch failed:", error);
+      logError("technician.prealert_dispatch_failed", error, {
+        bookingId: row.id,
+        technicianId: row.technician_id,
+      });
     }
   }
 

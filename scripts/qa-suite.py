@@ -527,16 +527,16 @@ def test_whatsapp(base: str, report: Report) -> None:
     # Webhook verification (GET handshake)
     verify_token = os.environ.get("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "22d8d3ce-0853-45f7-aeb9-d02de25e182e")
     qs = parse.urlencode({"hub.mode": "subscribe", "hub.verify_token": verify_token, "hub.challenge": "challenge-xyz"})
-    s3, body3, _ = http("GET", base, f"/api/whatsapp/webhook?{qs}", token=None)
+    s3, body3, _ = http("GET", base, f"/webhooks/whatsapp?{qs}", token=None)
     success3 = s3 == 200 and (body3 == "challenge-xyz" or body3 == {} or isinstance(body3, str))
-    report.record(endpoint="GET /api/whatsapp/webhook (verify)", status_code=s3, success=success3, issues=[] if success3 else [f"status={s3} body={body3!r}"])
+    report.record(endpoint="GET /webhooks/whatsapp (verify)", status_code=s3, success=success3, issues=[] if success3 else [f"status={s3} body={body3!r}"])
     if not success3:
-        report.bug(severity="high", title="WhatsApp webhook verification fails", description="GET /api/whatsapp/webhook with correct hub.verify_token did not echo the challenge.", endpoint="GET /api/whatsapp/webhook")
+        report.bug(severity="high", title="WhatsApp webhook verification fails", description="GET /webhooks/whatsapp with correct hub.verify_token did not echo the challenge.", endpoint="GET /webhooks/whatsapp")
 
     # Bad verify token
-    s4, _, _ = http("GET", base, "/api/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=x", token=None)
+    s4, _, _ = http("GET", base, "/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=x", token=None)
     success4 = s4 == 403
-    report.record(endpoint="GET /api/whatsapp/webhook (bad token)", status_code=s4, success=success4, issues=[] if success4 else [f"Expected 403, got {s4}"])
+    report.record(endpoint="GET /webhooks/whatsapp (bad token)", status_code=s4, success=success4, issues=[] if success4 else [f"Expected 403, got {s4}"])
 
     # POST inbound webhook (Meta-style payload)
     incoming = {
@@ -559,9 +559,9 @@ def test_whatsapp(base: str, report: Report) -> None:
             }]
         }]
     }
-    s5, body5, _ = http("POST", base, "/api/whatsapp/webhook", token=None, body=incoming)
+    s5, body5, _ = http("POST", base, "/webhooks/whatsapp", token=None, body=incoming)
     success5 = s5 == 200 and isinstance(body5, dict) and body5.get("received") is True
-    report.record(endpoint="POST /api/whatsapp/webhook", status_code=s5, success=success5, issues=[] if success5 else [f"status={s5} body={body5!r}"])
+    report.record(endpoint="POST /webhooks/whatsapp", status_code=s5, success=success5, issues=[] if success5 else [f"status={s5} body={body5!r}"])
 
 
 def test_salla(base: str, report: Report) -> None:

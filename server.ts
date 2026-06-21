@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { randomUUID } from "crypto";
 import cron from "node-cron";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -14,17 +15,21 @@ import { runDueReminders } from "./server/reminderEngine";
 import { syncAllLinkedSallaIntegrations } from "./server/salla";
 import { sendTechnicianPreAlerts } from "./server/bookingNotifications";
 import { ownedCount } from "./server/sharedRouteHelpers";
-import { validate, storeWebhookSchema } from "./server/validation";
+import { validate, validateQuery, sallaCallbackQuerySchema, sallaWebhookSchema } from "./server/validation";
 import { registerHealthRoutes } from "./server/routes-health";
 import { registerAuthRoutes } from "./server/routes-auth";
-import { registerWhatsAppRoutes, type WhatsAppRouteOptions } from "./server/routes-whatsapp";
+import {
+  registerWhatsAppRoutes,
+  registerWhatsAppWebhookRoutes,
+} from "./server/routes-whatsapp";
 import { registerSallaRoutes } from "./server/routes-salla";
 import { registerMaintenanceRoutes } from "./server/routes-maintenance";
 import { registerReminderRoutes } from "./server/routes-reminders";
-import { registerStoreRoutes, type StoreRouteOptions } from "./server/routes-store";
+import { registerStoreRoutes } from "./server/routes-store";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
+import { logError } from "./server/logger";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
@@ -156,6 +161,12 @@ async function startServer() {
 
   app.disable("x-powered-by");
   app.use(securityHeaders);
+  app.use((req, res, next) => {
+    const requestId = req.get("x-request-id") || randomUUID();
+    (req as Request & { requestId?: string }).requestId = requestId;
+    res.setHeader("X-Request-Id", requestId);
+    next();
+  });
 
   app.use(express.json({
     limit: "2mb",
@@ -187,6 +198,8 @@ async function startServer() {
       "/salla/callback",
       "/salla/webhook",
       "/api/health",
+      "/public/invoices",
+      "/webhooks/whatsapp",
     ],
     webhookRateLimit,
   );
@@ -201,7 +214,7 @@ async function startServer() {
   // WhatsApp webhook callbacks + admin endpoints
   const __whatsappOwnerUid = () =>
     adminUids()[0] || process.env.STORE_WEBHOOK_OWNER_UID || process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
-  registerWhatsAppRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
+  registerWhatsAppWebhookRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
 
   // Salla OAuth callback + webhook (unauthenticated — these trigger token
   // exchanges or receive store-push events before any user is logged in).
@@ -215,6 +228,7 @@ async function startServer() {
   const { handleSallaCallback, handleSallaAppWebhook } = await import("./server/salla");
   app.get(
     "/api/integrations/salla/callback",
+    validateQuery(sallaCallbackQuerySchema),
     asyncRoute(async (req, res) => {
       const result = await handleSallaCallback(req);
       res.status(result.status).type("html").send(result.html);
@@ -222,12 +236,14 @@ async function startServer() {
   );
   app.post(
     "/api/integrations/salla/webhook",
+    validate(sallaWebhookSchema),
     asyncRoute(async (req, res) => {
       res.json(await handleSallaAppWebhook(req as Request & { rawBody?: Buffer }));
     }),
   );
   app.get(
     "/salla/callback",
+    validateQuery(sallaCallbackQuerySchema),
     asyncRoute(async (req, res) => {
       const result = await handleSallaCallback(req);
       res.status(result.status).type("html").send(result.html);
@@ -235,6 +251,7 @@ async function startServer() {
   );
   app.post(
     ["/salla/callback", "/salla/webhook"],
+    validate(sallaWebhookSchema),
     asyncRoute(async (req, res) => {
       res.json(await handleSallaAppWebhook(req as Request & { rawBody?: Buffer }));
     }),
@@ -245,6 +262,7 @@ async function startServer() {
 
   registerUserAdminRoutes(app);
   registerCrmApiRoutes(app);
+  registerWhatsAppRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
 
   registerSallaRoutes(app);
 
@@ -358,10 +376,16 @@ async function startServer() {
   );
 
   // Error handler
-  app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: Error & { status?: number }, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || 500;
     if (!err.status || status >= 500) {
-      console.error("Unhandled server error:", err);
+      const requestId = (req as Request & { requestId?: string }).requestId;
+      logError("server.unhandled_error", err, {
+        requestId,
+        method: req.method,
+        path: req.originalUrl,
+        status,
+      });
       res.status(status).json({ error: "حدث خطأ غير متوقع في السيرفر." });
       return;
     }
@@ -376,7 +400,7 @@ async function startServer() {
         try {
           await runDueReminders({ mode: "scheduled" });
         } catch (error) {
-          console.error("Reminder scheduler failed:", error);
+          logError("scheduler.reminder_failed", error);
         }
       },
       { timezone: timeZone },
@@ -392,7 +416,7 @@ async function startServer() {
         try {
           await syncAllLinkedSallaIntegrations();
         } catch (error) {
-          console.error("Salla sync scheduler failed:", error);
+          logError("scheduler.salla_sync_failed", error);
         }
       },
       { timezone: timeZone },
@@ -410,7 +434,7 @@ async function startServer() {
         try {
           await sendTechnicianPreAlerts();
         } catch (error) {
-          console.error("Technician pre-alert scheduler failed:", error);
+          logError("scheduler.technician_prealert_failed", error);
         }
       },
       { timezone: timeZone },
@@ -438,6 +462,6 @@ async function startServer() {
 }
 
 startServer().catch((error) => {
-  console.error("Failed to start Golden Pro CRM:", error);
+  logError("server.start_failed", error);
   process.exit(1);
 });

@@ -22,6 +22,7 @@ const baseUrl = process.env.APP_URL || "http://localhost:3000";
 const uid = process.env.GOLDEN_PATH_UID || "golden-path-test";
 const authHeader = { Authorization: `Bearer local-dev:${uid}` };
 const json = { "Content-Type": "application/json" };
+const closeHeader = { Connection: "close" };
 
 const results = [];
 const created = { customerId: null, quoteId: null };
@@ -31,7 +32,11 @@ async function request(path, init = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal, headers: { ...authHeader, ...json, ...(init.headers || {}) } });
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: { ...closeHeader, ...authHeader, ...json, ...(init.headers || {}) },
+    });
     let body = null;
     const text = await res.text();
     if (text) {
@@ -86,8 +91,9 @@ try {
 
   // -- 1. Auth: anonymous is rejected on protected route
   await step("auth rejects anonymous on /api/customers", async () => {
-    const r = await fetch(new URL("/api/customers", baseUrl));
+    const r = await fetch(new URL("/api/customers", baseUrl), { headers: closeHeader });
     assert.equal(r.status, 401, `expected 401, got ${r.status}`);
+    await r.body?.cancel?.();
   });
 
   // -- 2. Auth: local-dev token is accepted
@@ -180,6 +186,8 @@ console.log(`\n=== ${results.length - failed.length}/${results.length} steps pas
 if (failed.length) {
   console.log("\nFailures:");
   for (const f of failed) console.log(`  - ${f.name}: ${f.error}`);
-  process.exit(1);
+  process.exitCode = 1;
+} else {
+  process.exitCode = 0;
 }
-process.exit(0);
+await delay(50);

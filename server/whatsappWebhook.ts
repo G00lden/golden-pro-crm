@@ -16,6 +16,7 @@ import {
   recordWhatsAppMessage,
   updateWhatsAppStatus,
 } from "./whatsapp";
+import { logError, logEvent, redactValue } from "./logger";
 
 export type WhatsAppWebhookMessage = {
   from?: string;
@@ -202,7 +203,7 @@ export async function handleWebhook(
               const conf = recordCustomerConfirmation(ownerUid, String(message?.from || ""), text);
               summary.push({ kind: "confirmation", phone: message?.from, matched_keyword: confirmed, ...conf });
             } catch (err) {
-              console.error("[wa-webhook] confirmation save failed:", err);
+              logError("whatsapp.webhook.confirmation_save_failed", err);
             }
           } else {
             // 3. Reschedule keyword → flag for admin follow-up.
@@ -212,7 +213,7 @@ export async function handleWebhook(
                 const r = recordRescheduleRequest(ownerUid, String(message?.from || ""), text);
                 if (r) summary.push({ kind: "reschedule_request", phone: message?.from, matched_keyword: reschedule, ...r });
               } catch (err) {
-                console.error("[wa-webhook] reschedule save failed:", err);
+                logError("whatsapp.webhook.reschedule_save_failed", err);
               }
             }
           }
@@ -224,7 +225,7 @@ export async function handleWebhook(
               const a = recordTechnicianAck(ownerUid, String(message?.from || ""));
               if (a) summary.push({ kind: "technician_ack", phone: message?.from, matched_keyword: ack, ...a });
             } catch (err) {
-              console.error("[wa-webhook] tech ack save failed:", err);
+              logError("whatsapp.webhook.tech_ack_save_failed", err);
             }
           }
 
@@ -274,17 +275,17 @@ export async function handleWebhook(
 
     if (summary.length > 0) {
       try {
-        const line = `${new Date().toISOString()} ${JSON.stringify(summary)}\n`;
+        const line = `${new Date().toISOString()} ${JSON.stringify(redactValue(summary))}\n`;
         appendFileSync(path.join(process.cwd(), ".whatsapp-webhook.log"), line, "utf8");
       } catch {
         // best-effort
       }
-      console.log("[wa-webhook]", JSON.stringify(summary));
+      logEvent("info", "whatsapp.webhook.events", { events: summary.length, summary });
     }
 
     res.status(200).json({ received: true, events: summary.length });
   } catch (error) {
-    console.error("[wa-webhook] handler failed:", error);
+    logError("whatsapp.webhook.handler_failed", error);
     // Meta requires a 200 even on internal errors to avoid retries cascading.
     res.status(200).json({ received: false });
   }
