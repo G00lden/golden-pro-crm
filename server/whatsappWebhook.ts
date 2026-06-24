@@ -8,6 +8,7 @@
  */
 import { appendFileSync } from "fs";
 import path from "path";
+import crypto from "crypto";
 import type { Request, Response } from "express";
 import db from "./db";
 import { recordCustomerConfirmation } from "./maintenanceLifecycle";
@@ -159,6 +160,59 @@ export function verifyWebhook(req: Request, res: Response): void {
     return;
   }
   res.status(403).json({ error: "Invalid verify token" });
+}
+
+/** Constant-time hex/string compare that won't throw on length mismatch. */
+function safeEquals(a: string, b: string): boolean {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+/**
+ * Authenticate an inbound WhatsApp webhook POST. Returns `null` when the
+ * request is genuine, or an `{ status, error }` to reject with.
+ *
+ * Two proofs are accepted (either suffices):
+ *   1. Meta's `x-hub-signature-256: sha256=<hmac>` over the *raw* body, keyed
+ *      with `WHATSAPP_APP_SECRET` (the Meta App Secret).
+ *   2. A shared-secret header `x-whatsapp-webhook-secret` === `WHATSAPP_WEBHOOK_SECRET`
+ *      — for Kapso.ai forwarding or manual setups that cannot replay Meta's sig.
+ *
+ * Fail-closed: in production, if neither secret is configured the endpoint is
+ * refused (503) rather than silently accepting forged inbound. In dev/local the
+ * unsigned path is allowed so the qa-suite and local tunnels keep working.
+ */
+export function verifyWhatsAppWebhookAuth(
+  req: Request & { rawBody?: Buffer },
+): { status: number; error: string } | null {
+  const appSecret = process.env.WHATSAPP_APP_SECRET || "";
+  const sharedSecret = process.env.WHATSAPP_WEBHOOK_SECRET || "";
+  const isProd = process.env.NODE_ENV === "production";
+
+  if (!appSecret && !sharedSecret) {
+    if (isProd) {
+      return { status: 503, error: "WhatsApp webhook secret is not configured." };
+    }
+    return null; // dev/local convenience only
+  }
+
+  // Proof 1: shared-secret header.
+  if (sharedSecret) {
+    const provided = req.get("x-whatsapp-webhook-secret") || "";
+    if (provided && safeEquals(provided, sharedSecret)) return null;
+  }
+
+  // Proof 2: Meta HMAC-SHA256 over the raw request body.
+  if (appSecret) {
+    const header = req.get("x-hub-signature-256") || "";
+    const sig = header.startsWith("sha256=") ? header.slice("sha256=".length) : header;
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const expected = crypto.createHmac("sha256", appSecret).update(rawBody).digest("hex");
+    if (sig && safeEquals(sig.toLowerCase(), expected)) return null;
+  }
+
+  return { status: 401, error: "Invalid or missing WhatsApp webhook signature." };
 }
 
 export async function handleWebhook(

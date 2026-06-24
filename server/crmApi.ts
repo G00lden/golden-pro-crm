@@ -785,7 +785,16 @@ function escapeHtml(value: unknown) {
 }
 
 function invoiceShareSecret() {
-  return process.env.INVOICE_SHARE_SECRET || process.env.JWT_SECRET || process.env.SESSION_SECRET || "local-dev-invoice-share";
+  const secret = process.env.INVOICE_SHARE_SECRET || process.env.JWT_SECRET || process.env.SESSION_SECRET;
+  if (secret) return secret;
+  // Fail closed in production: a guessable constant would make public invoice
+  // share-links forgeable. Force an explicit secret before going live.
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "INVOICE_SHARE_SECRET (or JWT_SECRET / SESSION_SECRET) must be set in production for signed invoice share-links.",
+    );
+  }
+  return "local-dev-invoice-share";
 }
 
 function invoiceShareToken(invoiceId: string, ownerUid: string) {

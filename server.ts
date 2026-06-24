@@ -17,7 +17,6 @@ import { sendTechnicianPreAlerts } from "./server/bookingNotifications";
 import { ownedCount } from "./server/sharedRouteHelpers";
 import { validate, validateQuery, sallaCallbackQuerySchema, sallaWebhookSchema } from "./server/validation";
 import { registerHealthRoutes } from "./server/routes-health";
-import { registerAuthRoutes } from "./server/routes-auth";
 import {
   registerWhatsAppRoutes,
   registerWhatsAppWebhookRoutes,
@@ -207,8 +206,6 @@ async function startServer() {
 
   // ── Route modules ──
   registerHealthRoutes(app);
-
-  registerAuthRoutes(app);
 
   registerStoreRoutes(app, { webhookRateLimit });
 

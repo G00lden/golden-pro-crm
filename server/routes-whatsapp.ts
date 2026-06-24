@@ -12,6 +12,7 @@ import { listTemplateNames, renderTemplate, type TemplateName } from "./whatsapp
 import {
   handleWebhook as handleWhatsAppWebhook,
   verifyWebhook as verifyWhatsAppWebhook,
+  verifyWhatsAppWebhookAuth,
 } from "./whatsappWebhook";
 import { recordCustomerConfirmation } from "./maintenanceLifecycle";
 import { parseConfirmation } from "./whatsapp";
@@ -68,6 +69,23 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
   res.status(403).json({ error: "Administrator privileges are required for this action." });
 }
 
+/**
+ * Authenticate inbound WhatsApp webhook POSTs (HMAC / shared secret).
+ * Runs before body validation so forged callers are rejected first.
+ */
+function requireWebhookSignature(
+  req: Request & { rawBody?: Buffer },
+  res: Response,
+  next: NextFunction,
+) {
+  const rejection = verifyWhatsAppWebhookAuth(req);
+  if (rejection) {
+    res.status(rejection.status).json({ error: rejection.error });
+    return;
+  }
+  next();
+}
+
 export interface WhatsAppRouteOptions {
   webhookRateLimit: (req: Request, res: Response, next: NextFunction) => void;
   whatsappOwnerUid: () => string;
@@ -89,6 +107,7 @@ export function registerWhatsAppWebhookRoutes(app: Express, options: WhatsAppRou
   app.post(
     "/webhooks/whatsapp",
     webhookRateLimit,
+    requireWebhookSignature,
     validate(whatsappWebhookBodySchema),
     asyncRoute(async (req, res) => {
       await handleWhatsAppWebhook(req, res, { ownerUid: whatsappOwnerUid() });
@@ -101,6 +120,7 @@ export function registerWhatsAppWebhookRoutes(app: Express, options: WhatsAppRou
   app.post(
     "/webhooks/whatsapp/legacy",
     webhookRateLimit,
+    requireWebhookSignature,
     validate(whatsappWebhookBodySchema),
     asyncRoute(async (req, res) => {
       const body = (req.body || {}) as Record<string, unknown>;
@@ -278,6 +298,7 @@ export function registerWhatsAppRoutes(app: Express, _options: WhatsAppRouteOpti
 
   app.post(
     "/api/whatsapp/send-template",
+    requireAdmin,
     validate(whatsappTemplateSendSchema),
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;

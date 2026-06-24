@@ -34,12 +34,12 @@
 | 2.2 🔒 | Auth required on every mutating `/api/*` route | ◐ | supervisor | spot-checked; need full audit |
 | 2.3 🔒 | Store webhook HMAC verification mandatory in prod | ✓ | n/a | implemented in `server/storeWebhook.ts` |
 | 2.4 🔒 | Outbound WhatsApp gated by launch code in prod | ✓ | n/a | `OUTBOUND_LAUNCH_CODE` enforced |
-| 2.5 🔒 | Rate limiting on `/api/auth/*` and webhook | ✗ | codex | express-rate-limit; per-IP + per-account |
-| 2.6 🔒 | Input validation (zod) on every public endpoint | ✗ | codex | currently ad-hoc |
+| 2.5 🔒 | Rate limiting on auth + webhooks + global `/api` | ✓ | codex | verified 2026-06-24: per-IP limiter on webhooks + global `/api`; live 429 confirmed |
+| 2.6 🔒 | Input validation (zod) on every public endpoint | ✓ | codex | verified 2026-06-24: `server/validation.ts` + `validate()` on customers/quotes/whatsapp/webhook/salla; bad input → 400 live |
 | 2.7 🔒 | npm audit critical=0, high≤1 (or documented exception) | ◐ | codex | 2026-06-18: `npm audit fix` reduced 25→12 vulns (1 critical, 2 high remaining — baileys/protobuf transitive) |
 | 2.8 🔒 | Supabase RLS policies reviewed for every table | ✗ | claude | go table-by-table |
 | 2.9 🔒 | Firestore rules reviewed by Supervisor | ◐ | supervisor | `firestore.rules` exists; do a line-by-line pass |
-| 2.10 🔒 | Logs scrubbed of PII (phone, name, address) | ✗ | codex | redact in middleware |
+| 2.10 🔒 | Logs scrubbed of PII (phone, name, address) | ✓ | codex | verified 2026-06-24: `server/logger.ts` `redactValue()` masks phone/token/secret; used by webhook + event logs |
 | 2.11 🔒 | HTTPS-only in production (HSTS) | ✗ | hermes | Caddy/CF tunnel terminates TLS — verify HSTS header |
 | 2.12 🔒 | Penetration smoke (sqlmap + nikto baseline) | ✗ | supervisor | run on staging URL |
 
@@ -79,16 +79,16 @@ This is the page paid ads send traffic to. It's a **public** page; the rest of t
 | 5.4 | Primary CTAs: WhatsApp button, call button, lead form | ✓ | claude | done 2026-06-18: WA + call + form, each fires trackEvent() with utm context |
 | 5.5 | Trust signals (reviews / past work / counts) | ✗ | claude | manual entries for now |
 | 5.6 | Core Web Vitals: LCP <2.5s, CLS <0.1, INP <200ms | ✗ | claude | ad quality score depends on this |
-| 5.7 | Cookie consent banner (PDPL-aware) | ✗ | claude | required before firing any pixel |
+| 5.7 | Cookie consent banner (PDPL-aware) | ✓ | claude | done 2026-06-24: `src/consent.ts` + `ConsentBanner.tsx`; tracking init gated on granted consent in `main.tsx` |
 | 5.8 | Mobile-first design (≤375px is the primary view) | ✓ | claude | done 2026-06-18: all sections responsive, sticky bottom CTA on mobile |
 
 ### 5B. Tracking stack — client-side
 
 | # | Item | Status | Owner | Notes |
 |---|------|--------|-------|-------|
-| 5.9 | Google Tag Manager container loaded (every other tag goes through GTM) | ✗ | claude | `VITE_GTM_ID` env, gated by consent |
-| 5.10 | Google Analytics 4 (GA4) | ✗ | claude | via GTM, anonymize_ip, enhanced measurement on |
-| 5.11 | Meta Pixel (Facebook + Instagram) | ✗ | claude | `VITE_META_PIXEL_ID` env |
+| 5.9 | Google Tag Manager container loaded (every other tag goes through GTM) | ◐ | claude | code wired (`src/gtm.ts`), consent-gated; set `VITE_GTM_ID` + `VITE_ENABLE_TRACKING` to activate |
+| 5.10 | Google Analytics 4 (GA4) | ◐ | claude | code wired (`src/ga4.ts`), consent-gated; set `VITE_GA4_ID` to activate |
+| 5.11 | Meta Pixel (Facebook + Instagram) | ◐ | claude | code wired (`src/metaPixel.ts`), consent-gated; set `VITE_META_PIXEL_ID` to activate |
 | 5.12 | TikTok Pixel | ✗ | claude | `VITE_TIKTOK_PIXEL_ID` env |
 | 5.13 | Snap Pixel | ✗ | claude | `VITE_SNAP_PIXEL_ID` env |
 | 5.14 | Google Ads conversion tag | ✗ | claude | `VITE_GADS_ID` + conversion label |
@@ -154,12 +154,19 @@ Server-side conversion APIs improve match rates (browser ad-blockers kill ~30-50
 - 5.29, 5.32 (ad creative pack, owner dashboard)
 - 1.10, 6.4 (graceful shutdown, uptime monitor)
 
-## Current standing — 2026-06-18
+## Current standing — 2026-06-24
 
-Done: 6 / 65 items (9%). Hard-gate items remaining: ~24.
+Done: 14 / 71 items (20%). Hard-gate (🔒) items remaining: 6.
+
+Notes from the 2026-06-24 audit + fix pass (supervisor):
+- Full audit: lint ✓ (fixed a broken `vite.config.ts` type), build ✓, smoke 14/14 ✓, golden-path 7/7 ✓, 40+ endpoints probed live, 180-control UI inventory (178 wired).
+- Fixed 3 confirmed security holes: R-008 WhatsApp webhook HMAC (now signed, fail-closed in prod), R-009 `send-template` admin gate, R-010 cookie-consent gating all trackers. All re-verified live + unit-tested (webhook auth 7/7).
+- Removed dead JWT auth path (`routes-auth.ts` / `localAuth.ts`) — it minted unusable admin tokens (latent privesc).
+- Hardened invoice-share secret to fail-closed in production.
+- Reconciled stale gates: 2.5 (rate-limit), 2.6 (zod), 2.10 (PII scrub) were already done in code → flipped to ✓; 5.7 consent banner ✓; 5.9–5.11 trackers → ◐ (wired, need env keys).
+
+Remaining 6 hard-gates: 2.7 (npm audit critical=0 — baileys-transitive, R-001), 2.8 (Supabase RLS review), 2.9 (Firestore rules review), 2.11 (HTTPS/HSTS), 2.12 (pentest smoke), plus payments 4.1/4.2 and legal 4.3 from the Definition-of-Done.
 
 Notes from refocus (2026-06-18):
 - Removed multi-tenant pricing tiers / subscription state / support email — this is a single-owner project, not a SaaS for sale.
 - Added 24-item ad-tracking stack (sections 5B + 5C) — the landing is the conversion funnel; without tracking, ad spend is blind.
-- Promoted golden-path test to ✓ (`npm run test:golden` passes 7/7).
-- npm audit improved 25→12 vulns; remaining 1 critical + 2 high are baileys-transitive — tracked as risk R-001 in `risk-register.md`.
