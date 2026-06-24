@@ -20,7 +20,7 @@ export default defineConfig(() => {
       // إخفاء source maps في الإنتاج — يمنع تسريب الكود المصدري للزوار
       sourcemap: false,
       // تصغير الإخراج لتقليل الحجم
-      minify: 'esbuild',
+      minify: 'esbuild' as const,
       // تقسيم الملفات لتقليل حجم التحميل الأولي
       rollupOptions: {
         output: {
