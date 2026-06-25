@@ -16,6 +16,8 @@ import db from "./db";
 import {
   getDepartmentByDigit,
   listDepartments,
+  pickAgentRoundRobin,
+  recentlyNotifiedCustomer,
   recordCall,
   updateCallBySid,
   type IvrDepartment,
@@ -148,10 +150,6 @@ function smsMenuText(ownerUid: string): string {
   return activeDepartments(ownerUid).map((d) => `${d.digit} - ${d.name}`).join("\n");
 }
 
-function firstAgent(dept: IvrDepartment) {
-  return dept.agents.find((a) => a.active && a.phone) || dept.agents[0] || null;
-}
-
 /** Latest missed/menu call from this number that hasn't been routed yet. */
 function recentUnroutedMissed(ownerUid: string, fromNorm: string): Record<string, unknown> | null {
   const tail = fromNorm.slice(-9);
@@ -192,11 +190,19 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
     recordCall({ ownerUid, provider: "gateway", callSid, from, to: normPhone(event.to), status: "no_answer" });
     updateCallBySid(callSid, { missed: 1 });
 
+    // Anti-spam: if this caller already got an auto-reply recently (call retries
+    // / repeated missed calls), record the call but don't message again.
+    const cooldownMin = Number(process.env.GATEWAY_REPLY_COOLDOWN_MIN ?? 10);
+    if (recentlyNotifiedCustomer(ownerUid, from, cooldownMin)) {
+      logEvent("info", "gateway.missed_call.cooldown_skip", { from, cooldownMin });
+      return { handled: true, kind: "missed_call", callSid, cooled: true };
+    }
+
     const dispatched: Array<{ channel: string; to: string }> = [];
 
     if (routingMode() === "direct") {
       const dept = activeDepartments(ownerUid)[0];
-      const agent = dept ? firstAgent(dept) : null;
+      const agent = dept ? pickAgentRoundRobin(dept) : null;
       if (dept) {
         updateCallBySid(callSid, {
           department_id: dept.id,
@@ -238,7 +244,7 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
       return { handled: true, kind: "sms_invalid_digit", digit };
     }
 
-    const agent = firstAgent(dept);
+    const agent = pickAgentRoundRobin(dept);
     const existing = recentUnroutedMissed(ownerUid, from);
     const callSid = existing?.call_sid ? String(existing.call_sid) : `gw_${crypto.randomUUID().slice(0, 12)}`;
     if (!existing) {

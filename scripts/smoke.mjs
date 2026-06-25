@@ -496,6 +496,50 @@ try {
     assert.ok(!firebase.includes("throw new Error(JSON.stringify(errInfo))"), "Firestore errors must not expose diagnostic JSON to the UI");
   });
 
+  await check("call routing + self-hosted gateway are wired", async () => {
+    const server = await readText("server.ts");
+    const gateway = await readText("server/gateway.ts");
+    const ivr = await readText("server/ivrEngine.ts");
+    const routesGw = await readText("server/routes-gateway.ts");
+    const db = await readText("server/db.ts");
+    const templates = await readText("server/whatsappTemplates.ts");
+
+    assertIncludes(server, [
+      "registerGatewayWebhookRoutes",
+      "registerTelephonyWebhookRoutes",
+      "initWhatsAppAutoReply",
+    ], "server telephony/gateway wiring");
+    assertIncludes(gateway, [
+      "handleGatewayEvent",
+      "dispatchMessage",
+      "pickAgentRoundRobin",
+      "recentlyNotifiedCustomer",
+      "GATEWAY_REPLY_COOLDOWN_MIN",
+      "getNextPendingSms",
+    ], "gateway engine");
+    assertIncludes(ivr, [
+      "pickAgentRoundRobin",
+      "rr_counter",
+      "recentlyNotifiedCustomer",
+      "runMissedCallFlow",
+    ], "ivr engine routing helpers");
+    assertIncludes(routesGw, [
+      "/api/gateway/event",
+      "/api/gateway/next",
+      "/api/gateway/outbox/ack",
+      "requireGatewayToken",
+    ], "gateway routes");
+    assertIncludes(db, ["gateway_outbox", "ivr_departments", "call_logs"], "telephony tables");
+    assertIncludes(templates, ["missed_call_customer", "missed_call_agent"], "missed-call templates");
+
+    // Live: gateway endpoints must reject calls without the gateway token, and
+    // the admin status endpoint must reject anonymous requests.
+    const noToken = await timedFetch("/api/gateway/next");
+    assert.ok([401, 503].includes(noToken.status), "gateway/next must require the gateway token");
+    const adminStatus = await timedFetch("/api/gateway/status");
+    assert.equal(adminStatus.status, 401, "gateway/status must require an authenticated admin");
+  });
+
   for (const result of results) {
     if (result.ok) console.log(`PASS ${result.name}`);
     else console.error(`FAIL ${result.name}: ${result.error}`);

@@ -271,6 +271,47 @@ export function deleteDepartment(ownerUid: string, id: string): boolean {
   return true;
 }
 
+/**
+ * Picks the next agent for a department, rotating fairly across all active
+ * agents (round-robin) so calls are distributed instead of always hitting the
+ * first employee. Advances and persists the department's pointer.
+ */
+export function pickAgentRoundRobin(dept: IvrDepartment): IvrAgent | null {
+  const agents = dept.agents.filter((a) => a.active && a.phone);
+  if (agents.length === 0) return dept.agents[0] || null;
+  const row = db.prepare("SELECT rr_counter FROM ivr_departments WHERE id = ?").get(dept.id) as
+    | { rr_counter?: number }
+    | undefined;
+  const counter = Number(row?.rr_counter || 0);
+  const agent = agents[counter % agents.length];
+  db.prepare("UPDATE ivr_departments SET rr_counter = ?, updated_at = ? WHERE id = ?").run(
+    (counter + 1) % 1_000_000,
+    nowIso(),
+    dept.id,
+  );
+  return agent;
+}
+
+/**
+ * True when this caller already received a customer auto-reply within the last
+ * `minutes` (anti-spam for repeated/retried missed calls). minutes<=0 disables.
+ */
+export function recentlyNotifiedCustomer(ownerUid: string, fromPhone: string, minutes: number): boolean {
+  if (!minutes || minutes <= 0) return false;
+  const digits = String(fromPhone || "").replace(/\D/g, "");
+  if (!digits) return false;
+  const tail = digits.slice(-9);
+  const since = new Date(Date.now() - minutes * 60_000).toISOString();
+  const row = db
+    .prepare(
+      `SELECT 1 FROM call_logs
+       WHERE owner_uid = ? AND from_phone LIKE ? AND wa_customer_notified = 1 AND created_at >= ?
+       LIMIT 1`,
+    )
+    .get(ownerUid, `%${tail}`, since);
+  return Boolean(row);
+}
+
 // ── Call logs ─────────────────────────────────────────────────────────────────
 function safeJson(raw: unknown) {
   if (typeof raw !== "string") return raw ?? null;
@@ -417,8 +458,8 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
     ];
   }
 
-  const agent = department.agents.find((a) => a.active && a.phone);
-  if (!agent) {
+  const agent = pickAgentRoundRobin(department);
+  if (!agent || !agent.phone) {
     // No reachable agent → treat as a missed call immediately so the customer
     // still gets a WhatsApp follow-up.
     updateCallBySid(call.callSid, {
