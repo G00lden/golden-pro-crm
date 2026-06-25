@@ -78,14 +78,39 @@ UNIFONIC_VOICE_BASE_URL=
 3. ضبط **Status Callback** = `https://<server>/webhooks/telephony/status`.
 4. وضع نفس `TELEPHONY_WEBHOOK_SECRET` في الطرفين (يُرسل في ترويسة `x-telephony-webhook-secret` أو `?secret=`).
 
-## ⚠️ تنبيه: تأكيد عقد الحقول
+## عقد Unifonic (مؤكَّد من التوثيق العام)
 
-أسماء حقول Unifonic لتعليمات IVR و status webhook محمية خلف تسجيل دخول حساب
-Unifonic. المحوّل `unifonicAdapter.ts` مكتوب دفاعياً ليقبل أكثر الأسماء شيوعاً
-(`callSid/sessionId`، `digits/Digits`، `status/DialCallStatus`...) مع تعليمات
-`// CONFIRM`. عند توفّر توثيق الحساب، يُعدّل **هذا الملف فقط**؛ بقية النظام لا
-يلمس أسماء حقول المزوّد. غلاف الاستجابة الحالي `{ actions: [...] }` يجب مطابقته
-بما يتوقعه Unifonic IVR Endpoint.
+مرجع: `unifonic.readme.io/reference/different-voice-parameters-that-are-available`،
+`.../sending-multiple-ivr-objects-in-a-single-request`،
+`.../making-an-outgoing-call-to-collect-response`.
+
+**الوارد إلى IVR Endpoint (GET، ويُستدعى أيضاً على responseUrl عند الضغط):**
+```json
+{ "callerId": "+9665XXXXXXXX", "recipient": "+9665XXXXXXXX", "digits": "1", "speechResult": "one", "confidence": 0.6 }
+```
+- `callerId` = العميل، `recipient` = الرقم المطلوب، `digits` = الضغط.
+- Unifonic **لا يرسل معرّف مكالمة ثابتاً** في حمولة الرد، لذا نربط المكالمة عبر
+  `callerId` المُطبّع (للمتصل مكالمة نشطة واحدة في حينه).
+
+**الاستجابة = مصفوفة JSON من كائنات IVR** (وليست غلافاً):
+```json
+[
+  { "say": "...", "language": "arabic", "voice": "male", "ttsEngine": "standard",
+    "responseUrl": "https://<server>/webhooks/telephony/ivr", "digitsLimit": "1",
+    "loop": "3", "onEmptyResponse": "..." }
+]
+```
+للتحويل:
+```json
+[ { "say": "يتم تحويلكم...", "language": "arabic", "voice": "male", "transfer": "+9665XXXXXXXX", "recording": false } ]
+```
+كائن `say` بدون `responseUrl` يُنهي المكالمة (لا يوجد verb منفصل لـ hangup).
+
+**الحالة (status):** تصل إلى webhook الحالة المُعدّ على مستوى الحساب/الرقم في لوحة
+Unifonic (← `/webhooks/telephony/status`). أسماء حقول حمولة الحالة قد تختلف حسب
+الحساب؛ `parseStatus` في المحوّل دفاعي ويطبّع أكثر القيم شيوعاً
+(`no-answer/busy/failed/voicemail/completed`...). إن اختلفت لدى حسابك، عدّل
+**`unifonicAdapter.ts` فقط**.
 
 ## الاختبار المحلي (تم التحقق)
 

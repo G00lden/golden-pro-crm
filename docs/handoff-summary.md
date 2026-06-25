@@ -140,6 +140,6 @@ Open PRs:    0
 - تم اختبار التدفق محلياً end-to-end (قائمة → تحويل برقم مُطبّع 9665.. → مكالمة فائتة → واتساب للطرفين).
 
 ### يحتاج انتباه الوكيل التالي / المالك
-- **أسماء حقول Unifonic**: المحوّل دفاعي ويقبل أكثر الأسماء شيوعاً؛ تأكيد العقد الفعلي من توثيق حساب Unifonic وتعديل `unifonicAdapter.ts` فقط (تعليقات `// CONFIRM`).
+- **عقد Unifonic مؤكَّد** من التوثيق العام: الوارد `{callerId, recipient, digits}`، والاستجابة مصفوفة كائنات `say/responseUrl/digitsLimit` و`transfer:"+9665.."`. الربط بالمكالمة عبر `callerId` (لا يوجد callSid ثابت). حقول حمولة **الحالة** فقط تبقى account-specific و`parseStatus` دفاعي.
 - ضبط `TELEPHONY_WEBHOOK_SECRET` و`PUBLIC_BASE_URL` و`UNIFONIC_*` في `.env`، وربط IVR Endpoint + Status Callback في لوحة Unifonic.
 - `TELEPHONY_WEBHOOK_SECRET` إلزامي في الإنتاج (الـ webhook يُرفض 503 بدونه).

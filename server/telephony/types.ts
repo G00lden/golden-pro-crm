@@ -20,13 +20,16 @@ export type IvrInstruction =
       language?: string;
     }
   | {
-      // Forward (bridge) the call to an external phone number. When the dial
-      // ends, the provider posts the outcome to `statusCallbackUrl`.
+      // Forward (transfer) the call to an external phone number. The provider
+      // reports the outcome to the account-level status webhook.
       action: "dial";
+      /** Announcement spoken before the transfer (provider requires say/play). */
+      text?: string;
       number: string;
       callerId?: string;
       ringTimeoutSec?: number;
       statusCallbackUrl?: string;
+      recording?: boolean;
     }
   | { action: "hangup" };
 

@@ -447,9 +447,9 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
 
   const config = getTelephonyConfig(ownerUid);
   return [
-    { action: "say", text: `يتم تحويلكم إلى ${department.name}. يرجى الانتظار.`, language: "ar" },
     {
       action: "dial",
+      text: `يتم تحويلكم إلى ${department.name}. يرجى الانتظار.`,
       number: normalizeDialNumber(agent.phone),
       callerId: config.main_number ? normalizeDialNumber(config.main_number) : undefined,
       ringTimeoutSec: department.ring_timeout_sec || config.ring_timeout_sec,
