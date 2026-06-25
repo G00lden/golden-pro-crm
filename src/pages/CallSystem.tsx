@@ -32,6 +32,8 @@ const STATUS_LABEL: Record<string, string> = {
   failed: "فشلت",
   voicemail: "بريد صوتي",
   ringing: "يرن",
+  routed: "مُحوّلة لموظف",
+  handled: "تمت المعالجة",
 };
 
 type DraftAgent = { name: string; phone: string };
@@ -165,6 +167,16 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
       await refresh();
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر الحذف", false);
+    }
+  };
+
+  const handleCall = async (id: string) => {
+    try {
+      await api.markCallHandled(id);
+      notify("تم وضع المكالمة كمُعالَجة", true);
+      await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "تعذر التحديث", false);
     }
   };
 
@@ -420,23 +432,31 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
               <thead>
                 <tr style={{ textAlign: "right", opacity: 0.7 }}>
                   <th style={{ padding: 6 }}>الوقت</th>
-                  <th style={{ padding: 6 }}>العميل</th>
+                  <th style={{ padding: 6 }}>المتصل</th>
                   <th style={{ padding: 6 }}>القسم</th>
                   <th style={{ padding: 6 }}>الموظف</th>
                   <th style={{ padding: 6 }}>الحالة</th>
-                  <th style={{ padding: 6 }}>واتساب</th>
+                  <th style={{ padding: 6 }}>المتابعة</th>
                 </tr>
               </thead>
               <tbody>
                 {calls.map((c) => (
-                  <tr key={c.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)", background: c.missed ? "rgba(239,68,68,0.06)" : undefined }}>
+                  <tr key={c.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)", background: c.missed && !c.handled ? "rgba(239,68,68,0.06)" : undefined }}>
                     <td style={{ padding: 6 }}>{fmtDateTime(c.created_at)}</td>
-                    <td style={{ padding: 6 }}>{c.from_phone || "—"}</td>
+                    <td style={{ padding: 6 }}>
+                      {c.customer_name
+                        ? <span title={c.from_phone || ""}><strong>{c.customer_name}</strong> <span style={{ opacity: 0.6, fontSize: 11 }}>(عميل)</span></span>
+                        : (c.from_phone || "—")}
+                    </td>
                     <td style={{ padding: 6 }}>{c.department_name || (c.selected_digit ? `#${c.selected_digit}` : "—")}</td>
                     <td style={{ padding: 6 }}>{c.agent_name || c.agent_phone || "—"}</td>
-                    <td style={{ padding: 6, color: c.missed ? "#ef4444" : undefined }}>{STATUS_LABEL[c.status] || c.status}</td>
+                    <td style={{ padding: 6, color: c.missed && !c.handled ? "#ef4444" : undefined }}>{STATUS_LABEL[c.status] || c.status}</td>
                     <td style={{ padding: 6 }}>
-                      {c.missed ? `${c.wa_customer_notified ? "عميل✓" : "عميل✗"} ${c.wa_agent_notified ? "موظف✓" : "موظف✗"}` : "—"}
+                      {c.handled
+                        ? <span style={{ color: "#0fbf6c" }}>✓ تمت المعالجة</span>
+                        : c.missed
+                          ? <button className="btn muted" style={{ padding: "2px 10px", fontSize: 12 }} type="button" onClick={() => handleCall(c.id)}>تمت المعالجة</button>
+                          : "—"}
                     </td>
                   </tr>
                 ))}

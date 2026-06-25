@@ -662,6 +662,20 @@ if (!hasColumn("ivr_departments", "rr_counter")) {
   db.exec("ALTER TABLE ivr_departments ADD COLUMN rr_counter INTEGER DEFAULT 0");
 }
 
+// Call lifecycle: recognized customer + agent acknowledgement / handled state.
+for (const col of [
+  ["customer_id", "TEXT"],
+  ["customer_name", "TEXT"],
+  ["handled", "INTEGER DEFAULT 0"],
+  ["handled_at", "TEXT"],
+  ["handled_by", "TEXT"],
+] as const) {
+  if (!hasColumn("call_logs", col[0])) {
+    db.exec(`ALTER TABLE call_logs ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
+
 for (const col of [
   ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],
   ["payment_down_percent", "NUMERIC DEFAULT 70"],

@@ -24,6 +24,7 @@ import {
   handleDigit,
   listCalls,
   listDepartments,
+  markCallHandled,
   recordCall,
   runMissedCallFlow,
   updateCallBySid,
@@ -240,6 +241,13 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
       res.json({ calls: listCalls({ ownerUid: owner(), limit, missedOnly }) });
     },
   );
+
+  // Mark a (missed) call as handled/followed-up.
+  app.post("/api/telephony/calls/:id/handle", requireAdmin, (req, res) => {
+    const ok = markCallHandled(owner(), req.params.id, (req as AuthedRequest).user?.uid || "admin");
+    if (!ok) throw httpError(404, "المكالمة غير موجودة.");
+    res.json({ success: true });
+  });
 
   // Simulate a missed call end-to-end (records a call, marks it missed, fires
   // the WhatsApp flow) so the operator can verify routing without a real call.

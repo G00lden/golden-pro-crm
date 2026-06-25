@@ -322,6 +322,17 @@ function safeJson(raw: unknown) {
   }
 }
 
+/** Look up a registered customer by phone (last-9-digit match). */
+export function findCustomerByPhone(ownerUid: string, phone: string): { id: string; name: string } | null {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return null;
+  const tail = digits.slice(-9);
+  const row = db
+    .prepare("SELECT id, name FROM customers WHERE owner_uid = ? AND phone LIKE ? ORDER BY created_at DESC LIMIT 1")
+    .get(ownerUid, `%${tail}`) as { id: string; name: string } | undefined;
+  return row ? { id: row.id, name: row.name || "" } : null;
+}
+
 export function recordCall(input: {
   ownerUid: string;
   provider: string;
@@ -331,9 +342,10 @@ export function recordCall(input: {
   status?: string;
 }): CallLog {
   const id = newId("call");
+  const customer = findCustomerByPhone(input.ownerUid, input.from);
   db.prepare(
-    `INSERT INTO call_logs (id, owner_uid, provider, call_sid, from_phone, to_phone, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO call_logs (id, owner_uid, provider, call_sid, from_phone, to_phone, status, customer_id, customer_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.ownerUid,
@@ -342,10 +354,46 @@ export function recordCall(input: {
     input.from || null,
     input.to || null,
     input.status || "menu",
+    customer?.id || null,
+    customer?.name || null,
     nowIso(),
     nowIso(),
   );
   return { id };
+}
+
+const AGENT_ACK_KEYWORDS = ["تم", "تمت", "استلمت", "تواصلت", "تم التواصل", "تمت المعالجة", "done", "ok"];
+
+/** Returns true if the text is an agent acknowledgement ("تم", "استلمت"…). */
+export function isAgentAck(text: string | undefined | null): boolean {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return false;
+  return AGENT_ACK_KEYWORDS.some((k) => t === k.toLowerCase() || t.startsWith(k.toLowerCase() + " "));
+}
+
+/** Most recent unhandled call assigned to this agent phone (last 9 digits). */
+export function findUnhandledCallForAgent(ownerUid: string, agentPhone: string): Record<string, unknown> | null {
+  const digits = String(agentPhone || "").replace(/\D/g, "");
+  if (!digits) return null;
+  const tail = digits.slice(-9);
+  const row = db
+    .prepare(
+      `SELECT * FROM call_logs
+       WHERE owner_uid = ? AND agent_phone LIKE ? AND IFNULL(handled,0) = 0
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(ownerUid, `%${tail}`) as Record<string, unknown> | undefined;
+  return row || null;
+}
+
+/** Mark a call as handled (resolved follow-up). `by` is 'agent' or a user id. */
+export function markCallHandled(ownerUid: string, callId: string, by: string): boolean {
+  const res = db
+    .prepare(
+      "UPDATE call_logs SET handled = 1, handled_at = ?, handled_by = ?, status = 'handled', updated_at = ? WHERE owner_uid = ? AND id = ?",
+    )
+    .run(nowIso(), by, nowIso(), ownerUid, callId);
+  return res.changes > 0;
 }
 
 export function getCallBySid(callSid: string): Record<string, unknown> | null {
