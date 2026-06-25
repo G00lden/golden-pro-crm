@@ -105,24 +105,12 @@ for (const col of [
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_imported ON store_orders(imported_at)");
 
 // bookings + technician_notifications were created with a minimal column set.
-// bookingLifecycle / bookingNotifications write to richer columns; add the
-// missing ones so completing or notifying a booking does not throw SQLITE_ERROR.
+// bookingLifecycle / bookingNotifications write to richer columns; the missing
+// ones are added AFTER the main schema block below (so the tables exist first —
+// running these ALTERs here would fail "no such table" on a fresh database).
 function hasColumn(table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   return rows.some((row) => row.name === column);
-}
-
-for (const col of [
-  ["completed_at", "TEXT"],
-  ["store_order_id", "TEXT"],
-  ["store_order_number", "TEXT"],
-  ["confirmed_by_technician", "INTEGER DEFAULT 0"],
-  ["technician_confirmed_at", "TEXT"],
-  ["technician_reminded_at", "TEXT"],
-] as const) {
-  if (!hasColumn("bookings", col[0])) {
-    db.exec(`ALTER TABLE bookings ADD COLUMN ${col[0]} ${col[1]}`);
-  }
 }
 
 // Admin escalation queue — populated by reminderEngine when a customer goes
@@ -151,25 +139,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_escalations_installation ON escalations(installation_id);
   CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status);
 `);
-
-for (const col of [
-  ["owner_uid", "TEXT"],
-  ["technician_name", "TEXT"],
-  ["customer_id", "TEXT"],
-  ["customer_name", "TEXT"],
-  ["customer_phone", "TEXT"],
-  ["product_id", "TEXT"],
-  ["product_name", "TEXT"],
-  ["message", "TEXT"],
-  ["trigger", "TEXT"],
-  ["whatsapp_jid", "TEXT"],
-  ["whatsapp_message_id", "TEXT"],
-  ["whatsapp_provider", "TEXT"],
-] as const) {
-  if (!hasColumn("technician_notifications", col[0])) {
-    db.exec(`ALTER TABLE technician_notifications ADD COLUMN ${col[0]} ${col[1]}`);
-  }
-}
 
 db.exec(`
 
@@ -636,6 +605,41 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
 `);
 
+// Post-schema column migrations. These run AFTER the main schema block above,
+// so every referenced table is guaranteed to exist (fixes "no such table" on a
+// fresh database).
+for (const col of [
+  ["completed_at", "TEXT"],
+  ["store_order_id", "TEXT"],
+  ["store_order_number", "TEXT"],
+  ["confirmed_by_technician", "INTEGER DEFAULT 0"],
+  ["technician_confirmed_at", "TEXT"],
+  ["technician_reminded_at", "TEXT"],
+] as const) {
+  if (!hasColumn("bookings", col[0])) {
+    db.exec(`ALTER TABLE bookings ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+for (const col of [
+  ["owner_uid", "TEXT"],
+  ["technician_name", "TEXT"],
+  ["customer_id", "TEXT"],
+  ["customer_name", "TEXT"],
+  ["customer_phone", "TEXT"],
+  ["product_id", "TEXT"],
+  ["product_name", "TEXT"],
+  ["message", "TEXT"],
+  ["trigger", "TEXT"],
+  ["whatsapp_jid", "TEXT"],
+  ["whatsapp_message_id", "TEXT"],
+  ["whatsapp_provider", "TEXT"],
+] as const) {
+  if (!hasColumn("technician_notifications", col[0])) {
+    db.exec(`ALTER TABLE technician_notifications ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
 for (const col of [
   ["store_provider", "TEXT"],
   ["store_product_id", "TEXT"],
@@ -652,6 +656,11 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_products_store_product ON products(owner_uid, store_provider, store_product_id)");
+
+// Round-robin pointer for distributing calls across a department's agents.
+if (!hasColumn("ivr_departments", "rr_counter")) {
+  db.exec("ALTER TABLE ivr_departments ADD COLUMN rr_counter INTEGER DEFAULT 0");
+}
 
 for (const col of [
   ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],
