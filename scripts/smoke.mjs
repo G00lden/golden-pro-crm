@@ -522,6 +522,9 @@ try {
       "rr_counter",
       "recentlyNotifiedCustomer",
       "runMissedCallFlow",
+      "findCustomerByPhone",
+      "isAgentAck",
+      "markCallHandled",
     ], "ivr engine routing helpers");
     assertIncludes(routesGw, [
       "/api/gateway/event",

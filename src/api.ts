@@ -3258,8 +3258,11 @@ export type CallLogRow = {
   selected_digit: string | null;
   agent_name: string | null;
   agent_phone: string | null;
+  customer_name: string | null;
   status: string;
   missed: number;
+  handled: number;
+  handled_at: string | null;
   wa_customer_notified: number;
   wa_agent_notified: number;
   created_at: string;
@@ -3300,6 +3303,9 @@ export const getCallLogs = (opts: { limit?: number; missed?: boolean } = {}) => 
     `/api/telephony/calls${params.toString() ? `?${params}` : ""}`,
   ).then((r) => r.calls);
 };
+
+export const markCallHandled = (id: string) =>
+  apiFetch<{ success: boolean }>(`/api/telephony/calls/${id}/handle`, { method: "POST" });
 
 export const testMissedCall = (data: { from_phone: string; digit?: string; department_id?: string }) =>
   apiFetch<{ success: boolean; callSid: string; department: string; result: unknown }>(

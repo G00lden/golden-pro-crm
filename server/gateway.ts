@@ -14,8 +14,11 @@
 import crypto from "crypto";
 import db from "./db";
 import {
+  findUnhandledCallForAgent,
   getDepartmentByDigit,
+  isAgentAck,
   listDepartments,
+  markCallHandled,
   pickAgentRoundRobin,
   recentlyNotifiedCustomer,
   recordCall,
@@ -233,8 +236,18 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
     return { handled: true, kind: "missed_call", callSid, mode: routingMode(), dispatched };
   }
 
-  // ── Inbound SMS (department selection) ──
+  // ── Inbound SMS / WhatsApp text ──
   if (["sms_in", "inbound_sms", "sms", "message_in"].includes(type)) {
+    // Agent acknowledgement ("تم"/"استلمت") → mark their assigned call handled.
+    if (isAgentAck(event.text)) {
+      const agentCall = findUnhandledCallForAgent(ownerUid, from);
+      if (agentCall?.id) {
+        markCallHandled(ownerUid, String(agentCall.id), "agent");
+        logEvent("info", "gateway.agent_ack", { from, callId: agentCall.id });
+        return { handled: true, kind: "agent_ack", callSid: agentCall.call_sid };
+      }
+    }
+
     const digit = leadingDigit(event.text);
     if (!digit) return { handled: false, reason: "no_digit", from };
 
