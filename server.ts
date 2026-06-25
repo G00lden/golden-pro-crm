@@ -30,6 +30,10 @@ import {
   registerTelephonyRoutes,
   registerTelephonyWebhookRoutes,
 } from "./server/routes-telephony";
+import {
+  registerGatewayRoutes,
+  registerGatewayWebhookRoutes,
+} from "./server/routes-gateway";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
@@ -223,6 +227,10 @@ async function startServer() {
   // resolved the same way as WhatsApp (single-tenant admin owner).
   registerTelephonyWebhookRoutes(app, { webhookRateLimit, telephonyOwnerUid: __whatsappOwnerUid });
 
+  // Self-hosted phone gateway (Android automation app, token-auth). Registered
+  // BEFORE the /api Firebase guard so the phone can post without a Firebase user.
+  registerGatewayWebhookRoutes(app, { webhookRateLimit, gatewayOwnerUid: __whatsappOwnerUid });
+
   // Salla OAuth callback + webhook (unauthenticated — these trigger token
   // exchanges or receive store-push events before any user is logged in).
   function asyncRoute(
@@ -271,6 +279,7 @@ async function startServer() {
   registerCrmApiRoutes(app);
   registerWhatsAppRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
   registerTelephonyRoutes(app, { webhookRateLimit, telephonyOwnerUid: __whatsappOwnerUid });
+  registerGatewayRoutes(app, { webhookRateLimit, gatewayOwnerUid: __whatsappOwnerUid });
   registerOdooCrmRoutes(app);
 
   registerSallaRoutes(app);

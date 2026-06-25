@@ -3307,3 +3307,24 @@ export const testMissedCall = (data: { from_phone: string; digit?: string; depar
     { method: "POST", body: JSON.stringify(data) },
   );
 
+/* ── Self-hosted phone gateway ─────────────────────────────────────────────── */
+
+export type GatewayOutboxRow = {
+  id: string;
+  to_phone: string;
+  body: string;
+  role: string;
+  status: string;
+  created_at: string;
+  sent_at: string | null;
+};
+
+export type GatewayStatus = {
+  configured: boolean;
+  routing_mode: "menu" | "direct";
+  pending: number;
+  recent: GatewayOutboxRow[];
+};
+
+export const getGatewayStatus = () => apiFetch<GatewayStatus>("/api/gateway/status");
+

@@ -151,3 +151,22 @@ export const telephonyCallsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   missed: z.enum(['true', 'false']).optional(),
 }).passthrough();
+
+// Self-hosted phone gateway schemas
+
+export const gatewayEventSchema = z.object({
+  type: z.string().min(1, 'type is required').max(40),
+  from: z.string().max(32).optional(),
+  to: z.string().max(32).optional(),
+  text: z.string().max(2000).optional(),
+  ts: z.string().max(40).optional(),
+}).passthrough();
+
+export const gatewayOutboxQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+}).passthrough();
+
+export const gatewayAckSchema = z.object({
+  ids: z.array(z.string().max(64)).max(100).optional(),
+  failed: z.array(z.string().max(64)).max(100).optional(),
+});

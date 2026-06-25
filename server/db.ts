@@ -615,6 +615,25 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_call_logs_owner ON call_logs(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_call_logs_sid ON call_logs(call_sid);
   CREATE INDEX IF NOT EXISTS idx_call_logs_missed ON call_logs(owner_uid, missed, created_at DESC);
+
+  -- Self-hosted phone gateway outbox. When a reply must go out as SMS (because
+  -- WhatsApp isn't connected), it is queued here; the user's Android automation
+  -- app (MacroDroid/Tasker) polls GET /api/gateway/outbox, sends each SMS from
+  -- the company SIM, then acks them. No external provider involved.
+  CREATE TABLE IF NOT EXISTS gateway_outbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    to_phone TEXT NOT NULL,
+    body TEXT NOT NULL,
+    role TEXT DEFAULT 'customer',
+    channel TEXT DEFAULT 'sms',
+    status TEXT DEFAULT 'pending',
+    call_id TEXT,
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    sent_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
 `);
 
 for (const col of [

@@ -5,6 +5,7 @@ import {
   Plus,
   RefreshCcw,
   Save,
+  Smartphone,
   Trash2,
   Users as UsersIcon,
 } from "lucide-react";
@@ -56,6 +57,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   const [config, setConfig] = useState<api.TelephonyConfig | null>(null);
   const [departments, setDepartments] = useState<api.TelephonyDepartment[]>([]);
   const [calls, setCalls] = useState<api.CallLogRow[]>([]);
+  const [gateway, setGateway] = useState<api.GatewayStatus | null>(null);
   const [draft, setDraft] = useState<DraftDept>(emptyDraft());
   const [savingDept, setSavingDept] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -66,14 +68,16 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, depts, log] = await Promise.all([
+      const [cfg, depts, log, gw] = await Promise.all([
         api.getTelephonyConfig(),
         api.getTelephonyDepartments(),
         api.getCallLogs({ limit: 100 }),
+        api.getGatewayStatus().catch(() => null),
       ]);
       setConfig(cfg);
       setDepartments(depts);
       setCalls(log);
+      setGateway(gw);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر تحميل نظام المكالمات", false);
     } finally {
@@ -202,6 +206,54 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         </div>
         <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} /> تحديث</button>
       </header>
+
+      {/* Self-hosted gateway (no external provider, no WhatsApp QR) */}
+      <div className="card" style={{ padding: 16, display: "grid", gap: 10, border: "1px solid rgba(96,165,250,0.35)" }}>
+        <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <Smartphone size={18} /> البوابة الذاتية (جوالك) — بدون مزوّد خارجي
+          <span style={{ fontSize: 12, padding: "2px 10px", borderRadius: 8,
+            background: gateway?.configured ? "rgba(15,191,108,0.15)" : "rgba(245,158,11,0.15)",
+            color: gateway?.configured ? "#0fbf6c" : "#f59e0b" }}>
+            {gateway?.configured ? "مُفعّلة (التوكن مضبوط)" : "تحتاج ضبط GATEWAY_TOKEN"}
+          </span>
+        </h3>
+        <p style={{ margin: 0, opacity: 0.8, fontSize: 13, lineHeight: 1.8 }}>
+          ضع شريحة الشركة في جوال أندرويد وشغّل تطبيق أتمتة مجاني (MacroDroid/Tasker) ليرسل أحداث المكالمات لخادمك ويرسل ردود SMS من شريحتك.
+          نمط التوجيه الحالي: <strong>{gateway?.routing_mode === "direct" ? "تحويل مباشر" : "قائمة عبر SMS (يرد العميل برقم)"}</strong> — يُضبط عبر <code>GATEWAY_ROUTING_MODE</code>.
+        </p>
+        <div style={{ display: "grid", gap: 4, fontSize: 12 }}>
+          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/event  (ترويسة x-gateway-token)</code>
+          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>GET  {baseUrl}/api/gateway/outbox   ← الرسائل المنتظرة للإرسال</code>
+          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/outbox/ack  ← تأكيد الإرسال</code>
+        </div>
+        <p style={{ margin: 0, opacity: 0.7, fontSize: 12 }}>
+          الدليل الكامل لإعداد الجوال في <code>docs/gateway-setup.md</code>. الرسائل المنتظرة الآن: <strong>{gateway?.pending ?? 0}</strong>.
+          {!gateway?.configured && " تظهر الردود محلياً حتى تضبط التوكن."}
+        </p>
+        {gateway && gateway.recent.length > 0 && (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead><tr style={{ textAlign: "right", opacity: 0.7 }}>
+                <th style={{ padding: 5 }}>الوقت</th><th style={{ padding: 5 }}>إلى</th>
+                <th style={{ padding: 5 }}>النوع</th><th style={{ padding: 5 }}>الحالة</th><th style={{ padding: 5 }}>النص</th>
+              </tr></thead>
+              <tbody>
+                {gateway.recent.slice(0, 12).map((m) => (
+                  <tr key={m.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                    <td style={{ padding: 5, whiteSpace: "nowrap" }}>{fmtDateTime(m.created_at)}</td>
+                    <td style={{ padding: 5 }}>{m.to_phone}</td>
+                    <td style={{ padding: 5 }}>{m.role === "agent" ? "موظف" : "عميل"}</td>
+                    <td style={{ padding: 5, color: m.status === "sent" ? "#0fbf6c" : m.status === "failed" ? "#ef4444" : "#f59e0b" }}>
+                      {m.status === "sent" ? "أُرسلت" : m.status === "failed" ? "فشلت" : "بالانتظار"}
+                    </td>
+                    <td style={{ padding: 5, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.body}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {/* Config */}
       {config && (
