@@ -41,9 +41,30 @@ export class WhatsAppService {
   private readonly sessionDir: string;
   private readonly provider: "web" | "cloud_api";
 
+  // Auto-reply hooks (registered by server/whatsappAutoReply.ts). Kept as
+  // callbacks so whatsapp.ts has no dependency on the routing engine.
+  private incomingCallHandler?: (fromPhone: string) => void | Promise<void>;
+  private inboundMessageHandler?: (fromPhone: string, text: string) => void | Promise<void>;
+  private handledCalls = new Set<string>();
+  private answeredCalls = new Set<string>();
+
   constructor(sessionDir = process.env.WA_SESSION_DIR || ".wa-session") {
     this.sessionDir = path.resolve(process.cwd(), sessionDir);
     this.provider = process.env.WHATSAPP_PROVIDER === "cloud_api" ? "cloud_api" : "web";
+  }
+
+  /** Register a handler fired when an incoming WhatsApp call is NOT answered. */
+  onIncomingCall(handler: (fromPhone: string) => void | Promise<void>) {
+    this.incomingCallHandler = handler;
+  }
+
+  /** Register a handler fired for each inbound WhatsApp text message. */
+  onInboundMessage(handler: (fromPhone: string, text: string) => void | Promise<void>) {
+    this.inboundMessageHandler = handler;
+  }
+
+  private jidToPhone(jid: string | undefined): string {
+    return String(jid || "").split("@")[0].split(":")[0];
   }
 
   getStatus(): WhatsAppStatus {
@@ -210,6 +231,7 @@ export class WhatsAppService {
         const statusCode = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
         const shouldReconnect =
           !this.manualDisconnect && statusCode !== DisconnectReason.loggedOut;
+        // (call/message handlers are bound once below; nothing to clean here)
 
         this.sock = undefined;
         this.qrDataUrl = "";
@@ -222,6 +244,70 @@ export class WhatsAppService {
         if (shouldReconnect) {
           await sleep(2_000);
           await this.startSocket();
+        }
+      }
+    });
+
+    // Incoming WhatsApp calls → fire the missed-call auto-reply when the call
+    // is not answered (timeout/reject). Optionally auto-reject the call first.
+    sock.ev.on("call", async (calls: any[]) => {
+      for (const call of calls || []) {
+        const id = String(call?.id || "");
+        const fromPhone = this.jidToPhone(call?.from || call?.chatId);
+        if (!id || !fromPhone) continue;
+        const status = String(call?.status || "");
+
+        if (status === "accept") {
+          this.answeredCalls.add(id);
+          continue;
+        }
+
+        const autoReject = process.env.WHATSAPP_AUTO_REJECT_CALLS === "true";
+        if (status === "offer" && autoReject) {
+          try {
+            await this.sock?.rejectCall?.(call.id, call.from);
+          } catch {
+            // older Baileys may lack rejectCall; the timeout path still fires.
+          }
+        }
+
+        // Treat a non-answered terminal status (or a rejected offer) as missed.
+        const isMissed = status === "timeout" || status === "reject" || (status === "offer" && autoReject);
+        if (isMissed && !this.answeredCalls.has(id) && !this.handledCalls.has(id)) {
+          this.handledCalls.add(id);
+          // bound memory: keep the set from growing unbounded
+          if (this.handledCalls.size > 500) this.handledCalls.clear();
+          try {
+            await this.incomingCallHandler?.(fromPhone);
+          } catch (err) {
+            // best-effort; never break the socket
+            void err;
+          }
+        }
+      }
+    });
+
+    // Inbound text messages → routing (e.g. caller replies with a department
+    // digit). Skips our own messages, groups, and status broadcasts.
+    sock.ev.on("messages.upsert", async (payload: any) => {
+      if (!this.inboundMessageHandler) return;
+      const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+      for (const m of messages) {
+        try {
+          if (!m?.message || m.key?.fromMe) continue;
+          const jid = String(m.key?.remoteJid || "");
+          if (!jid.endsWith("@s.whatsapp.net")) continue; // ignore groups/status
+          const text =
+            m.message?.conversation ||
+            m.message?.extendedTextMessage?.text ||
+            m.message?.buttonsResponseMessage?.selectedButtonId ||
+            m.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+            "";
+          const fromPhone = this.jidToPhone(jid);
+          if (!fromPhone || !text) continue;
+          await this.inboundMessageHandler(fromPhone, String(text));
+        } catch (err) {
+          void err;
         }
       }
     });

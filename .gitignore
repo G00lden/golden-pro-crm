@@ -23,6 +23,7 @@ firebase-service-account*.json
 *-test.json
 *-results.json
 qa-report.json
+pixel-audit-report.json
 reminder-flow-results.json
 salla-*.json
 !salla-*.example.json

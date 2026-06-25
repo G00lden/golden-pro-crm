@@ -113,3 +113,41 @@ Open PRs:    0
 - `5.12-5.15` باقي pixels (TikTok, Snap, Google Ads, Clarity)
 - `4.1` Payment gateway (Tap or Moyasar)
 - `4.3` Terms of Service + Privacy Policy pages
+
+---
+
+## آخر تحديث: 2026-06-25 — نظام المكالمات والتحويل (IVR + واتساب) [Claude Code]
+
+### ماذا أُضيف
+نظام رد على المكالمات الهاتفية العادية وتوجيهها عبر **Unifonic**:
+- رقم أساسي يُنشر في الإعلانات → قائمة صوتية (IVR) → تحويل لجوال الموظف المختص.
+- عند عدم الرد (no_answer/busy/failed/voicemail) → واتساب للعميل (`missed_call_customer`) وللموظف (`missed_call_agent`).
+
+### الملفات الجديدة
+- `server/telephony/types.ts`، `server/telephony/unifonicAdapter.ts` — طبقة مزوّد معزولة.
+- `server/ivrEngine.ts` — منطق القرار + DB + تدفق المكالمة الفائتة.
+- `server/routes-telephony.ts` — webhooks عامة + admin CRUD + `test-missed`.
+- `src/pages/CallSystem.tsx` — لوحة «نظام المكالمات».
+- `docs/telephony-architecture.md` — المعمارية الكاملة.
+
+### الملفات المعدّلة
+- `server/db.ts` (+4 جداول: telephony_config, ivr_departments, ivr_department_agents, call_logs)،
+  `server/whatsappTemplates.ts` (+قالبان)، `server/validation.ts` (+مخططات)، `server.ts` (تسجيل المسارات)،
+  `.env.example` (+مفاتيح TELEPHONY_*/UNIFONIC_*)، `src/api.ts` + `src/App.tsx` + `src/shared.tsx` (الواجهة).
+
+### الحالة
+- `npm run lint` ✓ ، `npm run build` ✓.
+- تم اختبار التدفق محلياً end-to-end (قائمة → تحويل برقم مُطبّع 9665.. → مكالمة فائتة → واتساب للطرفين).
+
+### إضافة: البوابة الذاتية (بدون مزوّد خارجي ولا QR واتساب)
+- شريحة الشركة في جوال أندرويد + تطبيق أتمتة مجاني (MacroDroid/Tasker) يرسل أحداث المكالمات/الـ SMS للخادم ويرسل ردود SMS من الشريحة.
+- ملفات: `server/gateway.ts`، `server/routes-gateway.ts`، `server/smsTemplates.ts`، جدول `gateway_outbox` في `db.ts`، قسم في `src/pages/CallSystem.tsx`، دليل `docs/gateway-setup.md`.
+- قناة الرد ذكية: `dispatchMessage()` يفضّل واتساب إن اتصل، وإلا يضع SMS في طابور `gateway_outbox` ليرسلها الجوال.
+- نمطان عبر `GATEWAY_ROUTING_MODE`: `menu` (قائمة عبر SMS يرد العميل برقم) أو `direct`.
+- نقاط: `POST /api/gateway/event`، `GET /api/gateway/outbox`، `POST /api/gateway/outbox/ack` (توكن `GATEWAY_TOKEN`)، و`GET /api/gateway/status` (admin).
+- مُختبَر end-to-end: مكالمة فائتة → SMS قائمة في الطابور → رد العميل "1" → تحويل للمبيعات + إشعار الموظف → ack يفرّغ الطابور. lint/build/smoke ✓.
+
+### يحتاج انتباه الوكيل التالي / المالك
+- **عقد Unifonic مؤكَّد** من التوثيق العام: الوارد `{callerId, recipient, digits}`، والاستجابة مصفوفة كائنات `say/responseUrl/digitsLimit` و`transfer:"+9665.."`. الربط بالمكالمة عبر `callerId` (لا يوجد callSid ثابت). حقول حمولة **الحالة** فقط تبقى account-specific و`parseStatus` دفاعي.
+- ضبط `TELEPHONY_WEBHOOK_SECRET` و`PUBLIC_BASE_URL` و`UNIFONIC_*` في `.env`، وربط IVR Endpoint + Status Callback في لوحة Unifonic.
+- `TELEPHONY_WEBHOOK_SECRET` إلزامي في الإنتاج (الـ webhook يُرفض 503 بدونه).

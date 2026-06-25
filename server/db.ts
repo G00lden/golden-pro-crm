@@ -533,6 +533,107 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_audit_logs_owner ON audit_logs(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(owner_uid, entity_type, entity_id, created_at DESC);
+
+  -- ===========================================================================
+  -- Telephony / IVR call-routing (Unifonic). A published "main number" plays an
+  -- IVR menu; the caller's DTMF digit selects a department; the call is forwarded
+  -- to that department's agent. On no-answer the missed-call flow fires WhatsApp
+  -- to both the customer and the agent. See server/ivrEngine.ts.
+  -- ===========================================================================
+
+  -- Per-owner telephony settings (the advertised number, greeting, ring timeout).
+  CREATE TABLE IF NOT EXISTS telephony_config (
+    owner_uid TEXT PRIMARY KEY,
+    provider TEXT DEFAULT 'unifonic',
+    main_number TEXT DEFAULT '',
+    greeting TEXT DEFAULT '',
+    menu_prompt TEXT DEFAULT '',
+    ring_timeout_sec INTEGER DEFAULT 20,
+    enabled INTEGER DEFAULT 1,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  -- IVR menu departments: one row per DTMF digit (e.g. 1 = المبيعات).
+  CREATE TABLE IF NOT EXISTS ivr_departments (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    digit TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    ring_timeout_sec INTEGER DEFAULT 20,
+    active INTEGER DEFAULT 1,
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_ivr_dept_owner_digit ON ivr_departments(owner_uid, digit);
+  CREATE INDEX IF NOT EXISTS idx_ivr_dept_owner ON ivr_departments(owner_uid, sort_order);
+
+  -- Agents (employees) reachable for a department. Multiple agents per department
+  -- are tried in sort_order — the first active agent receives the forward today;
+  -- the ordering is also the basis for sequential/round-robin routing later.
+  CREATE TABLE IF NOT EXISTS ivr_department_agents (
+    id TEXT PRIMARY KEY,
+    department_id TEXT NOT NULL,
+    owner_uid TEXT NOT NULL,
+    user_id TEXT,
+    name TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_ivr_agents_dept ON ivr_department_agents(department_id, sort_order);
+  CREATE INDEX IF NOT EXISTS idx_ivr_agents_owner ON ivr_department_agents(owner_uid);
+
+  -- One row per inbound call. Tracks the IVR selection, the forward target, the
+  -- final status, and whether the missed-call WhatsApp messages were sent.
+  CREATE TABLE IF NOT EXISTS call_logs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    provider TEXT DEFAULT 'unifonic',
+    call_sid TEXT,
+    from_phone TEXT,
+    to_phone TEXT,
+    department_id TEXT,
+    department_name TEXT,
+    selected_digit TEXT,
+    agent_user_id TEXT,
+    agent_phone TEXT,
+    agent_name TEXT,
+    status TEXT DEFAULT 'ringing',
+    missed INTEGER DEFAULT 0,
+    wa_customer_notified INTEGER DEFAULT 0,
+    wa_agent_notified INTEGER DEFAULT 0,
+    forwarded_at TEXT,
+    ended_at TEXT,
+    duration_sec INTEGER DEFAULT 0,
+    metadata TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_logs_owner ON call_logs(owner_uid, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_call_logs_sid ON call_logs(call_sid);
+  CREATE INDEX IF NOT EXISTS idx_call_logs_missed ON call_logs(owner_uid, missed, created_at DESC);
+
+  -- Self-hosted phone gateway outbox. When a reply must go out as SMS (because
+  -- WhatsApp isn't connected), it is queued here; the user's Android automation
+  -- app (MacroDroid/Tasker) polls GET /api/gateway/outbox, sends each SMS from
+  -- the company SIM, then acks them. No external provider involved.
+  CREATE TABLE IF NOT EXISTS gateway_outbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    to_phone TEXT NOT NULL,
+    body TEXT NOT NULL,
+    role TEXT DEFAULT 'customer',
+    channel TEXT DEFAULT 'sms',
+    status TEXT DEFAULT 'pending',
+    call_id TEXT,
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    sent_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
 `);
 
 for (const col of [

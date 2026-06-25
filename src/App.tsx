@@ -9,6 +9,7 @@ import {
   Menu,
   MessageCircle,
   Package,
+  PhoneCall,
   Plus,
   Receipt,
   RefreshCcw,
@@ -54,6 +55,7 @@ import CustomerCarePage from "./pages/CustomerCare";
 import OdooCrmPage from "./pages/OdooCrm";
 import TechniciansPage from "./pages/Technicians";
 import SettingsPage from "./pages/Settings";
+import CallSystemPage from "./pages/CallSystem";
 import {
   AccessDenied,
   Button,
@@ -343,7 +345,10 @@ export default function App() {
     { id: "technicians" as Page, label: "الفنيون", icon: UserRoundCog },
     { id: "messages" as Page, label: "واتساب والسجل", icon: MessageCircle },
     ...(isManagerOrAdmin
-      ? [{ id: "adminUsers" as Page, label: "إدارة المستخدمين", icon: UserRoundCog }]
+      ? [
+          { id: "callSystem" as Page, label: "نظام المكالمات", icon: PhoneCall },
+          { id: "adminUsers" as Page, label: "إدارة المستخدمين", icon: UserRoundCog },
+        ]
       : []),
     { id: "settings" as Page, label: "الإعدادات", icon: Settings },
   ];
@@ -369,6 +374,7 @@ export default function App() {
     care: <CustomerCarePage notify={notify} refreshStats={stats.refresh} />,
     technicians: <TechniciansPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     messages: <WhatsAppConsole notify={notify} />,
+    callSystem: isManagerOrAdmin ? <CallSystemPage notify={notify} /> : <AccessDenied />,
     settings: <SettingsPage notify={notify} />,
     adminUsers: isManagerOrAdmin
       ? <AdminUsersPage notify={notify} currentUid={currentUid} />
