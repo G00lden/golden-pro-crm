@@ -34,6 +34,7 @@ import {
   registerGatewayRoutes,
   registerGatewayWebhookRoutes,
 } from "./server/routes-gateway";
+import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
@@ -230,6 +231,9 @@ async function startServer() {
   // Self-hosted phone gateway (Android automation app, token-auth). Registered
   // BEFORE the /api Firebase guard so the phone can post without a Firebase user.
   registerGatewayWebhookRoutes(app, { webhookRateLimit, gatewayOwnerUid: __whatsappOwnerUid });
+
+  // Auto-reply on unanswered WhatsApp calls + route inbound WhatsApp replies.
+  initWhatsAppAutoReply(__whatsappOwnerUid);
 
   // Salla OAuth callback + webhook (unauthenticated — these trigger token
   // exchanges or receive store-push events before any user is logged in).
