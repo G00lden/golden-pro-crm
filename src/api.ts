@@ -3208,3 +3208,102 @@ export const importText = async (text: string) => {
 
   return { imported, skipped, errors: 0 };
 };
+
+/* ── Telephony / IVR call routing ─────────────────────────────────────────── */
+
+export type TelephonyAgentInput = {
+  user_id?: string | null;
+  name?: string;
+  phone: string;
+  sort_order?: number;
+  active?: boolean;
+};
+
+export type TelephonyAgent = TelephonyAgentInput & { id: string; phone: string };
+
+export type TelephonyDepartment = {
+  id: string;
+  digit: string;
+  name: string;
+  ring_timeout_sec: number;
+  active: boolean;
+  sort_order: number;
+  agents: TelephonyAgent[];
+};
+
+export type TelephonyDepartmentInput = {
+  digit: string;
+  name: string;
+  ring_timeout_sec?: number;
+  active?: boolean;
+  sort_order?: number;
+  agents?: TelephonyAgentInput[];
+};
+
+export type TelephonyConfig = {
+  owner_uid: string;
+  provider: string;
+  main_number: string;
+  greeting: string;
+  menu_prompt: string;
+  ring_timeout_sec: number;
+  enabled: boolean;
+};
+
+export type CallLogRow = {
+  id: string;
+  from_phone: string | null;
+  to_phone: string | null;
+  department_name: string | null;
+  selected_digit: string | null;
+  agent_name: string | null;
+  agent_phone: string | null;
+  status: string;
+  missed: number;
+  wa_customer_notified: number;
+  wa_agent_notified: number;
+  created_at: string;
+};
+
+export const getTelephonyConfig = () =>
+  apiFetch<{ config: TelephonyConfig }>("/api/telephony/config").then((r) => r.config);
+
+export const updateTelephonyConfig = (patch: Partial<TelephonyConfig>) =>
+  apiFetch<{ config: TelephonyConfig }>("/api/telephony/config", {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  }).then((r) => r.config);
+
+export const getTelephonyDepartments = () =>
+  apiFetch<{ departments: TelephonyDepartment[] }>("/api/telephony/departments").then((r) => r.departments);
+
+export const createTelephonyDepartment = (data: TelephonyDepartmentInput) =>
+  apiFetch<{ department: TelephonyDepartment }>("/api/telephony/departments", {
+    method: "POST",
+    body: JSON.stringify(data),
+  }).then((r) => r.department);
+
+export const updateTelephonyDepartment = (id: string, data: Partial<TelephonyDepartmentInput>) =>
+  apiFetch<{ department: TelephonyDepartment }>(`/api/telephony/departments/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  }).then((r) => r.department);
+
+export const deleteTelephonyDepartment = (id: string) =>
+  apiFetch(`/api/telephony/departments/${id}`, { method: "DELETE" }).then(() => undefined);
+
+export const getCallLogs = (opts: { limit?: number; missed?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (opts.limit) params.set("limit", String(opts.limit));
+  if (opts.missed) params.set("missed", "true");
+  return apiFetch<{ calls: CallLogRow[] }>(
+    `/api/telephony/calls${params.toString() ? `?${params}` : ""}`,
+  ).then((r) => r.calls);
+};
+
+export const testMissedCall = (data: { from_phone: string; digit?: string; department_id?: string }) =>
+  apiFetch<{ success: boolean; callSid: string; department: string; result: unknown }>(
+    "/api/telephony/test-missed",
+    { method: "POST", body: JSON.stringify(data) },
+  );
+

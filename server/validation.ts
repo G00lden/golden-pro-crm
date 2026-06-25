@@ -104,3 +104,50 @@ export const sallaCallbackQuerySchema = z.object({
 export const publicInvoiceShareQuerySchema = z.object({
   token: z.string().min(32).max(256),
 }).passthrough();
+
+// Telephony / IVR schemas
+
+// Inbound IVR + status webhooks from the telephony provider. Kept permissive
+// (passthrough) because exact provider field names are normalized in the
+// adapter; we only guard against oversized bodies here.
+export const telephonyWebhookSchema = z.object({}).passthrough();
+
+export const telephonyWebhookQuerySchema = z.object({}).passthrough();
+
+const ivrAgentSchema = z.object({
+  user_id: z.string().max(160).optional().nullable(),
+  name: z.string().max(160).optional().default(''),
+  phone: z.string().min(1, 'agent phone is required').max(32),
+  sort_order: z.coerce.number().int().min(0).max(9999).optional(),
+  active: z.boolean().optional(),
+});
+
+export const telephonyDepartmentSchema = z.object({
+  digit: z.string().regex(/^[0-9]$/, 'digit must be a single 0-9 character'),
+  name: z.string().min(1, 'name is required').max(120),
+  ring_timeout_sec: z.coerce.number().int().min(5).max(120).optional(),
+  active: z.boolean().optional(),
+  sort_order: z.coerce.number().int().min(0).max(9999).optional(),
+  agents: z.array(ivrAgentSchema).max(20).optional(),
+});
+
+export const telephonyDepartmentUpdateSchema = telephonyDepartmentSchema.partial();
+
+export const telephonyConfigSchema = z.object({
+  main_number: z.string().max(32).optional(),
+  greeting: z.string().max(2000).optional(),
+  menu_prompt: z.string().max(2000).optional(),
+  ring_timeout_sec: z.coerce.number().int().min(5).max(120).optional(),
+  enabled: z.boolean().optional(),
+});
+
+export const telephonyTestMissedSchema = z.object({
+  from_phone: z.string().min(1, 'from_phone is required').max(32),
+  digit: z.string().regex(/^[0-9]$/, 'digit must be a single 0-9 character').optional(),
+  department_id: z.string().max(160).optional(),
+});
+
+export const telephonyCallsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  missed: z.enum(['true', 'false']).optional(),
+}).passthrough();

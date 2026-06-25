@@ -113,3 +113,33 @@ Open PRs:    0
 - `5.12-5.15` باقي pixels (TikTok, Snap, Google Ads, Clarity)
 - `4.1` Payment gateway (Tap or Moyasar)
 - `4.3` Terms of Service + Privacy Policy pages
+
+---
+
+## آخر تحديث: 2026-06-25 — نظام المكالمات والتحويل (IVR + واتساب) [Claude Code]
+
+### ماذا أُضيف
+نظام رد على المكالمات الهاتفية العادية وتوجيهها عبر **Unifonic**:
+- رقم أساسي يُنشر في الإعلانات → قائمة صوتية (IVR) → تحويل لجوال الموظف المختص.
+- عند عدم الرد (no_answer/busy/failed/voicemail) → واتساب للعميل (`missed_call_customer`) وللموظف (`missed_call_agent`).
+
+### الملفات الجديدة
+- `server/telephony/types.ts`، `server/telephony/unifonicAdapter.ts` — طبقة مزوّد معزولة.
+- `server/ivrEngine.ts` — منطق القرار + DB + تدفق المكالمة الفائتة.
+- `server/routes-telephony.ts` — webhooks عامة + admin CRUD + `test-missed`.
+- `src/pages/CallSystem.tsx` — لوحة «نظام المكالمات».
+- `docs/telephony-architecture.md` — المعمارية الكاملة.
+
+### الملفات المعدّلة
+- `server/db.ts` (+4 جداول: telephony_config, ivr_departments, ivr_department_agents, call_logs)،
+  `server/whatsappTemplates.ts` (+قالبان)، `server/validation.ts` (+مخططات)، `server.ts` (تسجيل المسارات)،
+  `.env.example` (+مفاتيح TELEPHONY_*/UNIFONIC_*)، `src/api.ts` + `src/App.tsx` + `src/shared.tsx` (الواجهة).
+
+### الحالة
+- `npm run lint` ✓ ، `npm run build` ✓.
+- تم اختبار التدفق محلياً end-to-end (قائمة → تحويل برقم مُطبّع 9665.. → مكالمة فائتة → واتساب للطرفين).
+
+### يحتاج انتباه الوكيل التالي / المالك
+- **أسماء حقول Unifonic**: المحوّل دفاعي ويقبل أكثر الأسماء شيوعاً؛ تأكيد العقد الفعلي من توثيق حساب Unifonic وتعديل `unifonicAdapter.ts` فقط (تعليقات `// CONFIRM`).
+- ضبط `TELEPHONY_WEBHOOK_SECRET` و`PUBLIC_BASE_URL` و`UNIFONIC_*` في `.env`، وربط IVR Endpoint + Status Callback في لوحة Unifonic.
+- `TELEPHONY_WEBHOOK_SECRET` إلزامي في الإنتاج (الـ webhook يُرفض 503 بدونه).

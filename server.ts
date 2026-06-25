@@ -26,6 +26,10 @@ import { registerMaintenanceRoutes } from "./server/routes-maintenance";
 import { registerReminderRoutes } from "./server/routes-reminders";
 import { registerStoreRoutes } from "./server/routes-store";
 import { registerOdooCrmRoutes } from "./server/odooCrm";
+import {
+  registerTelephonyRoutes,
+  registerTelephonyWebhookRoutes,
+} from "./server/routes-telephony";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
@@ -200,6 +204,7 @@ async function startServer() {
       "/api/health",
       "/public/invoices",
       "/webhooks/whatsapp",
+      "/webhooks/telephony",
     ],
     webhookRateLimit,
   );
@@ -213,6 +218,10 @@ async function startServer() {
   const __whatsappOwnerUid = () =>
     adminUids()[0] || process.env.STORE_WEBHOOK_OWNER_UID || process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
   registerWhatsAppWebhookRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
+
+  // Telephony / IVR public webhooks (provider drives the live call). Owner is
+  // resolved the same way as WhatsApp (single-tenant admin owner).
+  registerTelephonyWebhookRoutes(app, { webhookRateLimit, telephonyOwnerUid: __whatsappOwnerUid });
 
   // Salla OAuth callback + webhook (unauthenticated — these trigger token
   // exchanges or receive store-push events before any user is logged in).
@@ -261,6 +270,7 @@ async function startServer() {
   registerUserAdminRoutes(app);
   registerCrmApiRoutes(app);
   registerWhatsAppRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
+  registerTelephonyRoutes(app, { webhookRateLimit, telephonyOwnerUid: __whatsappOwnerUid });
   registerOdooCrmRoutes(app);
 
   registerSallaRoutes(app);
