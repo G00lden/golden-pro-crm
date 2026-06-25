@@ -41,30 +41,76 @@ COMPANY_NAME=اسم شركتك
 ```
 ثم من لوحة **«نظام المكالمات»** أنشئ الأقسام وأرقام الموظفين (الرقم 1 = المبيعات…).
 
-## 2) إعداد MacroDroid على الجوال (3 ماكروات)
+## 2) إعداد MacroDroid على الجوال — مفصّل
 
-> في كل طلب HTTP أضِف الترويسة: `x-gateway-token: <GATEWAY_TOKEN>`
+### 2.0 تجهيز الأذونات (مهم جداً للموثوقية)
+في إعدادات الجوال + MacroDroid فعّل ما يلي وإلا لن يعمل بثبات:
+- امنح MacroDroid إذن **الرسائل (SMS)** و**الهاتف (Phone/Call log)** و**جهات الاتصال**.
+- أوقف **توفير البطارية / تحسين البطارية** لتطبيق MacroDroid (Settings → Apps → MacroDroid → Battery → Unrestricted).
+- فعّل **التشغيل التلقائي (Autostart)** لـ MacroDroid (مهم في Xiaomi/Oppo/Samsung).
+- في MacroDroid: Settings → فعّل **«Macro enabled at boot»** ليعمل بعد إعادة التشغيل.
 
-### ماكرو A — مكالمة فائتة
-- **Trigger:** Call → Missed Call (أو Incoming Call Ended + لم يُرد).
-- **Action:** HTTP Request POST → `https://<server>/api/gateway/event`
-  - Content-Type: `application/json`
-  - Body: `{"type":"missed_call","from":"[call_number]","to":"<رقم الشركة>"}`
-  - (المتغير `[call_number]` من MacroDroid.)
+> القيم الثابتة التي ستكررها:
+> - الخادم: `https://<server>` (ضع عنوانك الحقيقي، يجب أن يكون HTTPS ويصله الجوال).
+> - الترويسة في **كل** طلب HTTP: المفتاح `x-gateway-token` والقيمة `<GATEWAY_TOKEN>`.
+> - رقم الشركة (الذي عليه الشريحة) — سمّه `<COMPANY_NUMBER>`.
 
-### ماكرو B — رسالة SMS واردة (لاختيار القسم)
-- **Trigger:** SMS Received.
-- **Action:** HTTP Request POST → `.../api/gateway/event`
-  - Body: `{"type":"sms_in","from":"[sms_number]","text":"[sms_message]"}`
+---
 
-### ماكرو C — إرسال الردود من الطابور (كل دقيقة)
-- **Trigger:** Regular Interval → كل 1 دقيقة.
-- **Action 1:** HTTP Request GET → `.../api/gateway/outbox` → خزّن الرد في متغير.
-- **Action 2:** لكل عنصر في `messages`: Send SMS إلى `to_phone` بالنص `body`.
-- **Action 3:** HTTP Request POST → `.../api/gateway/outbox/ack` Body: `{"ids":[المعرفات التي أُرسلت]}`.
+### ماكرو A — إبلاغ بالمكالمة الفائتة
+- **Trigger:** أضف Trigger → **Call/SMS → Call Missed** (مكالمة فائتة).
+- **Action:** أضف Action → **Connectivity → HTTP Request**:
+  - **Method:** `POST`
+  - **URL:** `https://<server>/api/gateway/event`
+  - **Headers:** أضف صفّاً: المفتاح `x-gateway-token` والقيمة `<GATEWAY_TOKEN>`.
+  - **Content Type:** `application/json`
+  - **Body** (نوع Custom/Raw):
+    ```json
+    {"type":"missed_call","from":"[call_number]","to":"<COMPANY_NUMBER>"}
+    ```
+  - 🔸 لإدراج رقم المتصل: لا تكتبه يدوياً — اضغط زر النص السحري **{ }** بجانب الحقل
+    واختر من القائمة رقم المكالمة (Call number / Incoming number). سيُدرَج رمز مثل
+    `[call_number]`. هذا يضمن الرمز الصحيح لنسخة تطبيقك.
 
-> بديل أبسط بدون الماكرو C: فعّل قراءة رد `POST /event` مباشرة — الاستجابة تحوي
-> حقل `outbox` بالرسائل المطلوب إرسالها فوراً. لكن نمط الطابور (C) أكثر موثوقية.
+---
+
+### ماكرو B — إبلاغ برسالة SMS واردة (اختيار القسم)
+- **Trigger:** Call/SMS → **SMS Received** (بدون فلتر مرسل، أو فلتر حسب رغبتك).
+- **Action:** HTTP Request:
+  - **Method:** `POST` ، **URL:** `https://<server>/api/gateway/event`
+  - **Header:** `x-gateway-token: <GATEWAY_TOKEN>` ، **Content Type:** `application/json`
+  - **Body:**
+    ```json
+    {"type":"sms_in","from":"[sms_sender]","text":"[sms_message]"}
+    ```
+  - 🔸 أدرِج `[sms_sender]` و`[sms_message]` من زر النص السحري **{ }** (SMS sender / SMS message).
+
+---
+
+### ماكرو C — إرسال الردود من الطابور (الأهم)
+نستخدم نقطة `/api/gateway/next` التي تُرجع **رسالة واحدة مسطّحة** (بدون مصفوفة) ليسهل ربطها.
+
+- **Trigger:** Date/Time → **Regular Interval → كل 1 دقيقة** (أو 30 ثانية).
+- **Action 1 — اجلب التالي:** HTTP Request:
+  - **Method:** `GET` ، **URL:** `https://<server>/api/gateway/next`
+  - **Header:** `x-gateway-token: <GATEWAY_TOKEN>`
+  - فعّل **Save response to variable** واختر **Dictionary** (تحليل JSON تلقائياً)،
+    سمِّ المتغير `g`. (الآن تتوفّر `{g[has]}`, `{g[id]}`, `{g[to]}`, `{g[body]}`.)
+- **Action 2 — تحقّق:** أضف **If** / Condition: إذا `{g[has]}` يساوي `true`.
+  - داخل الـ If:
+    - **Action — Send SMS:** Number = `{g[to]}` ، Message = `{g[body]}`.
+    - **Action — HTTP Request (تأكيد):**
+      - **Method:** `POST` ، **URL:** `https://<server>/api/gateway/outbox/ack`
+      - **Header:** `x-gateway-token: <GATEWAY_TOKEN>` ، **Content Type:** `application/json`
+      - **Body:** `{"ids":["{g[id]}"]}`
+  - **End If**.
+
+> 🔁 لإرسال أكثر من رسالة في نفس الدورة (لو تراكمت عدة ردود): كرّر Action 1+2 من 3 إلى
+> 5 مرات داخل نفس الماكرو، أو اجعل Action C بالكامل داخل **Loop → Repeat 5**.
+> كل تكرار يرسل رسالة واحدة ويؤكّدها، والتكرار الذي يجد `{g[has]} = false` لا يرسل شيئاً.
+
+> ✅ هكذا يكون التدفق صحيحاً وموثوقاً: A و B يُبلّغان الخادم، و C يفرّغ طابور الردود
+> رسالةً رسالةً ويؤكّدها (لا تكرار مصفوفات، لا إرسال مزدوج).
 
 ## 3) (اختياري) ربط واتساب لاحقاً
 
@@ -77,7 +123,8 @@ COMPANY_NAME=اسم شركتك
 | الطريقة | المسار | الوصف |
 |--------|--------|-------|
 | POST | `/api/gateway/event` | إبلاغ بحدث: `missed_call` أو `sms_in`. (توكن) |
-| GET | `/api/gateway/outbox?limit=20` | الرسائل المنتظرة للإرسال. (توكن) |
+| GET | `/api/gateway/next` | **رسالة واحدة مسطّحة** للإرسال: `{has,id,to,body,role}` — الأنسب لـ MacroDroid. (توكن) |
+| GET | `/api/gateway/outbox?limit=20` | كل الرسائل المنتظرة (مصفوفة). (توكن) |
 | POST | `/api/gateway/outbox/ack` | تأكيد الإرسال `{ids:[...], failed:[...]}`. (توكن) |
 | GET | `/api/gateway/status` | حالة البوابة (admin). |
 

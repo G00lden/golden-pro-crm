@@ -16,6 +16,7 @@ import type { Express, NextFunction, Request, Response } from "express";
 import type { AuthedRequest } from "./auth";
 import {
   ackSms,
+  getNextPendingSms,
   handleGatewayEvent,
   listPendingSms,
   listRecentOutbox,
@@ -100,6 +101,17 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
     (req, res) => {
       const limit = Number(req.query.limit ?? 20);
       res.json({ messages: listPendingSms(gatewayOwnerUid(), limit) });
+    },
+  );
+
+  // MacroDroid-friendly: one flat pending SMS (no array to iterate).
+  // Returns { has:false } when the queue is empty.
+  app.get(
+    "/api/gateway/next",
+    webhookRateLimit,
+    requireGatewayToken,
+    (_req, res) => {
+      res.json(getNextPendingSms(gatewayOwnerUid()));
     },
   );
 

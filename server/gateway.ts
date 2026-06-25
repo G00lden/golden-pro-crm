@@ -58,6 +58,24 @@ export function enqueueSms(ownerUid: string, toPhone: string, body: string, role
   return id;
 }
 
+/**
+ * Returns the single oldest pending SMS in a flat, MacroDroid-friendly shape
+ * (no array to iterate). `to` is E.164 (+9665…) so any SMS app dials it.
+ */
+export function getNextPendingSms(ownerUid: string): {
+  has: boolean;
+  id?: string;
+  to?: string;
+  body?: string;
+  role?: string;
+} {
+  const row = db
+    .prepare("SELECT id, to_phone, body, role FROM gateway_outbox WHERE owner_uid = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1")
+    .get(ownerUid) as { id: string; to_phone: string; body: string; role: string } | undefined;
+  if (!row) return { has: false };
+  return { has: true, id: row.id, to: `+${normPhone(row.to_phone)}`, body: row.body, role: row.role };
+}
+
 export function listPendingSms(ownerUid: string, limit = 20) {
   const rows = db
     .prepare("SELECT id, to_phone, body, role FROM gateway_outbox WHERE owner_uid = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?")
