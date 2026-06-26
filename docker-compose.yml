@@ -1,0 +1,38 @@
+# Golden Pro CRM — single always-on container (frontend + backend + SQLite).
+#
+# Suitable for a VPS or any Docker host. SQLite (telephony/call data) and the
+# WhatsApp linked-device session are persisted on named volumes so they survive
+# restarts/redeploys. NOT for serverless (Cloud Run): WhatsApp + SQLite need a
+# long-lived process with a stable disk.
+#
+#   cp .env.production.example .env.production   # then fill secrets
+#   docker compose up -d --build
+#   docker compose logs -f
+services:
+  crm:
+    build: .
+    image: golden-pro-crm:latest
+    container_name: golden-pro-crm
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      DB_PATH: /app/.runtime/golden-crm.db
+      WA_SESSION_DIR: /app/.wa-session
+    ports:
+      - "3000:8080"            # host:container — put a reverse proxy / TLS in front
+    volumes:
+      - crm-data:/app/.runtime       # SQLite database (calls, departments, outbox)
+      - crm-wa:/app/.wa-session       # WhatsApp linked-device session (scan QR once)
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+
+volumes:
+  crm-data:
+  crm-wa:
