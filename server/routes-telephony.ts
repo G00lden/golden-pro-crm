@@ -17,6 +17,7 @@ import { unifonicAdapter } from "./telephony/unifonicAdapter";
 import type { TelephonyAdapter } from "./telephony/types";
 import {
   buildGreeting,
+  callStats,
   createDepartment,
   deleteDepartment,
   getTelephonyConfig,
@@ -241,6 +242,11 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
       res.json({ calls: listCalls({ ownerUid: owner(), limit, missedOnly }) });
     },
   );
+
+  // Dashboard counters (unhandled missed + today's totals).
+  app.get("/api/telephony/calls/summary", requireAdmin, (_req, res) => {
+    res.json(callStats(owner()));
+  });
 
   // Mark a (missed) call as handled/followed-up.
   app.post("/api/telephony/calls/:id/handle", requireAdmin, (req, res) => {

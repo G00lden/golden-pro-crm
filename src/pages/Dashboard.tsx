@@ -1,4 +1,4 @@
-import { Users, FileText, Package, UserRoundCog, Wrench, CircleAlert, CalendarDays, UserPlus, Plus, Send } from "lucide-react";
+import { Users, FileText, Package, UserRoundCog, Wrench, CircleAlert, CalendarDays, UserPlus, Plus, Send, PhoneMissed } from "lucide-react";
 import { useState } from "react";
 import * as api from "../api";
 import {
@@ -29,6 +29,8 @@ export default function Dashboard({
   go: (page: Page) => void;
 }) {
   const installations = useData(api.getInstallations);
+  const callStats = useData(api.getCallStats);
+  const missedPending = callStats.data?.missed_unhandled || 0;
   const [seeding, setSeeding] = useState(false);
   const urgent = (installations.data || []).filter((item) => item.status === "active" && Number(item.days_until) <= 7);
   const upcoming = (installations.data || []).filter((item) => item.status === "active" && Number(item.days_until) > 7 && Number(item.days_until) <= 30);
@@ -107,6 +109,7 @@ export default function Dashboard({
         <Stat title="متأخرة" value={stats.overdue || 0} icon={<CircleAlert size={20} />} tone="danger" />
         <Stat title="خلال أسبوع" value={stats.week || 0} icon={<CalendarDays size={20} />} tone="warn" />
         <Stat title="تحتاج رعاية" value={stats.care || 0} icon={<UserPlus size={20} />} tone={stats.care ? "danger" : "success"} />
+        <Stat title="مكالمات فائتة للمتابعة" value={missedPending} icon={<PhoneMissed size={20} />} tone={missedPending ? "danger" : "success"} onClick={() => go("callSystem")} />
       </div>
 
       <section className="cloud-panel operations-strip">
