@@ -8,6 +8,12 @@ coverage
 .wa-session
 .npm-cache
 .tools
+data
+*.db
+*.db-shm
+*.db-wal
+.git
+.security-backup-*
 service-account*.json
 firebase-service-account*.json
 *.log
