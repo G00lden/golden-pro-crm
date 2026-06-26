@@ -269,9 +269,9 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
   );
 }
 
-export function Stat({ title, value, icon, tone = "default" }: { title: string; value: number; icon: ReactNode; tone?: string }) {
+export function Stat({ title, value, icon, tone = "default", onClick }: { title: string; value: number; icon: ReactNode; tone?: string; onClick?: () => void }) {
   return (
-    <article className={`stat ${tone}`}>
+    <article className={`stat ${tone}`} onClick={onClick} style={onClick ? { cursor: "pointer" } : undefined}>
       <span>{icon}</span>
       <div>
         <strong>{value}</strong>

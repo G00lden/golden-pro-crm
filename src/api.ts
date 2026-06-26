@@ -3307,6 +3307,10 @@ export const getCallLogs = (opts: { limit?: number; missed?: boolean } = {}) => 
 export const markCallHandled = (id: string) =>
   apiFetch<{ success: boolean }>(`/api/telephony/calls/${id}/handle`, { method: "POST" });
 
+export type CallStats = { missed_unhandled: number; missed_today: number; total_today: number };
+
+export const getCallStats = () => apiFetch<CallStats>("/api/telephony/calls/summary");
+
 export const testMissedCall = (data: { from_phone: string; digit?: string; department_id?: string }) =>
   apiFetch<{ success: boolean; callSid: string; department: string; result: unknown }>(
     "/api/telephony/test-missed",

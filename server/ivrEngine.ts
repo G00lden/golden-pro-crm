@@ -416,6 +416,18 @@ export function updateCallBySid(callSid: string, fields: Record<string, unknown>
   );
 }
 
+/** Dashboard counters: unhandled missed calls + today's totals. */
+export function callStats(ownerUid: string): { missed_unhandled: number; missed_today: number; total_today: number } {
+  const today = new Date().toISOString().slice(0, 10);
+  const one = (sql: string, ...args: unknown[]) =>
+    (db.prepare(sql).get(ownerUid, ...args) as { c: number }).c;
+  return {
+    missed_unhandled: one("SELECT COUNT(*) AS c FROM call_logs WHERE owner_uid = ? AND missed = 1 AND IFNULL(handled,0) = 0"),
+    missed_today: one("SELECT COUNT(*) AS c FROM call_logs WHERE owner_uid = ? AND missed = 1 AND created_at LIKE ?", `${today}%`),
+    total_today: one("SELECT COUNT(*) AS c FROM call_logs WHERE owner_uid = ? AND created_at LIKE ?", `${today}%`),
+  };
+}
+
 export function listCalls(opts: { ownerUid: string; limit?: number; missedOnly?: boolean }): Record<string, unknown>[] {
   const limit = Math.min(500, opts.limit || 100);
   const sql = opts.missedOnly
