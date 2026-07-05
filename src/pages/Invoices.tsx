@@ -520,7 +520,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     <div className="quotes-workspace cloud-design">
       <section className="cloud-hero quotes-hero">
         <div className="cloud-hero-copy">
-          <span className="eyebrow">Tax Invoices</span>
+          <span className="eyebrow">الفواتير الضريبية</span>
           <h1>الفواتير الضريبية (ZATCA)</h1>
           <p>إصدار فواتير ضريبية مبسطة متوافقة مع هيئة الزكاة والضريبة والجمارك مع QR code.</p>
           <div className="hero-actions">
