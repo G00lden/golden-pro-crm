@@ -916,6 +916,10 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
   const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
   const sellerCr = invoice.seller_cr || invoice.seller_cr_number || "7016449519";
   const sellerPhone = invoice.seller_phone || "+966533971168";
+  // نوع الفاتورة حسب الإجمالي: مبسطة ≤ 999، ضريبية (عادية) ≥ 1000
+  const kind = Number(invoice.total_with_vat || 0) >= 1000
+    ? { ar: "فاتورة ضريبية", en: "Tax Invoice" }
+    : { ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
   const qrBase64 = generateZatcaBase64(
     sellerName,
     sellerVat,
@@ -987,8 +991,8 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
         <p>${escapeHtml(invoice.seller_address || "")}</p>
       </div>
       <div class="title">
-        <span>Simplified Tax Invoice</span>
-        <h1>فاتورة ضريبية مبسطة</h1>
+        <span>${kind.en}</span>
+        <h1>${kind.ar}</h1>
         ${invoice.title ? `<em style="display:block;font-style:normal;font-size:.8em;opacity:.7">${escapeHtml(invoice.title)}</em>` : ""}
         <strong>${escapeHtml(invoice.invoice_number || "")}</strong>
       </div>
@@ -1221,7 +1225,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       (item: Record<string, any>) => `- ${item.description} × ${item.quantity}: ${Number(item.total || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
     const message = [
-      `فاتورة ضريبية مبسطة - Breexe Pro Co.`,
+      `${Number(invoice.total_with_vat || 0) >= 1000 ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة"} - Breexe Pro Co.`,
       `${invoice.invoice_number}`,
       `العميل: ${invoice.customer_name}`,
       "",
