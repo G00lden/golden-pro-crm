@@ -44,6 +44,8 @@ const money = (value?: number, currency = "SAR") =>
 const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
 const sellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
 const sellerEnglishName = "Breexe Pro Co.";
+const sellerCrNumber = "7016449519";
+const sellerPhone = "+966533971168";
 const invoiceSellerOptions = ["أبو عامر", "أبو سيف"] as const;
 
 const statusLabels: Record<api.InvoiceStatus, string> = {
@@ -64,11 +66,7 @@ const statusTone: Record<api.InvoiceStatus, "muted" | "success" | "danger" | "wa
   refunded: "danger",
 };
 
-const defaultTerms = [
-  "فاتورة ضريبية مبسطة تحتوي على QR وفق متطلبات زاتكا للمرحلة الأولى.",
-  "هذه النسخة لا تمثل اعتماد المرحلة الثانية أو الربط/الختم الإلكتروني مع منصة فاتورة.",
-  "تحتسب ضريبة القيمة المضافة حسب طريقة إدخال السعر لكل بند.",
-].join("\n");
+const defaultTerms = "";
 
 const safeFilePart = (value?: string) =>
   String(value || "العميل")
@@ -378,7 +376,7 @@ function invoiceSummaryRows(stats: api.InvoiceStats) {
 function invoiceShareText(invoice: api.Invoice) {
   const lines = invoice.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, invoice.currency)}`);
   return [
-    `فاتورة ضريبية - ${invoice.seller_name || sellerEnglishName}`,
+    `فاتورة ضريبية مبسطة - ${invoice.seller_name || sellerEnglishName}`,
     `رقم الفاتورة: ${invoice.invoice_number}`,
     invoice.title || "فاتورة",
     `العميل: ${invoice.customer_name}`,
@@ -721,11 +719,13 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
               <span dir="ltr">{invoice.seller_name || sellerEnglishName}</span>
               <strong>{sellerLegalName}</strong>
               <small>{invoice.seller_address || "الرياض، المملكة العربية السعودية"}</small>
+              <small dir="ltr">{sellerPhone}</small>
             </div>
           </div>
           <div className="invoice-title-block">
-            <span>Tax Invoice</span>
-            <h2>{invoice.title || "فاتورة ضريبية"}</h2>
+            <span>Simplified Tax Invoice</span>
+            <h2>فاتورة ضريبية مبسطة</h2>
+            {invoice.title && <em style={{ display: "block", fontStyle: "normal", fontSize: "0.8em", opacity: 0.7 }}>{invoice.title}</em>}
             <strong>{invoice.invoice_number}</strong>
           </div>
         </header>
@@ -756,6 +756,8 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
             <p><span>الاسم:</span> <bdi>{invoice.seller_name || sellerEnglishName}</bdi></p>
             <p><span>السجل/الاسم القانوني:</span> {sellerLegalName}</p>
             <p><span>الرقم الضريبي:</span> {invoice.seller_vat_number || "-"}</p>
+            <p><span>السجل التجاري:</span> {sellerCrNumber}</p>
+            <p><span>الجوال:</span> <bdi dir="ltr">{sellerPhone}</bdi></p>
             <p><span>العنوان:</span> {invoice.seller_address || "-"}</p>
           </article>
           <article>
@@ -788,7 +790,14 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
               return (
                 <tr key={`${item.description}-${index}`}>
                   <td>{index + 1}</td>
-                  <td>{item.description}</td>
+                  <td>
+                    {item.description}
+                    {item.product_sku && (
+                      <small style={{ display: "block", opacity: 0.6, fontSize: "0.85em", direction: "ltr", textAlign: "right" }}>
+                        {item.product_sku}
+                      </small>
+                    )}
+                  </td>
                   <td>{line.quantity}</td>
                   <td>{money(line.unitNet, invoice.currency)}</td>
                   <td>{money(line.net, invoice.currency)}</td>

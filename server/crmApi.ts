@@ -914,6 +914,8 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
   const timestamp = invoiceQrTimestamp(invoice);
   const sellerName = invoice.seller_name || "Breexe Pro Co.";
   const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
+  const sellerCr = invoice.seller_cr || invoice.seller_cr_number || "7016449519";
+  const sellerPhone = invoice.seller_phone || "+966533971168";
   const qrBase64 = generateZatcaBase64(
     sellerName,
     sellerVat,
@@ -930,9 +932,10 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
   const currency = String(invoice.currency || "SAR");
   const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
     const line = invoiceLineAmounts(item, Number(invoice.vat_percent || 15));
+    const sku = item.product_sku ? `<small style="display:block;opacity:.6;font-size:.85em;direction:ltr">${escapeHtml(item.product_sku)}</small>` : "";
     return `<tr>
       <td>${index + 1}</td>
-      <td>${escapeHtml(item.description)}</td>
+      <td>${escapeHtml(item.description)}${sku}</td>
       <td>${line.quantity}</td>
       <td>${escapeHtml(formatMoney(line.unitNet, currency))}</td>
       <td>${escapeHtml(formatMoney(line.net, currency))}</td>
@@ -984,8 +987,9 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
         <p>${escapeHtml(invoice.seller_address || "")}</p>
       </div>
       <div class="title">
-        <span>Tax Invoice</span>
-        <h1>${escapeHtml(invoice.title || "فاتورة ضريبية")}</h1>
+        <span>Simplified Tax Invoice</span>
+        <h1>فاتورة ضريبية مبسطة</h1>
+        ${invoice.title ? `<em style="display:block;font-style:normal;font-size:.8em;opacity:.7">${escapeHtml(invoice.title)}</em>` : ""}
         <strong>${escapeHtml(invoice.invoice_number || "")}</strong>
       </div>
     </header>
@@ -1000,6 +1004,8 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
         <h2>بيانات البائع</h2>
         <p>الاسم: ${escapeHtml(sellerName)}</p>
         <p>الرقم الضريبي: ${escapeHtml(sellerVat)}</p>
+        <p>السجل التجاري: ${escapeHtml(sellerCr)}</p>
+        <p>الجوال: ${escapeHtml(sellerPhone)}</p>
         <p>العنوان: ${escapeHtml(invoice.seller_address || "-")}</p>
       </article>
       <article class="party">
@@ -1215,7 +1221,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       (item: Record<string, any>) => `- ${item.description} × ${item.quantity}: ${Number(item.total || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
     const message = [
-      `فاتورة ضريبية - Breexe Pro Co.`,
+      `فاتورة ضريبية مبسطة - Breexe Pro Co.`,
       `${invoice.invoice_number}`,
       `العميل: ${invoice.customer_name}`,
       "",
