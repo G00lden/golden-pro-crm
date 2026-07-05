@@ -167,7 +167,8 @@ const invoiceStandaloneCss = `
   }
   .invoice-doc-head { grid-template-columns: minmax(0, 1fr) minmax(170px, auto) !important; }
   .invoice-identity-grid { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
-  .invoice-parties { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto !important; }
+  .invoice-parties { grid-template-columns: minmax(0, 1fr) minmax(0, 250px) !important; align-items: stretch !important; }
+  .invoice-party-side { display: grid !important; gap: 8px !important; grid-template-rows: auto 1fr !important; }
   .invoice-bottom-grid { display: flex !important; justify-content: flex-end !important; align-items: start !important; }
   .invoice-doc-totals { width: min(100%, 300px) !important; }
   .invoice-doc-head,
@@ -767,16 +768,19 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
             <p><span>الجوال:</span> <bdi dir="ltr">{sellerPhone}</bdi></p>
             <p><span>العنوان:</span> {invoice.seller_address || "-"}</p>
           </article>
-          <article>
-            <h3>بيانات العميل</h3>
-            <p><span>الاسم:</span> {invoice.customer_name}</p>
-            <p><span>الجوال:</span> {invoice.customer_phone || "-"}</p>
-            <p><span>المدينة:</span> {invoice.customer_city || "-"}</p>
-            <p><span>الرقم الضريبي:</span> {invoice.customer_vat || "-"}</p>
-          </article>
-          <aside className="invoice-zatca-card">
-            <QRCodeDisplay data={qrCode} size={138} />
-          </aside>
+          <div className="invoice-party-side">
+            <article>
+              <h3>بيانات العميل</h3>
+              <p><span>الاسم:</span> {invoice.customer_name}</p>
+              <p><span>الجوال:</span> {invoice.customer_phone || "-"}</p>
+              <p><span>المدينة:</span> {invoice.customer_city || "-"}</p>
+              <p><span>الرقم الضريبي:</span> {invoice.customer_vat || "-"}</p>
+            </article>
+            <aside className="invoice-zatca-card">
+              <QRCodeDisplay data={qrCode} size={132} />
+              <span>رمز الاستجابة السريع — متوافق مع زاتكا</span>
+            </aside>
+          </div>
         </section>
 
         <table className="invoice-doc-table">
