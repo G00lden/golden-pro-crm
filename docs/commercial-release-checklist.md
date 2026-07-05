@@ -47,7 +47,7 @@
 
 | # | Item | Status | Owner | Notes |
 |---|------|--------|-------|-------|
-| 3.1 | Arabic copy review for every user-visible string | ✗ | hermes | brand-voice skill |
+| 3.1 | Arabic copy review for every user-visible string | ◐ | hermes | supervisor 2026-07-05 (PR #12): first pass done — replaced leftover English eyebrows ("Cloud Design", "Tax Invoices") with Arabic on Dashboard/Invoices, brand-voice aligned. Kept ◐ (not ✓): targeted pass, not a full string-by-string audit of every page/toast. |
 | 3.2 | RTL layout verified on all pages | ✗ | claude | mobile + desktop |
 | 3.3 | Empty states for new accounts | ✗ | claude | no blank dashboards (you'll see them on a fresh machine) |
 | 3.4 | Mobile responsive (≤375px) | ✗ | claude | screenshot pass |
@@ -62,8 +62,8 @@
 |---|------|--------|-------|-------|
 | 4.1 | Payment gateway integrated (Tap or Moyasar) | ✗ | codex | KSA-first; capture card + Apple Pay + STC Pay if Tap |
 | 4.2 | ZATCA-compliant invoice (KSA VAT) | ✓ | supervisor | flipped 2026-07-04 after code verification (not just commit-message trust): `src/pages/Invoices.tsx` implements real ZATCA Phase-1 TLV QR encoding (`generateZATCAQR` — tags 1-5: seller name, VAT number, ISO timestamp, total incl. VAT, VAT amount; base64 TLV, matches the published simplified-tax-invoice spec), rendered both live (`QRCodeDisplay`) and baked into the exported/printed PDF (`replaceInvoiceQrInClone`) via the `qrcode` npm package. `server/crmApi.ts` computes VAT correctly with per-line-item inclusive/exclusive modes (`vat_excluded` flag, `invoiceTotals()`), generates sequential `invoice_number`s (`INV-YYYYMMDD-NNN`), supports full CRUD + a real `POST /api/quotes/:id/convert-to-invoice` (quote→invoice conversion, not a stub), and stores `seller_vat_number`/`seller_name`/`seller_address`. This is functional, wired end-to-end, not a stub. Residual gap (does not block ✓ but worth tracking): no automated test asserts the TLV bytes decode to the exact values shown on screen — recommend adding one under 1.3/smoke coverage. |
-| 4.3 | Terms of Service + Privacy Policy (Arabic) | ✗ | hermes | also required by Meta / TikTok / Google to run ads |
-| 4.4 | Refund / return policy documented | ✗ | hermes | shown on the landing — required by Meta ad-quality |
+| 4.3 | Terms of Service + Privacy Policy (Arabic) | ✓ | supervisor | flipped 2026-07-05 (PR #12) after review: `public/legal/terms.html` + `privacy.html` — Arabic, PDPL-aware, identify the entity (legal name شركة بريكس برو شخص واحد ذات مسؤولية محدودة, VAT 313049114100003, CR 7016449519 — CR/VAT added to terms during review for parity), cross-linked, served via `/legal/terms` + `/legal/privacy` routes in `server.ts` and linked from `Landing.tsx` (footer + form-consent). build + lint pass. |
+| 4.4 | Refund / return policy documented | ✓ | supervisor | flipped 2026-07-05 (PR #12): `public/legal/refund.html` (new) — Arabic, Meta-ad-quality compliant (7-day return window, defect exchange, refund method + 5–14 business-day timeline), KSA e-commerce + PDPL referenced, full entity identity, cross-linked, `/legal/refund` route + linked from the landing footer & lead-form consent. Rendered and visually verified. |
 
 ## 5. Ad landing page (profile + products + tracking)
 
@@ -181,6 +181,15 @@ Notes from the 2026-06-24 audit + fix pass (supervisor):
 - Removed dead JWT auth path (`routes-auth.ts` / `localAuth.ts`) — it minted unusable admin tokens (latent privesc).
 - Hardened invoice-share secret to fail-closed in production.
 - Reconciled stale gates: 2.5 (rate-limit), 2.6 (zod), 2.10 (PII scrub) were already done in code → flipped to ✓; 5.7 consent banner ✓; 5.9–5.11 trackers → ◐ (wired, need env keys).
+
+## Current standing — 2026-07-05 (Hermes legal + copy, PR #12)
+
+Done: 26 / 81 items (32%). Supervisor reviewed & merged PR #12 (`hermes/legal-and-copy`):
+- **4.3 ✓** — Terms + Privacy (Arabic, PDPL, entity identity, cross-linked, `/legal/*` routes, linked from landing).
+- **4.4 ✓** — Refund/return policy (new `refund.html`, Meta-ad-quality compliant), rendered & verified.
+- **3.1 → ◐** — Arabic copy first pass (English eyebrows removed); full audit still pending.
+- During review the Supervisor added VAT/CR to `terms.html` for parity with the other two pages. build + lint pass.
+- **Hard-gate note:** 4.3 (legal) is now cleared; remaining Definition-of-Done gates are 4.1 (payment gateway), the security items (2.7/2.8/2.9/2.11/2.12), and the tracking/ops gates.
 
 ## Current standing — 2026-07-04 (catch-up audit)
 
