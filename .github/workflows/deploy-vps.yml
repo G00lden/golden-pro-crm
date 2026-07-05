@@ -1,0 +1,86 @@
+name: Deploy to VPS
+
+# Auto-deploy to the crm.breexe-pro.com VPS on every push to main.
+# Mirrors scripts/deploy-vps.ps1: ship a secrets-free archive, extract into
+# APP_DIR, then run deploy/remote-start.sh (docker compose up -d --build).
+#
+# Requires these repo secrets (Settings → Secrets and variables → Actions):
+#   VPS_HOST      : server IP or hostname (required — deploy is skipped if unset)
+#   VPS_SSH_KEY   : private SSH key with access to the server (required)
+#   VPS_USER      : ssh user (optional, default: root)
+#   VPS_SSH_PORT  : ssh port (optional, default: 22)
+# The server must already have /opt/golden-pro-crm/.env.production in place
+# (this workflow never ships secrets).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      APP_DIR: /opt/golden-pro-crm
+      CRM_DOMAIN: crm.breexe-pro.com
+      SSH_PORT: ${{ secrets.VPS_SSH_PORT || '22' }}
+      SSH_USER: ${{ secrets.VPS_USER || 'root' }}
+      SSH_HOST: ${{ secrets.VPS_HOST }}
+    steps:
+      - name: Check deploy is configured
+        id: cfg
+        run: |
+          if [ -z "${SSH_HOST}" ]; then
+            echo "::warning::VPS_HOST secret not set — skipping deploy. Add VPS_HOST + VPS_SSH_KEY in repo secrets to enable auto-deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.cfg.outputs.ready == 'true'
+        uses: actions/checkout@v4
+
+      - name: Create deploy archive (no secrets)
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          tar \
+            --exclude=".git" \
+            --exclude="node_modules" \
+            --exclude="dist" \
+            --exclude=".runtime" \
+            --exclude=".tools" \
+            --exclude=".wa-session" \
+            --exclude=".env" \
+            --exclude=".env.*" \
+            --exclude="*.log" \
+            -czf /tmp/golden-pro-crm-vps.tar.gz .
+
+      - name: Configure SSH
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${SSH_PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Ship code and restart containers
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          SSH="ssh -i ~/.ssh/id_deploy -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new ${SSH_USER}@${SSH_HOST}"
+          $SSH "mkdir -p '${APP_DIR}'"
+          scp -i ~/.ssh/id_deploy -P "${SSH_PORT}" -o StrictHostKeyChecking=accept-new \
+            /tmp/golden-pro-crm-vps.tar.gz "${SSH_USER}@${SSH_HOST}:/tmp/golden-pro-crm-vps.tar.gz"
+          $SSH "tar -xzf /tmp/golden-pro-crm-vps.tar.gz -C '${APP_DIR}'"
+          $SSH "test -f '${APP_DIR}/.env.production' || { echo 'ERROR: ${APP_DIR}/.env.production is missing on the server — deploy aborted.'; exit 1; }"
+          $SSH "cd '${APP_DIR}' && CRM_DOMAIN='${CRM_DOMAIN}' bash deploy/remote-start.sh"
+
+      - name: Health check
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          ssh -i ~/.ssh/id_deploy -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new \
+            "${SSH_USER}@${SSH_HOST}" "curl -fsS http://127.0.0.1/api/health >/dev/null && echo 'Health check OK'"
