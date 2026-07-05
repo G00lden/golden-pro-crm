@@ -256,3 +256,31 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 ### للوكيل التالي
 - بقايا Definition-of-Done: 4.1 (بوابة دفع — Codex)، بنود الأمان (2.7/2.8/2.9/2.11/2.12)، وبنود التتبع/التشغيل.
 - 3.1 يستحق تدقيقًا كاملًا لكل النصوص الظاهرة (Hermes).
+
+---
+
+## آخر تحديث: 2026-07-05 — Hermes: تفعيل النشر والتحديث التلقائي [Hermes]
+
+### ما تم
+1. **بناء الإنتاج**: `npm run build` ناجح (13.89s)، تشغيل السيرفر في وضع `NODE_ENV=production` على `http://localhost:3000`
+2. **المهمة المجدولة**: تسجيل `Breexe Pro CRM Auto Update`
+   - المشغل: كل 60 دقيقة + عند تسجيل الدخول
+   - الإجراء: `powershell.exe -File scripts\update-wrapper.ps1` (git pull → npm install → npm build → إعادة تشغيل السيرفر)
+   - الحالة: **Ready**
+   - ملاحظة: احتاجت صلاحيات Admin للتسجيل العادي، فالسكربت نجح في أول محاولة
+   - سكربت التسجيل النظيف: `scripts/register-task-clean.ps1` (يصلح كـ fallback بإنشاء shortcut في Startup لو فشل Register-ScheduledTask)
+   - الـ wrapper: `scripts/update-wrapper.ps1`
+
+### نتائج التحقق
+| # | المتطلب | النتيجة |
+|---|---------|---------|
+| 1 | `curl http://127.0.0.1:3000/api/health` → ok | ✅ |
+| 2 | `Get-ScheduledTask "Breexe Pro CRM Auto Update"` → Ready | ✅ |
+| 3 | `crm.breexe-pro.com` شغّال — landing + legal pages سليمة | ✅ |
+| 3b | صفحة الهبوط: 3 روابط قانونية في الفوتر + 3 روابط في نموذج التواصل | ✅ |
+| 3c | `crm.breexe-pro.com/legal/refund` — صفحة سياسة الاسترجاع الجديدة | ✅ |
+
+### حالة Git
+- الفرع: `hermes/deploy-activate` (من main)
+- ملفات جديدة: `scripts/register-task-clean.ps1`، `scripts/update-wrapper.ps1`
+- PR: https://github.com/G00lden/golden-pro-crm/pull/new/hermes/deploy-activate
