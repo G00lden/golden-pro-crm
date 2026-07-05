@@ -66,7 +66,7 @@ export default function Dashboard({
       <div className="dashboard-page cloud-design">
       <section className="cloud-hero dashboard-hero">
         <div className="cloud-hero-copy">
-          <span className="eyebrow">Cloud Design</span>
+          <span className="eyebrow">لوحة المعلومات</span>
           <h1>مركز تشغيل BreeXe Pro</h1>
           <p>المهام الحرجة، الصيانة، ورعاية العملاء في شاشة واحدة.</p>
           <div className="hero-actions">

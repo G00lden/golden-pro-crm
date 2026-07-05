@@ -300,7 +300,8 @@ export function LandingPage() {
             </button>
             <p className="lp-form-fine">
               بإرسال هذا النموذج توافق على <a href="/legal/privacy">سياسة الخصوصية</a> و
-              <a href="/legal/terms"> شروط الخدمة</a>.
+              <a href="/legal/terms">شروط الخدمة</a> و
+              <a href="/legal/refund">سياسة الاسترجاع والاستبدال</a>.
             </p>
           </form>
         )}
@@ -353,6 +354,7 @@ export function LandingPage() {
               <li><a href="#about">عن BreeXe</a></li>
               <li><a href="/legal/privacy">سياسة الخصوصية</a></li>
               <li><a href="/legal/terms">شروط الخدمة</a></li>
+              <li><a href="/legal/refund">الاسترجاع والاستبدال</a></li>
               <li><a href="/" className="lp-admin-link">دخول الإدارة</a></li>
             </ul>
           </div>

@@ -214,6 +214,13 @@ async function startServer() {
     webhookRateLimit,
   );
 
+  // ── Legal pages (served before API routes) ──
+  // These static HTML pages are required by Meta / TikTok / Google ad policies.
+  const legalDir = path.join(__dirname, "public", "legal");
+  app.get("/legal/terms", (_req, res) => res.sendFile(path.join(legalDir, "terms.html")));
+  app.get("/legal/privacy", (_req, res) => res.sendFile(path.join(legalDir, "privacy.html")));
+  app.get("/legal/refund", (_req, res) => res.sendFile(path.join(legalDir, "refund.html")));
+
   // ── Route modules ──
   registerHealthRoutes(app);
 
