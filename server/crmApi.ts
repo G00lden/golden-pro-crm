@@ -985,10 +985,13 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
 <body>
   <main class="doc">
     <header class="head">
-      <div class="brand">
-        <strong>${escapeHtml(sellerName)}</strong>
-        <span>شركة بريكس برو شخص واحد ذات مسؤولية محدودة</span>
-        <p>${escapeHtml(invoice.seller_address || "")}</p>
+      <div class="brand" style="display:flex;gap:12px;align-items:flex-start">
+        <img src="/brand/icon-256.png" alt="Breexe Pro" width="58" height="58" style="object-fit:contain;border-radius:10px;flex-shrink:0" />
+        <div>
+          <strong>${escapeHtml(sellerName)}</strong>
+          <span>شركة بريكس برو شخص واحد ذات مسؤولية محدودة</span>
+          <p>${escapeHtml(invoice.seller_address || "")}</p>
+        </div>
       </div>
       <div class="title">
         <span>${kind.en}</span>
