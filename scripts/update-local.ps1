@@ -1,26 +1,40 @@
 #requires -Version 5
-# ── تحديث النسخة المحلية من crm.breexe-pro.com بضغطة واحدة ──
-# يسحب آخر كود من main، يبني الواجهة، يوقف السيرفر القديم، ويشغّل السيرفر
-# الجديد + يتأكد أن نفق Cloudflare شغّال. شغّله عبر update-local.cmd (دبل-كليك).
+# ── تحديث النسخة المحلية من crm.breexe-pro.com ──
+# يسحب آخر كود من main. لو فيه جديد: يبني الواجهة، يوقف السيرفر القديم،
+# ويشغّل الجديد + يتأكد أن نفق Cloudflare شغّال. لو مافيش جديد: يتأكد فقط
+# أن السيرفر والنفق شغّالين (بدون إعادة تشغيل / بدون انقطاع).
+# يُشغَّل يدويًا عبر update-local.cmd، أو تلقائيًا عبر مهمة مجدولة.
 
 param(
   [string]$AppDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
-  [int]$Port = 3000
+  [int]$Port = 3000,
+  [switch]$Force  # أعد البناء وإعادة التشغيل حتى لو مافيش كود جديد
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location $AppDir
 
-Write-Host "== 1/5 سحب آخر كود من main ==" -ForegroundColor Cyan
+Write-Host "== سحب آخر كود من main ==" -ForegroundColor Cyan
+$before = (git rev-parse HEAD).Trim()
 git pull origin main
+$after = (git rev-parse HEAD).Trim()
 
-Write-Host "== 2/5 تثبيت الحزم (لو فيه جديد) ==" -ForegroundColor Cyan
+$changed = ($before -ne $after) -or $Force
+
+if (-not $changed) {
+  Write-Host "لا يوجد تحديث جديد ($after). التأكد فقط أن السيرفر والنفق شغّالين..." -ForegroundColor DarkGray
+  & (Join-Path $PSScriptRoot "start-crm-local-stack.ps1") -AppDir $AppDir -Port $Port
+  Write-Host "جاهز." -ForegroundColor Green
+  return
+}
+
+Write-Host "== تثبيت الحزم (لو فيه جديد) ==" -ForegroundColor Cyan
 npm install
 
-Write-Host "== 3/5 بناء الواجهة ==" -ForegroundColor Cyan
+Write-Host "== بناء الواجهة ==" -ForegroundColor Cyan
 npm run build
 
-Write-Host "== 4/5 إيقاف السيرفر القديم على المنفذ $Port ==" -ForegroundColor Cyan
+Write-Host "== إيقاف السيرفر القديم على المنفذ $Port ==" -ForegroundColor Cyan
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn) {
   try {
@@ -34,9 +48,9 @@ if ($conn) {
   Write-Host "   لا يوجد سيرفر شغّال على المنفذ $Port."
 }
 
-Write-Host "== 5/5 تشغيل السيرفر + التأكد من نفق Cloudflare ==" -ForegroundColor Cyan
+Write-Host "== تشغيل السيرفر + التأكد من نفق Cloudflare ==" -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot "start-crm-local-stack.ps1") -AppDir $AppDir -Port $Port
 
 Write-Host ""
-Write-Host "تم التحديث. افتح crm.breexe-pro.com واعمل Ctrl+Shift+R لتجاوز الكاش." -ForegroundColor Green
+Write-Host "تم التحديث إلى $after. افتح crm.breexe-pro.com واعمل Ctrl+Shift+R." -ForegroundColor Green
 Write-Host "تحقّق الصحة: curl http://127.0.0.1:$Port/api/health"
