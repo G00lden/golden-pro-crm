@@ -2155,13 +2155,20 @@ main {
 }
 
 .invoice-parties {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 250px);
   align-items: stretch;
   margin-bottom: 14px;
 }
 
+.invoice-party-side {
+  display: grid;
+  gap: 10px;
+  align-content: stretch;
+  grid-template-rows: auto 1fr;
+}
+
 .invoice-parties article {
-  padding: 12px;
+  padding: 11px 12px;
 }
 
 .invoice-parties h3,
