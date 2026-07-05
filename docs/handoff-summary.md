@@ -151,3 +151,28 @@ Open PRs:    0
 - **عقد Unifonic مؤكَّد** من التوثيق العام: الوارد `{callerId, recipient, digits}`، والاستجابة مصفوفة كائنات `say/responseUrl/digitsLimit` و`transfer:"+9665.."`. الربط بالمكالمة عبر `callerId` (لا يوجد callSid ثابت). حقول حمولة **الحالة** فقط تبقى account-specific و`parseStatus` دفاعي.
 - ضبط `TELEPHONY_WEBHOOK_SECRET` و`PUBLIC_BASE_URL` و`UNIFONIC_*` في `.env`، وربط IVR Endpoint + Status Callback في لوحة Unifonic.
 - `TELEPHONY_WEBHOOK_SECRET` إلزامي في الإنتاج (الـ webhook يُرفض 503 بدونه).
+
+---
+
+## آخر تحديث: 2026-06-26 — إغلاق دورة المكالمة + Deploy Stack [Claude Code]
+
+> ملاحظة: هذا التحديث بيغطي شغل اتعمل على `main` بين 2026-06-19 و2026-06-26 ومكنش موثّق هنا أول بأول (الفجوة كانت موجودة، مش شغل جديد). التفاصيل الأمنية لـ 2026-06-24 موثّقة فعليًا في `docs/commercial-release-checklist.md` ("Current standing — 2026-06-24") فمكنتش مكررة تحت.
+
+### ماذا أُضيف (بترتيب زمني تقريبي)
+
+1. **نظام الفواتير ZATCA** (`913e87e` → `8ebd237`, 2026-06-19/20): فواتير ضريبية متوافقة مع ZATCA (QR + VAT modes)، تحويل من عرض سعر لفاتورة، تصدير/طباعة PDF معزولة عن باقي الصفحة، واجهة Odoo-style + تبديل الوضع الفاتح.
+2. **تشديد أمني P0** (`0070728`, `d75bfdd`, `396f370`, `d336a46`, 2026-06-21/24): إغلاق R-008 (HMAC webhook الواتساب)، R-009 (بوابة `send-template`)، R-010 (consent gating للتراكرز)، حذف مسار JWT الميت (`routes-auth.ts`/`localAuth.ts`) اللي كان بيصدر tokens إدارية غير قابلة للاستخدام (ثغرة privesc كامنة).
+3. **التوجيه: round-robin + anti-spam cooldown** (`7bf9c47`, 2026-06-25): توزيع المكالمات على الموظفين النشطين بالتناوب (`ivr_departments.rr_counter`) بدل أول موظف دايمًا؛ قمع الرد التلقائي المكرر لنفس المتصل خلال `GATEWAY_REPLY_COOLDOWN_MIN` (افتراضي 10 دقايق). **إصلاح مهم:** migrations أعمدة `bookings`/`technician_notifications` كانت بتشتغل قبل إنشاء الجداول، فكانت قاعدة بيانات جديدة (تنصيب جديد / VPS / Cloud Run) بتفشل بـ"no such table: bookings" — اتصلح الترتيب واتأكد إن قاعدة بيانات جديدة بتشتغل.
+4. **دورة المكالمة الكاملة: تعرّف على العميل + إقرار الموظف + حالة "متعامل معها"** (`8042f70`, 2026-06-26): رقم المكالمة يتطابق مع جدول العملاء ويظهر اسمه بدل الرقم الخام؛ رد الموظف بـ"تم/استلمت/done" عبر واتساب/SMS يقفل المكالمة الفائتة تلقائيًا (`handled_by=agent`)؛ إغلاق يدوي من اللوحة (`POST /api/telephony/calls/:id/handle`)؛ أعمدة جديدة في `call_logs`. مُختبر على قاعدة بيانات نظيفة، lint/build/smoke (15/15) ✓.
+5. **حزمة النشر (Deploy Stack)** (`e226a21`, 2026-06-26): `docker-compose.yml` بخدمة واحدة + volumes دائمة لقاعدة SQLite (`.runtime`) وجلسة الواتساب (`.wa-session`) + healthcheck + restart؛ `.dockerignore` يستبعد `data/`، `*.db`، `.git`، النسخ الاحتياطية؛ إضافة مفاتيح telephony/gateway لـ `.env.production.example`؛ `docs/deployment.md` (Compose، reverse-proxy + HTTPS، نسخ احتياطي، go-live). تم التحقق محليًا في وضع الإنتاج (frontend static + backend health 200 + SQLite).
+6. **بطاقة المكالمات الفائتة في الداشبورد** (`a3dfa12`, 2026-06-26): `GET /api/telephony/calls/summary` (missed_unhandled/missed_today/total_today) + بطاقة قابلة للنقر في الصفحة الرئيسية بتتحول لأحمر لما فيه متابعات معلّقة. مُختبر: الملخص يرجع 0 ثم `missed_unhandled:1` بعد مكالمة فايتة، lint/build/smoke (15/15) ✓.
+
+### فجوة توثيق لوحظت ولازم انتباه Supervisor
+- `docs/commercial-release-checklist.md` بند **4.2 (ZATCA-compliant invoice)** لسه معلّم ✗ رغم إن النظام مبني وشغال فعليًا (انظر البند 1 فوق). الـ checklist بينص إن الـ Supervisor بس هو اللي يقلب ✗→✓، فمكنتش أغيّرها هنا مباشرة — محتاجة مراجعة Supervisor وتأكيد قبل القلب.
+- بنود **1.6/1.7** (Dockerfile/deploy scripts) ممكن تبقى أقرب للجاهزية بعد حزمة `docker-compose` أعلاه — يستاهل تحقق فعلي على staging قبل القلب لـ ✓.
+- نظام المكالمات (IVR + gateway + round-robin + دورة الحياة الكاملة) مش موجود كقسم في الـ checklist أصلاً — يستاهل قسم جديد "6. Telephony" أو إضافة تحت "1. Engineering" لو الـ Supervisor شايف كده.
+
+### حالة Git عند هذا التحديث
+- آخر commit على `main`: `cfbba82` (merge لبطاقة المكالمات الفائتة)
+- الفرع `claude/project-recall-0lhr3z` مطابق تمامًا لـ `main`، working tree نظيف، مفيش PRs مفتوحة.
+- فرع `codex/p0-security-backup-salla` فيه commits قديمة (`e3853dc`, `f042b68`) مش داخلة `main` — يبدو تم استبدالها بمسار مختلف لنفس الميزة (ZATCA) وصل main فعليًا؛ يستاهل تأكيد إنه ممكن يتقفل/يتمسح بدل ما يفضل معلّق.
