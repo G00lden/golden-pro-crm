@@ -118,7 +118,10 @@ export default function StoreOrdersPage({
 
       const nextOrders = await api.getStoreOrders({ type: "all" });
       setOrderData(nextOrders);
-      updateSeenOrders(nextOrders, options.background);
+      // Do NOT suppress on background: the 1-minute auto-poll is exactly when a
+      // "new order arrived" toast is most useful. The bootstrappedRef guard
+      // already prevents alerting on the very first load.
+      updateSeenOrders(nextOrders);
 
       if (!options.background || options.sync) {
         await refreshStats();

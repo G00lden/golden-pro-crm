@@ -154,13 +154,31 @@ function InstallationForm({
   const [label, setLabel] = useState(initial?.label || "");
   const [saving, setSaving] = useState(false);
 
+  // The customer/product lists are paginated. When editing an installation whose
+  // customer or product falls beyond the fetched page, inject it from the record
+  // itself so the dropdown shows it and submit doesn't silently no-op.
+  const customerOptions = useMemo(() => {
+    const list = customers.data?.data ? [...customers.data.data] : [];
+    if (initial?.customer_id && !list.some((c) => c.id === initial.customer_id)) {
+      list.unshift({ id: initial.customer_id, name: initial.customer_name || "—", phone: initial.customer_phone || "" } as api.Customer);
+    }
+    return list;
+  }, [customers.data, initial]);
+  const productOptions = useMemo(() => {
+    const list = products.data ? [...products.data] : [];
+    if (initial?.product_id && !list.some((p) => p.id === initial.product_id)) {
+      list.unshift({ id: initial.product_id, name: initial.product_name || "—", sku: initial.product_sku || "", interval_months: 0 } as api.Product);
+    }
+    return list;
+  }, [products.data, initial]);
+
   const selectedCustomer = useMemo(
-    () => customers.data?.data.find((item) => item.id === customerId),
-    [customers.data, customerId],
+    () => customerOptions.find((item) => item.id === customerId),
+    [customerOptions, customerId],
   );
   const selectedProduct = useMemo(
-    () => products.data?.find((item) => item.id === productId),
-    [products.data, productId],
+    () => productOptions.find((item) => item.id === productId),
+    [productOptions, productId],
   );
 
   useEffect(() => {
@@ -202,7 +220,7 @@ function InstallationForm({
     }
   };
 
-  const noData = !customers.loading && !products.loading && (!customers.data?.data.length || !products.data?.length);
+  const noData = !customers.loading && !products.loading && (!customerOptions.length || !productOptions.length);
 
   if (customers.loading || products.loading) return <Loading />;
   if (noData) return <Empty title="أضف عميلا ومنتجا قبل إنشاء الصيانة" />;
@@ -212,12 +230,12 @@ function InstallationForm({
       <div className="form-grid">
         <Field label="العميل">
           <SelectInput value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-            {(customers.data?.data || []).map((customer) => <option key={customer.id} value={customer.id}>{customer.name} - {phoneLabel(customer.phone)}</option>)}
+            {customerOptions.map((customer) => <option key={customer.id} value={customer.id}>{customer.name} - {phoneLabel(customer.phone)}</option>)}
           </SelectInput>
         </Field>
         <Field label="المنتج">
           <SelectInput value={productId} onChange={(e) => setProductId(e.target.value)}>
-            {(products.data || []).map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
+            {productOptions.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
           </SelectInput>
         </Field>
       </div>
