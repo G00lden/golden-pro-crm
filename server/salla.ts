@@ -183,7 +183,7 @@ function syncEnabled() {
 }
 
 function maxSyncPages() {
-  return Math.max(1, Math.min(10, Number(process.env.SALLA_SYNC_MAX_PAGES || 3)));
+  return Math.max(1, Math.min(200, Number(process.env.SALLA_SYNC_MAX_PAGES || 3)));
 }
 
 function pageSize() {

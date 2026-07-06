@@ -1,4 +1,4 @@
-import { RefreshCcw, Search, UserRoundCog, Wrench, Save, Send } from "lucide-react";
+import { RefreshCcw, Search, UserRoundCog, Wrench, Save, Send, Filter } from "lucide-react";
 import { useState, useCallback, useEffect, useMemo, useRef, type FormEvent } from "react";
 import * as api from "../api";
 import {
@@ -34,6 +34,11 @@ export default function StoreOrdersPage({
 }) {
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [cityFilter, setCityFilter] = useState("");
+  const [productFilter, setProductFilter] = useState("");
+  const [minValue, setMinValue] = useState("");
+  const [maxValue, setMaxValue] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -155,14 +160,34 @@ export default function StoreOrdersPage({
 
   const filteredOrders = useMemo(() => {
     const term = search.trim().toLowerCase();
+    const productTerm = productFilter.trim().toLowerCase();
+    const minVal = minValue ? Number(minValue) : null;
+    const maxVal = maxValue ? Number(maxValue) : null;
     return allOrders.filter((order) => {
       if (!matchesType(order, filter)) return false;
+      // City filter
+      if (cityFilter && (order.customer_city || "").toLowerCase() !== cityFilter.toLowerCase()) return false;
+      // Product filter
+      if (productTerm) {
+        const itemMatch = (order.items || []).some(
+          (item) =>
+            (item.name || "").toLowerCase().includes(productTerm) ||
+            (item.sku || "").toLowerCase().includes(productTerm),
+        );
+        if (!itemMatch) return false;
+      }
+      // Value filter
+      const orderVal = orderTotal(order);
+      if (minVal !== null && (orderVal === null || orderVal < minVal)) return false;
+      if (maxVal !== null && (orderVal === null || orderVal > maxVal)) return false;
+      // Text search
       if (!term) return true;
       const haystack = [
         order.order_number,
         order.order_id,
         order.customer_name,
         order.customer_phone,
+        order.customer_city,
         order.status,
         ...(order.items || []).flatMap((item) => [item.name, item.sku]),
       ]
@@ -171,7 +196,16 @@ export default function StoreOrdersPage({
         .toLowerCase();
       return haystack.includes(term);
     });
-  }, [allOrders, filter, matchesType, search]);
+  }, [allOrders, filter, matchesType, search, cityFilter, productFilter, minValue, maxValue]);
+
+  // Extract unique cities for filter dropdown
+  const availableCities = useMemo(() => {
+    const cities = new Set<string>();
+    allOrders.forEach((order) => {
+      if (order.customer_city) cities.add(order.customer_city);
+    });
+    return Array.from(cities).sort();
+  }, [allOrders]);
 
   const summary = useMemo(() => {
     const todayKey = today();
@@ -275,12 +309,52 @@ export default function StoreOrdersPage({
             <Search size={16} />
             <TextInput placeholder="ابحث برقم الطلب، العميل، الجوال، المنتج أو SKU" value={search} onChange={(event) => setSearch(event.target.value)} />
           </div>
+          <button type="button" className={`btn ${showFilters ? "primary" : "muted"}`} onClick={() => setShowFilters(!showFilters)}>
+            <Filter size={14} /> فلاتر متقدمة
+          </button>
           <label className="toggle-control">
             <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
             <span>تحديث تلقائي</span>
           </label>
           <span className="sync-meta">{lastUpdated ? `آخر تحديث: ${fmtDate(lastUpdated)}` : "بانتظار أول تحديث"}</span>
         </div>
+
+        {showFilters && (
+          <div className="store-filters-bar">
+            <div className="filter-group">
+              <label>المدينة</label>
+              {availableCities.length > 0 ? (
+                <select className="input" value={cityFilter} onChange={(e) => setCityFilter(e.target.value)}>
+                  <option value="">كل المدن</option>
+                  {availableCities.map((city) => (
+                    <option key={city} value={city}>{city}</option>
+                  ))}
+                </select>
+              ) : (
+                <TextInput placeholder="اكتب اسم المدينة" value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} />
+              )}
+            </div>
+            <div className="filter-group">
+              <label>المنتج</label>
+              <TextInput placeholder="اسم أو SKU المنتج" value={productFilter} onChange={(e) => setProductFilter(e.target.value)} />
+            </div>
+            <div className="filter-group">
+              <label>قيمة الطلب (من)</label>
+              <TextInput placeholder="الحد الأدنى" type="number" value={minValue} onChange={(e) => setMinValue(e.target.value)} />
+            </div>
+            <div className="filter-group">
+              <label>قيمة الطلب (إلى)</label>
+              <TextInput placeholder="الحد الأعلى" type="number" value={maxValue} onChange={(e) => setMaxValue(e.target.value)} />
+            </div>
+            {(cityFilter || productFilter || minValue || maxValue) && (
+              <div className="filter-group filter-actions">
+                <Button tone="muted" onClick={() => { setCityFilter(""); setProductFilter(""); setMinValue(""); setMaxValue(""); }}>
+                  مسح الفلاتر
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="tabs table-tabs">
           {tabs.map(([value, label, count]) => (

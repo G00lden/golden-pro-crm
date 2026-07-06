@@ -307,6 +307,7 @@ export type StoreOrder = {
   customer_id?: string;
   customer_name: string;
   customer_phone: string;
+  customer_city?: string | null;
   product_ids?: string[];
   installation_ids?: string[];
   booking_ids?: string[];
