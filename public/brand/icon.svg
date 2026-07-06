@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="copper" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#a86f45"/>
+      <stop offset="0.45" stop-color="#e7bb92"/>
+      <stop offset="1" stop-color="#9c6740"/>
+    </linearGradient>
+    <linearGradient id="navy" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d3d6b"/>
+      <stop offset="1" stop-color="#0e2645"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="256" cy="256" r="250" fill="#ffffff"/>
+  <circle cx="256" cy="256" r="246" fill="none" stroke="url(#copper)" stroke-width="6"/>
+  <circle cx="256" cy="256" r="237" fill="none" stroke="#16345f" stroke-width="3"/>
+
+  <!-- navy enso: nearly full circle, small opening at the top -->
+  <path d="M 292 92 A 168 168 0 1 1 220 92"
+        fill="none" stroke="url(#navy)" stroke-width="30" stroke-linecap="round"/>
+
+  <!-- three navy wave blades, upper-left, sweeping to the centre -->
+  <path d="M 150 178 Q 300 196 332 250" fill="none" stroke="url(#navy)" stroke-width="19" stroke-linecap="round"/>
+  <path d="M 148 220 Q 285 238 330 272" fill="none" stroke="url(#navy)" stroke-width="17" stroke-linecap="round"/>
+  <path d="M 158 262 Q 262 280 322 300" fill="none" stroke="url(#navy)" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- infinity centred: navy left loop, copper right loop, copper crossing -->
+  <path d="M 256 256 C 214 200, 150 200, 150 256 C 150 312, 214 312, 256 256"
+        fill="none" stroke="url(#navy)" stroke-width="27" stroke-linecap="round"/>
+  <path d="M 256 256 C 298 200, 362 200, 362 256 C 362 312, 298 312, 256 256"
+        fill="none" stroke="url(#copper)" stroke-width="27" stroke-linecap="round"/>
+  <path d="M 196 216 L 316 296" fill="none" stroke="url(#copper)" stroke-width="25" stroke-linecap="round"/>
+</svg>
