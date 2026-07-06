@@ -469,10 +469,16 @@ export function registerCrmApiRoutes(app: express.Express) {
       res.status(400).json({ error: "Invalid quote status." });
       return;
     }
+    const current = await getOwned("quotes", req.params.id, uid);
+    if (!current) {
+      res.status(404).json({ error: "Quote was not found." });
+      return;
+    }
     const update = clean({
       status,
       follow_up_date: req.body?.follow_up_date ?? undefined,
-      confirmed_at: status === "confirmed" ? nowIso() : undefined,
+      // Keep the original confirmation time; only stamp it on the first confirm.
+      confirmed_at: current.confirmed_at || (status === "confirmed" ? nowIso() : undefined),
     });
     if (!(await updateOwned("quotes", req.params.id, uid, update))) {
       res.status(404).json({ error: "Quote was not found." });
@@ -1213,9 +1219,15 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       res.status(400).json({ error: "حالة غير صالحة." });
       return;
     }
+    const current = await getOwned("invoices", req.params.id, uid);
+    if (!current) {
+      res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
     const update = clean({
       status,
-      paid_at: status === "paid" ? nowIso() : undefined,
+      // Keep the original payment time; only stamp it the first time it's paid.
+      paid_at: current.paid_at || (status === "paid" ? nowIso() : undefined),
     });
     if (!(await updateOwned("invoices", req.params.id, uid, update))) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
