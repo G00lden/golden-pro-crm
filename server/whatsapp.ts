@@ -48,6 +48,23 @@ export class WhatsAppService {
   private handledCalls = new Set<string>();
   private answeredCalls = new Set<string>();
 
+  // Cache of recently-sent message content, keyed by message id. When a
+  // recipient's device can't decrypt a message it shows "Waiting for this
+  // message" and auto-sends a retry receipt; Baileys then calls getMessage() to
+  // re-encrypt and resend the original. Without this cache those messages can
+  // never be recovered and stay stuck as "Waiting for this message".
+  private sentMessages = new Map<string, unknown>();
+  private static readonly SENT_CACHE_LIMIT = 1000;
+
+  private rememberSentMessage(id: string | null | undefined, content: unknown) {
+    if (!id || !content) return;
+    this.sentMessages.set(id, content);
+    if (this.sentMessages.size > WhatsAppService.SENT_CACHE_LIMIT) {
+      const oldest = this.sentMessages.keys().next().value;
+      if (oldest !== undefined) this.sentMessages.delete(oldest);
+    }
+  }
+
   constructor(sessionDir = process.env.WA_SESSION_DIR || ".wa-session") {
     this.sessionDir = path.resolve(process.cwd(), sessionDir);
     this.provider = process.env.WHATSAPP_PROVIDER === "cloud_api" ? "cloud_api" : "web";
@@ -155,6 +172,10 @@ export class WhatsAppService {
 
     const jid = this.toJid(phone);
     const result = await this.sock.sendMessage(jid, { text: message });
+    // Remember the content so Baileys can resend it if the recipient's device
+    // fails to decrypt (retry receipt) — otherwise it stays "Waiting for this
+    // message" on their side.
+    this.rememberSentMessage(result?.key?.id, result?.message);
     return { jid, messageId: result?.key?.id || null };
   }
 
@@ -204,6 +225,11 @@ export class WhatsAppService {
       logger: pino({ level: process.env.WA_LOG_LEVEL || "silent" }) as any,
       printQRInTerminal: false,
       version,
+      // Lets Baileys resend a message when the recipient's device failed to
+      // decrypt it (retry receipt). Fixes recipients seeing "Waiting for this
+      // message. This may take a while." indefinitely.
+      getMessage: async (key: any) =>
+        (key?.id ? this.sentMessages.get(key.id) : undefined) as any,
     });
 
     this.sock = sock;
