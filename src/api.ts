@@ -1536,11 +1536,14 @@ export const setQuoteStatus = async (id: string, status: QuoteStatus, followUpDa
       body: JSON.stringify({ status, follow_up_date: followUpDate }),
     }).then(() => undefined);
   }
+  const snap = await getDoc(doc(db, "quotes", id));
+  const prevConfirmedAt = (snap.exists() ? (snap.data() as Quote).confirmed_at : null) ?? null;
   return wrap(
     () => updateDoc(doc(db, "quotes", id), {
       status,
       follow_up_date: followUpDate !== undefined ? followUpDate : null,
-      confirmed_at: status === "confirmed" ? now : null,
+      // Preserve the original confirmation time; only stamp it on first confirm.
+      confirmed_at: prevConfirmedAt || (status === "confirmed" ? now : null),
       updatedAt: now,
     }),
     OperationType.UPDATE,
@@ -1822,10 +1825,13 @@ export const setInvoiceStatus = async (id: string, status: InvoiceStatus) => {
       body: JSON.stringify({ status }),
     }).then(() => undefined);
   }
+  const snap = await getDoc(doc(db, "invoices", id));
+  const prevPaidAt = (snap.exists() ? (snap.data() as Invoice).paid_at : null) ?? null;
   return wrap(
     () => updateDoc(doc(db, "invoices", id), {
       status,
-      paid_at: status === "paid" ? now : null,
+      // Preserve the original payment time; only stamp it the first time paid.
+      paid_at: prevPaidAt || (status === "paid" ? now : null),
       updatedAt: now,
     }),
     OperationType.UPDATE,
