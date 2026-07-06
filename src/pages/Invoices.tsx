@@ -22,7 +22,7 @@ import QRCode from "qrcode";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import * as api from "../api";
-import { InvoicePreview, generateZATCAQR, invoiceKind, invoiceTimestamp, invoiceSellerOptions } from "../components/InvoicePreview";
+import { InvoicePreview, generateZATCAQR, invoiceKind, invoiceTimestamp, invoiceSellerOptions, saveInvoicePdf, printInvoiceWindow } from "../components/InvoicePreview";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -419,8 +419,8 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
 
   const printInvoice = (invoice: api.Invoice, asPdf = false) => {
     const printWindow = asPdf ? null : window.open("", "_blank");
-    flushSync(() => setPreview(invoice));
-    void openInvoicePrintDialog(invoice, asPdf, printWindow);
+    setPreview(invoice);
+    setTimeout(() => openInvoicePrintDialog(invoice, asPdf, printWindow), 50);
   };
 
   const sendInvoiceWhatsApp = async (invoice: api.Invoice) => {

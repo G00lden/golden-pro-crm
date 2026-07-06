@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import * as api from "../api";
-import { InvoicePreview } from "../components/InvoicePreview";
+import { InvoicePreview, saveInvoicePdf, printInvoiceWindow } from "../components/InvoicePreview";
 
 type Notifier = (message: string, ok?: boolean) => void;
 type AccountingTab = "dashboard" | "invoices" | "payments";
@@ -729,18 +729,20 @@ export function AccountingPage({ notify, refreshStats }: { notify: Notifier; ref
           <InvoicePreview
             invoice={preview}
             onCopy={() => copyInvoiceText(preview)}
-            onPrint={(asPdf) => {
-              const printWindow = asPdf ? null : window.open("", "_blank");
-              if (!asPdf && printWindow) {
-                const kind = preview.total_with_vat >= 1000 ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة";
-                const doc = printWindow.document;
-                const html = `<!doctype html><html dir="rtl"><head><meta charset="utf-8"><title>${kind} ${preview.invoice_number}</title></head><body><p>الرجاء استخدام زر الطباعة من المعاينة</p></body></html>`;
-                doc.open();
-                doc.write(html);
-                doc.close();
-                setTimeout(() => printWindow.print(), 500);
+            onPrint={async (asPdf) => {
+              try {
+                if (asPdf) {
+                  await saveInvoicePdf(preview);
+                  notify("تم حفظ PDF");
+                } else {
+                  const pw = window.open("", "_blank");
+                  if (!pw) { notify("اسمح بالنوافذ المنبثقة", false); return; }
+                  await printInvoiceWindow(preview, pw);
+                  notify("تم فتح نافذة الطباعة");
+                }
+              } catch (err) {
+                notify(err instanceof Error ? err.message : "فشل", false);
               }
-              notify(asPdf ? "استخدم معاينة الفواتير للتصدير PDF" : "تم فتح نافذة الطباعة");
             }}
           />
         </Modal>

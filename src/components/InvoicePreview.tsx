@@ -1,6 +1,8 @@
 import { useMemo, useState, useEffect } from "react";
 import { Copy, Download, Printer } from "lucide-react";
 import QRCode from "qrcode";
+import html2canvas from "html2canvas";
+import { jsPDF } from "jspdf";
 import type * as api from "../api";
 
 // ── Constants ────────────────────────────────────────────
@@ -80,6 +82,104 @@ export function invoiceLineAmounts(item: api.InvoiceItem, vatPercent: number) {
     vat: Math.round((gross - net) * 100) / 100,
     gross: Math.round(gross * 100) / 100,
   };
+}
+
+// ── Print helpers (shared) ───────────────────────────────
+
+const safeFilePart = (value?: string) =>
+  String(value || "العميل").trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").slice(0, 80) || "العميل";
+
+const escapeHtml = (value: string) =>
+  value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const invoiceStandaloneCss = `
+  @page { size: A4; margin: 0; }
+  html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+  body { width: 210mm !important; min-height: 297mm !important; overflow: visible !important; }
+  .invoice-print-shell { width: 210mm !important; margin: 0 !important; padding: 0 !important; background: #fff !important; }
+  .quote-a4-doc {
+    width: 210mm !important; min-height: 297mm !important; margin: 0 !important;
+    border: 0 !important; border-radius: 0 !important; box-shadow: none !important;
+  }
+  .invoice-head-slim { padding: 18px 24px 16px !important; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .invoice-type-strip { padding: 14px 24px !important; }
+  .invoice-parties-slim { margin: 0 24px !important; }
+  .invoice-bottom-row { margin: 14px 24px !important; }
+  .quote-doc-table, .invoice-doc-table { width: 100% !important; }
+`;
+
+async function replaceInvoiceQrInClone(clone: HTMLElement, invoice: api.Invoice) {
+  const qrTarget = clone.querySelector<HTMLElement>(".zatca-qr-code");
+  if (!qrTarget) return;
+  const qrSrc = await QRCode.toDataURL(generateZATCAQR(invoice), {
+    errorCorrectionLevel: "M", margin: 1, width: 140,
+    color: { dark: "#000000", light: "#ffffff" },
+  });
+  const qrImage = document.createElement("img");
+  qrImage.src = qrSrc; qrImage.width = 140; qrImage.height = 140;
+  qrImage.className = "zatca-qr-code"; qrImage.alt = "ZATCA QR code";
+  qrTarget.replaceWith(qrImage);
+}
+
+function invoiceStylesMarkup() {
+  return Array.from(document.querySelectorAll<HTMLLinkElement | HTMLStyleElement>('link[rel="stylesheet"], style'))
+    .map((el) => el.outerHTML).join("\n");
+}
+
+export async function buildInvoiceDocumentHtml(invoice: api.Invoice) {
+  const node = document.querySelector<HTMLElement>(".quote-a4-doc");
+  if (!node) throw new Error("Invoice preview not ready — open preview first.");
+  const clone = node.cloneNode(true) as HTMLElement;
+  await replaceInvoiceQrInClone(clone, invoice);
+  const title = `فاتورة إلى ${safeFilePart(invoice.customer_name)}`;
+  return `<!doctype html>\n<html lang="ar" dir="rtl">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1" />\n  <base href="${window.location.origin}/" />\n  <title>${escapeHtml(title)}</title>\n  ${invoiceStylesMarkup()}\n  <style>${invoiceStandaloneCss}</style>\n</head>\n<body class="invoice-print-body">\n  <main class="invoice-print-shell">${clone.outerHTML}</main>\n</body>\n</html>`;
+}
+
+function waitForDocumentAssets(doc: Document) {
+  const fontsReady = doc.fonts?.ready?.catch(() => undefined) || Promise.resolve();
+  const imagesReady = Promise.all(Array.from(doc.images).map((img) => {
+    if (img.complete) return Promise.resolve();
+    return new Promise<void>((resolve) => { img.onload = () => resolve(); img.onerror = () => resolve(); });
+  }));
+  return Promise.all([fontsReady, imagesReady]);
+}
+
+async function writeInvoiceHtmlToFrame(frame: HTMLIFrameElement, html: string) {
+  const doc = frame.contentDocument;
+  if (!doc) throw new Error("Invoice frame not available.");
+  await new Promise<void>((resolve) => { frame.onload = () => resolve(); doc.open(); doc.write(html); doc.close(); });
+  await waitForDocumentAssets(doc);
+  return doc;
+}
+
+export async function saveInvoicePdf(invoice: api.Invoice) {
+  const html = await buildInvoiceDocumentHtml(invoice);
+  const frame = document.createElement("iframe");
+  frame.title = "invoice-pdf-frame";
+  Object.assign(frame.style, { position: "fixed", left: "-10000px", top: "0", width: "210mm", height: "297mm", border: "0", background: "#fff" });
+  document.body.appendChild(frame);
+  try {
+    const doc = await writeInvoiceHtmlToFrame(frame, html);
+    const node = doc.querySelector<HTMLElement>(".quote-a4-doc");
+    if (!node) throw new Error("PDF node not available.");
+    const canvas = await html2canvas(node, { backgroundColor: "#ffffff", logging: false, scale: 2, useCORS: true });
+    const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    const imgData = canvas.toDataURL("image/png");
+    const pw = 210, ph = 297, ih = (canvas.height * pw) / canvas.width;
+    if (ih <= ph + 2) { pdf.addImage(imgData, "PNG", 0, 0, pw, ph); }
+    else { let off = 0; pdf.addImage(imgData, "PNG", 0, off, pw, ih); while (ih + off > ph) { off -= ph; pdf.addPage(); pdf.addImage(imgData, "PNG", 0, off, pw, ih); } }
+    pdf.save(`${safeFilePart(invoice.invoice_number)}-${safeFilePart(invoice.customer_name)}.pdf`);
+  } finally { frame.remove(); }
+}
+
+export async function printInvoiceWindow(invoice: api.Invoice, printWindow: Window | null) {
+  if (!printWindow) throw new Error("Popup blocked — allow popups for this site.");
+  const html = await buildInvoiceDocumentHtml(invoice);
+  const doc = printWindow.document;
+  doc.open(); doc.write(html); doc.close();
+  await waitForDocumentAssets(doc);
+  printWindow.focus();
+  window.setTimeout(() => printWindow.print(), 250);
 }
 
 // ── Component ────────────────────────────────────────────
