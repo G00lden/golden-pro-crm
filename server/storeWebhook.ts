@@ -332,10 +332,26 @@ function addMonths(date: string, months: number) {
   return d.toISOString().slice(0, 10);
 }
 
+// Canonical phone form used across the CRM: digits only, KSA-normalized to a
+// 966 prefix (mirrors normalizePhone/toJid in server/whatsapp.ts) so store
+// imports match manually-entered customers and outbound WhatsApp resolves.
 function normalizedPhone(value: string) {
-  const trimmed = value.trim();
-  if (trimmed.startsWith("+")) return truncate(`+${trimmed.replace(/\D/g, "")}`, 24);
-  return truncate(trimmed.replace(/[^\d+]/g, ""), 24);
+  let digits = String(value || "").trim().replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
+  if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
+  return truncate(digits, 24);
+}
+
+// Salla splits the number into `mobile` (e.g. 551496683) and `mobile_code`
+// (e.g. "+966"). Join them so the country code is never dropped; an already
+// international number (starts with +) is returned as-is.
+function joinCountryCode(code: unknown, number: unknown) {
+  const num = String(number ?? "").trim();
+  if (!num || num.startsWith("+")) return num;
+  const dialCode = String(code ?? "").trim();
+  return dialCode ? `${dialCode}${num}` : num;
 }
 
 function skuMatchKey(value?: string | null) {
@@ -506,13 +522,16 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
   const customerPhone = normalizedPhone(
     firstText(
       customer.phone,
+      joinCountryCode(customer.mobile_code, customer.mobile),
       customer.mobile,
       customer.phone_number,
       order.customer_phone,
       order.phone,
       shipping.phone,
+      joinCountryCode(shipping.mobile_code, shipping.mobile),
       shipping.mobile,
       billing.phone,
+      joinCountryCode(billing.mobile_code, billing.mobile),
       billing.mobile,
     ),
   );
