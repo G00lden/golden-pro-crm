@@ -82,6 +82,18 @@
         }
       },
       {
+        "source": "/legal/privacy",
+        "destination": "/legal/privacy.html"
+      },
+      {
+        "source": "/legal/terms",
+        "destination": "/legal/terms.html"
+      },
+      {
+        "source": "/legal/refund",
+        "destination": "/legal/refund.html"
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
