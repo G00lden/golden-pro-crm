@@ -98,98 +98,109 @@ export function InvoicePreview({ invoice, onCopy, onPrint }: {
 
   return (
     <div className="quote-preview">
-      <section className="invoice-a4-doc" dir="rtl">
-        <header className="invoice-doc-head">
-          <div className="invoice-brand-block">
-            <img src="/brand/logo-256.png" alt="BreeXe Pro" height={48} style={{ objectFit: "contain", flexShrink: 0 }} />
+      <div className="quote-document-stage">
+        {/* ── A4 Page ─────────────────────────────── */}
+        <section className="quote-a4-doc invoice-doc-page" dir="rtl">
+
+          {/* Header — like quote cover-top */}
+          <header className="quote-cover-top invoice-head-slim">
             <div>
-              <span dir="ltr">{invoice.seller_name || sellerEnglishName}</span>
-              <strong>{sellerLegalName}</strong>
-              <small>{invoice.seller_address || "الرياض، المملكة العربية السعودية"}</small>
-              <small dir="ltr">{sellerPhone}</small>
+              <strong>{invoice.seller_name || sellerEnglishName}</strong>
+              <span>{sellerLegalName}</span>
+              <small style={{ display: "block", color: "rgba(255,255,255,0.65)", fontSize: 11, marginTop: 6 }}>
+                س.ت {sellerCrNumber} · الرقم الضريبي {invoice.seller_vat_number || "-"}
+              </small>
             </div>
-          </div>
-          <div className="invoice-title-block">
-            <span>{kind.en}</span>
-            <h2>{kind.ar}</h2>
-            {invoice.title && <em style={{ display: "block", fontStyle: "normal", fontSize: "0.8em", opacity: 0.7 }}>{invoice.title}</em>}
-            <strong>{invoice.invoice_number}</strong>
-          </div>
-        </header>
+            <div style={{ textAlign: "left" }}>
+              <img src="/brand/logo-256.png" alt="BreeXe Pro" className="invoice-brand-logo" />
+            </div>
+          </header>
 
-        <section className="invoice-identity-grid">
-          <article><span>رقم الفاتورة</span><strong>{invoice.invoice_number}</strong></article>
-          <article><span>تاريخ الإصدار</span><strong>{invoice.issue_date}</strong><small>{issueTime}</small></article>
-          <article><span>الرقم الضريبي للبائع</span><strong>{invoice.seller_vat_number || "-"}</strong></article>
-          <article><span>اسم البائع</span><strong>{exportSellerName || "-"}</strong></article>
-        </section>
+          {/* Invoice type & number */}
+          <div className="invoice-type-strip">
+            <div>
+              <span className="invoice-kind-en">{kind.en}</span>
+              <h2>{kind.ar}</h2>
+              {invoice.title && <em style={{ display: "block", fontStyle: "normal", fontSize: 13, opacity: 0.7, marginTop: 2 }}>{invoice.title}</em>}
+            </div>
+            <strong className="invoice-number-big">{invoice.invoice_number}</strong>
+          </div>
 
-        <section className="invoice-parties">
-          <article>
-            <h3>بيانات البائع</h3>
-            <p><span>الاسم:</span> <bdi>{invoice.seller_name || sellerEnglishName}</bdi></p>
-            <p><span>السجل/الاسم القانوني:</span> {sellerLegalName}</p>
-            <p><span>الرقم الضريبي:</span> {invoice.seller_vat_number || "-"}</p>
-            <p><span>السجل التجاري:</span> {sellerCrNumber}</p>
-            <p><span>الجوال:</span> <bdi dir="ltr">{sellerPhone}</bdi></p>
-            <p><span>العنوان:</span> {invoice.seller_address || "-"}</p>
-          </article>
-          <div className="invoice-party-side">
+          {/* Meta grid — invoice details */}
+          <div className="quote-client-grid" style={{ marginBottom: 14 }}>
+            <span>تاريخ الإصدار<br /><strong>{invoice.issue_date}</strong><br /><small style={{ direction: "ltr", display: "inline-block" }}>{issueTime}</small></span>
+            <span>تاريخ الاستحقاق<br /><strong>{invoice.due_date || "-"}</strong></span>
+            <span>اسم البائع<br /><strong>{exportSellerName || "-"}</strong></span>
+            <span>طريقة الدفع<br /><strong>{invoice.payment_method || "تحويل بنكي"}</strong></span>
+          </div>
+
+          {/* Parties — seller + client side by side */}
+          <div className="invoice-parties-slim">
             <article>
               <h3>بيانات العميل</h3>
-              <p><span>الاسم:</span> {invoice.customer_name}</p>
-              <p><span>الجوال:</span> {invoice.customer_phone || "-"}</p>
-              <p><span>المدينة:</span> {invoice.customer_city || "-"}</p>
-              <p><span>الرقم الضريبي:</span> {invoice.customer_vat || "-"}</p>
+              <p><span>الاسم</span> <strong>{invoice.customer_name}</strong></p>
+              <p><span>الجوال</span> <strong dir="ltr">{invoice.customer_phone || "-"}</strong></p>
+              <p><span>المدينة</span> <strong>{invoice.customer_city || "-"}</strong></p>
+              <p><span>الرقم الضريبي</span> <strong>{invoice.customer_vat || "-"}</strong></p>
             </article>
-            <aside className="invoice-zatca-card">
-              <QRCodeDisplay data={qrCode} size={132} />
-              <span>رمز الاستجابة السريع — متوافق مع زاتكا</span>
-            </aside>
+            <article>
+              <h3>بيانات البائع</h3>
+              <p><span>الاسم التجاري</span> <strong dir="ltr">{invoice.seller_name || sellerEnglishName}</strong></p>
+              <p><span>السجل التجاري</span> <strong>{sellerCrNumber}</strong></p>
+              <p><span>العنوان</span> <strong>{invoice.seller_address || "الرياض، المملكة العربية السعودية"}</strong></p>
+              <p><span>الجوال</span> <strong dir="ltr">{sellerPhone}</strong></p>
+            </article>
           </div>
-        </section>
 
-        <table className="invoice-doc-table">
-          <thead>
-            <tr>
-              <th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th>
-              <th>الخاضع للضريبة</th><th>VAT</th><th>الإجمالي شامل الضريبة</th>
-            </tr>
-          </thead>
-          <tbody>
-            {invoice.items.map((item, i) => {
-              const line = invoiceLineAmounts(item, invoice.vat_percent);
-              return (
-                <tr key={`${item.description}-${i}`}>
-                  <td>{i + 1}</td>
-                  <td>
-                    {item.description}
-                    {item.product_sku && <small style={{ display: "block", opacity: 0.6, fontSize: "0.85em", direction: "ltr", textAlign: "right" }}>{item.product_sku}</small>}
-                  </td>
-                  <td>{line.quantity}</td>
-                  <td>{money(line.unitNet, invoice.currency)}</td>
-                  <td>{money(line.net, invoice.currency)}</td>
-                  <td>{money(line.vat, invoice.currency)}</td>
-                  <td>{money(line.gross, invoice.currency)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+          {/* Table */}
+          <table className="quote-doc-table">
+            <thead>
+              <tr><th>#</th><th>البيان</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr>
+            </thead>
+            <tbody>
+              {invoice.items.map((item, i) => {
+                const line = invoiceLineAmounts(item, invoice.vat_percent);
+                return (
+                  <tr key={`${item.description}-${i}`}>
+                    <td>{i + 1}</td>
+                    <td>
+                      {item.description}
+                      {item.product_sku && <small style={{ display: "block", opacity: 0.55, fontSize: 10, direction: "ltr", textAlign: "right" }}>{item.product_sku}</small>}
+                    </td>
+                    <td>{line.quantity}</td>
+                    <td>{money(line.unitNet, invoice.currency)}</td>
+                    <td>{money(line.gross, invoice.currency)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
 
-        <section className="invoice-bottom-grid">
-          <div className="invoice-doc-totals">
-            <p><span>الإجمالي غير شامل الضريبة</span><strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
-            <p><span>الخصم</span><strong>{money(invoice.discount, invoice.currency)}</strong></p>
-            <p><span>ضريبة القيمة المضافة ({invoice.vat_percent}%)</span><strong>{money(invoice.vat_amount, invoice.currency)}</strong></p>
-            <p className="grand"><span>الإجمالي شامل الضريبة</span><strong>{money(invoice.total_with_vat, invoice.currency)}</strong></p>
+          {/* Totals + QR */}
+          <div className="invoice-bottom-row">
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+              <QRCodeDisplay data={qrCode} size={110} />
+              <span style={{ fontSize: 9, color: "var(--gray-500)" }}>رمز ZATCA</span>
+            </div>
+            <div className="invoice-doc-totals-slim">
+              <p><span>الإجمالي قبل الضريبة</span> <strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
+              <p><span>الخصم</span> <strong>{money(invoice.discount, invoice.currency)}</strong></p>
+              <p><span>ضريبة القيمة المضافة {invoice.vat_percent}%</span> <strong>{money(invoice.vat_amount, invoice.currency)}</strong></p>
+              <p className="grand"><span>الإجمالي شامل الضريبة</span> <strong>{money(invoice.total_with_vat, invoice.currency)}</strong></p>
+            </div>
           </div>
+
+          {invoice.terms && <p className="quote-doc-note" style={{ marginTop: 12 }}>{invoice.terms}</p>}
+          {invoice.notes && <p className="quote-doc-note">{invoice.notes}</p>}
+
+          <footer className="quote-doc-foot" style={{ marginTop: "auto", paddingTop: 16, borderTop: "1px solid var(--line)" }}>
+            <span>{sellerEnglishName}</span>
+            <span>صدرت بواسطة BreeXe Pro CRM</span>
+          </footer>
         </section>
+      </div>
 
-        {invoice.terms && <p className="invoice-doc-terms">{invoice.terms}</p>}
-        <footer className="invoice-doc-foot"><strong>{sellerEnglishName}</strong></footer>
-      </section>
-
+      {/* Export actions */}
       <div className="form-actions">
         <div className="invoice-export-options">
           <label>

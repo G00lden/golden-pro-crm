@@ -91,29 +91,20 @@ const invoiceStandaloneCss = `
   html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
   body { width: 210mm !important; min-height: 297mm !important; overflow: visible !important; }
   .invoice-print-shell { width: 210mm !important; margin: 0 !important; padding: 0 !important; background: #fff !important; }
-  .invoice-a4-doc {
+  .quote-a4-doc {
     width: 210mm !important;
     min-height: 297mm !important;
     margin: 0 !important;
-    padding: 10mm 12mm !important;
     border: 0 !important;
     border-radius: 0 !important;
     box-shadow: none !important;
   }
-  .invoice-doc-head { grid-template-columns: minmax(0, 1fr) minmax(170px, auto) !important; }
-  .invoice-identity-grid { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
-  .invoice-parties { grid-template-columns: minmax(0, 1fr) minmax(0, 250px) !important; align-items: stretch !important; }
-  .invoice-party-side { display: grid !important; gap: 8px !important; grid-template-rows: auto 1fr !important; }
-  .invoice-bottom-grid { display: flex !important; justify-content: flex-end !important; align-items: start !important; }
-  .invoice-doc-totals { width: min(100%, 300px) !important; }
-  .invoice-doc-head,
-  .invoice-identity-grid,
-  .invoice-parties,
-  .invoice-bottom-grid { gap: 7px !important; }
-  .invoice-parties,
-  .invoice-doc-table,
-  .invoice-bottom-grid { margin-bottom: 8px !important; }
-  .invoice-doc-head { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .invoice-head-slim { padding: 18px 24px 16px !important; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .invoice-type-strip { padding: 14px 24px !important; }
+  .invoice-parties-slim { margin: 0 24px !important; }
+  .invoice-bottom-row { margin: 14px 24px !important; }
+  .quote-doc-table, .invoice-doc-table { width: 100% !important; }
+  .invoice-doc-foot { break-inside: avoid; }
 `;
 
 async function replaceInvoiceQrInClone(clone: HTMLElement, invoice: api.Invoice) {
@@ -147,7 +138,7 @@ function invoiceStylesMarkup() {
 }
 
 async function buildInvoiceDocumentHtml(invoice: api.Invoice) {
-  const invoiceNode = document.querySelector<HTMLElement>(".invoice-a4-doc");
+  const invoiceNode = document.querySelector<HTMLElement>(".quote-a4-doc");
   if (!invoiceNode) throw new Error("Invoice preview is not ready.");
   const clone = invoiceNode.cloneNode(true) as HTMLElement;
   await replaceInvoiceQrInClone(clone, invoice);
@@ -210,7 +201,7 @@ async function saveInvoicePdfFile(invoice: api.Invoice) {
   document.body.appendChild(frame);
   try {
     const doc = await writeInvoiceHtmlToFrame(frame, html);
-    const invoiceNode = doc.querySelector<HTMLElement>(".invoice-a4-doc");
+    const invoiceNode = doc.querySelector<HTMLElement>(".quote-a4-doc");
     if (!invoiceNode) throw new Error("Invoice PDF node is not available.");
     const canvas = await html2canvas(invoiceNode, {
       backgroundColor: "#ffffff",
