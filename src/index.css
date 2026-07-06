@@ -1741,12 +1741,27 @@ main {
     linear-gradient(135deg, #28c7a0, #4da3ff 54%, #d6a84f);
   color: #07131b;
   font-weight: 950;
+  object-fit: contain;
+}
+
+/* Logo image overrides text styling */
+img.quote-logo-mark,
+img.quote-cover-logo {
+  background: transparent;
+  border-radius: 0;
+  color: transparent;
+  font-weight: normal;
 }
 
 .quote-logo-mark {
   width: 66px;
   height: 66px;
   font-size: 20px;
+}
+
+img.quote-logo-mark {
+  width: auto;
+  height: 48px;
 }
 
 .quote-cover-body {
@@ -1765,6 +1780,13 @@ main {
   border-radius: 32px;
   font-size: 42px;
   box-shadow: 0 18px 38px rgba(0, 0, 0, 0.18);
+}
+
+img.quote-cover-logo {
+  width: auto;
+  height: 120px;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .quote-cover-badge {

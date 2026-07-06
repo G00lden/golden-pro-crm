@@ -662,10 +662,10 @@ function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: ()
               <strong>{quoteSellerEnglishName}</strong>
               <span>{quoteSellerLegalName}</span>
             </div>
-            <div className="quote-logo-mark">BP</div>
+            <img src="/brand/logo-social.png" alt="BreeXe Pro" className="quote-logo-mark" />
           </header>
           <div className="quote-cover-body">
-            <div className="quote-cover-logo">BP</div>
+            <img src="/brand/logo-social.png" alt="BreeXe Pro" className="quote-cover-logo" />
             <span className="quote-cover-badge">{quote.quote_number}</span>
             <h2>{quote.title || "عرض سعر"}</h2>
             <p>{quote.customer_name} · {quote.issue_date}</p>
@@ -682,7 +682,7 @@ function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: ()
               <strong>{quoteSellerEnglishName}</strong>
               <span>{quoteSellerLegalName}</span>
             </div>
-            <div className="quote-logo-mark">BP</div>
+            <img src="/brand/logo-social.png" alt="BreeXe Pro" className="quote-logo-mark" />
           </header>
 
           <div className="quote-doc-title">
