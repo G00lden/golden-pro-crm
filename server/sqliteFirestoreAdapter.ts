@@ -273,13 +273,19 @@ function deserializeValue(column: string, value: unknown) {
   }
 }
 
-function mapRecord(record: Record<string, unknown>): Record<string, unknown> {
+function mapRecord(record: Record<string, unknown>, table?: string): Record<string, unknown> {
+  // Skip the 'id' column ONLY for tables whose primary key is not 'id' (i.e.
+  // settings, keyed by owner_uid). The previous heuristic — skip 'id' whenever
+  // the payload carried an owner_uid field — fired for EVERY table, so add()
+  // with an owner_uid dropped the generated id and inserted a NULL primary key.
+  const skipId = table
+    ? (primaryKeyByTable[table] || "id") !== "id"
+    : Boolean(record["owner_uid"]);
   const mapped: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
     if (value === undefined) continue;
     const col = mapToColumn(key);
-    // Skip 'id' for settings table (uses owner_uid as pk)
-    if (col === "id" && record["owner_uid"]) continue;
+    if (col === "id" && skipId) continue;
     mapped[col] = serializeValue(value);
   }
   return mapped;
@@ -307,9 +313,9 @@ class SqliteDocRef {
   async set(data: Record<string, unknown>, _options?: { merge?: boolean }) {
     const pk = this.primaryKey();
     const existing = this._getRaw();
-    const mapped = mapRecord(data);
+    const mapped = mapRecord(data, this.table);
     if (existing && _options?.merge) {
-      const merged = mapRecord({ ...existing, ...data });
+      const merged = mapRecord({ ...existing, ...data }, this.table);
       this._upsert(merged);
     } else {
       const record = { [pk]: this.id, ...mapped };
@@ -321,7 +327,7 @@ class SqliteDocRef {
     const pk = this.primaryKey();
     const existing = this._getRaw();
     if (!existing) return;
-    const mapped = mapRecord({ ...existing, ...data, updated_at: new Date().toISOString() });
+    const mapped = mapRecord({ ...existing, ...data, updated_at: new Date().toISOString() }, this.table);
     const keys = Object.keys(mapped).filter((k) => k !== pk);
     const setClause = keys.map((k) => `"${k}" = ?`).join(", ");
     const values = keys.map((k) => mapped[k]);
@@ -372,7 +378,7 @@ class SqliteCollectionRef {
     // Apply the same Firestore→SQLite column mapping as set()/update() so
     // callers that pass camelCase aliases (createdBy, customerName, ...) do
     // not blow up with "no such column" SQLITE_ERRORs.
-    const record = mapRecord({ id: ref.id, ...data });
+    const record = mapRecord({ id: ref.id, ...data }, this.table);
     const keys = Object.keys(record);
     const placeholders = keys.map(() => "?").join(", ");
     const quotedKeys = keys.map((k) => `"${k}"`).join(", ");
@@ -428,7 +434,15 @@ class SqliteCollectionRef {
 
     if (this.sorts.length > 0) {
       const orderClauses = this.sorts.map((s) => {
-        const col = s.field === "createdBy" ? "owner_uid" : s.field;
+        // Mirror the WHERE-clause alias mapping — otherwise orderBy("createdAt")
+        // emits ORDER BY "createdAt" (no such column) and the query throws.
+        const col = s.field === "createdBy" ? "owner_uid"
+          : s.field === "createdAt" ? "created_at"
+          : s.field === "updatedAt" ? "updated_at"
+          : s.field;
+        if (!isValidColumn(col)) {
+          throw new Error(`Invalid column: ${col}`);
+        }
         return `"${col}" ${s.direction === "desc" ? "DESC" : "ASC"}`;
       });
       sql += ` ORDER BY ${orderClauses.join(", ")}`;
