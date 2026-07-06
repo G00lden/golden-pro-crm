@@ -27,7 +27,7 @@ The release is gated by `docs/commercial-release-checklist.md` — that file is 
 - Spin up a subordinate agent (Codex / Claude / Hermes) to execute a fix you've specified.
 
 **You cannot:**
-- Bypass the safety gates (`OUTBOUND_LAUNCH_CODE`, `STORE_WEBHOOK_SECRET`, secret-in-repo checks).
+- Bypass the safety gates (`OUTBOUND_MODE`/`OUTBOUND_CONFIRM_CODE`/`OFFICIAL_LAUNCH_APPROVED`, `STORE_WEBHOOK_SECRET`, secret-in-repo checks).
 - Force-push `main` or rewrite shared history.
 - **Approve your own work** — see "Not-own-work check" below.
 
