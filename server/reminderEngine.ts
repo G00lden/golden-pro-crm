@@ -15,12 +15,7 @@ type ReminderType = "first" | "second" | "third" | "last" | "overdue";
 //   overdue → 3 days past due    (escalation reminder)
 // Legacy "last" alias is preserved as an alternate label for "overdue" so old
 // rows written before this upgrade keep flowing through the pipeline.
-const SMART_SCHEDULE: Array<{ stage: ReminderType; daysFromDue: number }> = [
-  { stage: "first", daysFromDue: -7 },
-  { stage: "second", daysFromDue: -1 },
-  { stage: "third", daysFromDue: 0 },
-  { stage: "overdue", daysFromDue: 3 },
-];
+// The offset→stage mapping lives in computeDueStage() below.
 
 function smartScheduleEnabled() {
   return process.env.REMINDER_SMART_SCHEDULE !== "false";
@@ -32,20 +27,31 @@ function diffDays(a: string, b: string): number {
   return Math.round((Date.UTC(ay, am - 1, ad) - Date.UTC(by, bm - 1, bd)) / 86_400_000);
 }
 
+// Progression order of the stages, used to guarantee each stage sends once.
+const STAGE_ORDER: Record<string, number> = { first: 0, second: 1, third: 2, last: 3, overdue: 3 };
+
 /**
- * Given the due date and today (in the configured timezone), returns the
- * stage that should be sent today, or null if the window hasn't opened yet.
- * Window matching is permissive ±1 day so a missed run still recovers.
+ * Given the due date and today (in the configured timezone), returns the single
+ * stage whose day this is, or null when no stage is due today.
+ *
+ * Each `offset` (= today − due) maps to EXACTLY ONE stage — the windows do not
+ * overlap — so the same stage isn't recomputed on several consecutive days.
+ * `runDueReminders` additionally gates on the stage progression, so together a
+ * stage is sent at most once and always with the date-correct copy.
+ *
+ *   offset ≤ -2 → first    (early heads-up; also recovers missed runs up to 2d out)
+ *   offset = -1 → second   ("tomorrow")
+ *   offset =  0 → third    ("today")
+ *   offset 1..2 → null     (grace period — nothing)
+ *   offset ≥  3 → overdue  (escalation)
  */
 function computeDueStage(nextMaintenance: string, today: string): ReminderType | null {
   const offset = diffDays(today, nextMaintenance);
-  for (const slot of SMART_SCHEDULE) {
-    if (offset >= slot.daysFromDue - 1 && offset <= slot.daysFromDue + 1) {
-      return slot.stage;
-    }
-  }
-  if (offset >= 4) return "overdue"; // way past due, keep escalating
-  return null;
+  if (offset <= -2) return "first";
+  if (offset === -1) return "second";
+  if (offset === 0) return "third";
+  if (offset >= 3) return "overdue";
+  return null; // 1–2 days past due: grace period
 }
 
 type Installation = {
@@ -386,7 +392,10 @@ export async function sendReminderForInstallation(
   }
 
   const remindCount = Number(inst.remind_count || 0) + 1;
-  const nextReminderType = getNextReminderType(inst.next_remind_type, remindCount);
+  // Advance from the stage we actually SENT (reminderType), not the stored
+  // next_remind_type — in smart mode the date can jump the stage forward, and
+  // the pointer must follow what went out so the next stage is correct.
+  const nextReminderType = getNextReminderType(reminderType, remindCount);
   const reminderRef = adminDb.collection("reminders").doc();
   await reminderRef.set({
     installation_id: installationId,
@@ -600,17 +609,35 @@ export async function runDueReminders(options: ReminderRunOptions = {}) {
     for (const doc of snap.docs) {
       const inst = doc.data() as Installation;
 
-      // Smart schedule: compute today's expected stage from the due date. If
-      // the schedule doesn't open a slot for today, skip silently. Otherwise
-      // override next_remind_type so the right template/copy goes out.
-      let effectiveStage: ReminderType | null = inst.next_remind_type || null;
+      // Smart schedule: the stage is decided purely by today's date (no fallback
+      // to the stored stage — that reintroduced early/duplicate sends). Legacy
+      // mode still walks next_remind_type directly.
+      let effectiveStage: ReminderType | null;
       if (useSmart && inst.next_maintenance) {
-        effectiveStage = computeDueStage(inst.next_maintenance, today) || inst.next_remind_type || null;
+        effectiveStage = computeDueStage(inst.next_maintenance, today);
+      } else {
+        effectiveStage = inst.next_remind_type || null;
       }
 
       if (!effectiveStage) {
-        results.push({ success: false, skipped: true, installation_id: doc.id, reason: "لا يوجد نوع تذكير تال." });
+        results.push({ success: false, skipped: true, installation_id: doc.id, reason: "لا يوجد تذكير مستحق اليوم." });
         continue;
+      }
+
+      // Progression gate (smart mode): send a stage only if it hasn't been sent
+      // yet. next_remind_type == null means the cycle already finished, so the
+      // date window must not re-arm it (e.g. resending "overdue" every day).
+      if (useSmart) {
+        if (inst.next_remind_type == null) {
+          results.push({ success: false, skipped: true, installation_id: doc.id, reason: "اكتملت دورة التذكير." });
+          continue;
+        }
+        const dueIdx = STAGE_ORDER[effectiveStage] ?? 0;
+        const expectedIdx = STAGE_ORDER[inst.next_remind_type] ?? 0;
+        if (dueIdx < expectedIdx) {
+          results.push({ success: false, skipped: true, installation_id: doc.id, reason: "تم إرسال هذه المرحلة مسبقًا." });
+          continue;
+        }
       }
       if (isSentToday(inst)) {
         results.push({ success: false, skipped: true, installation_id: doc.id, reason: "تم إرسال تذكير اليوم." });
