@@ -49,11 +49,15 @@ export default function TechniciansPage({
           initial={technician}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
-            if (technician) await api.updateTechnician(technician.id, payload);
-            else await api.createTechnician(payload);
-            notify("تم حفظ الفني");
-            setModal(null);
-            await Promise.all([technicians.refresh(), todayBookings.refresh(), refreshStats()]);
+            try {
+              if (technician) await api.updateTechnician(technician.id, payload);
+              else await api.createTechnician(payload);
+              notify("تم حفظ الفني");
+              setModal(null);
+              await Promise.all([technicians.refresh(), todayBookings.refresh(), refreshStats()]);
+            } catch (error) {
+              notify(error instanceof Error ? error.message : "تعذر حفظ الفني", false);
+            }
           }}
         />
       ),

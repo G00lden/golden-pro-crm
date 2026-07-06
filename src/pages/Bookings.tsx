@@ -69,8 +69,14 @@ export default function BookingsPage({
           selectedDate={date}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
-            const bookingId = booking ? booking.id : await api.createBooking(payload);
-            if (booking) await api.updateBooking(booking.id, payload);
+            let bookingId: string;
+            try {
+              bookingId = booking ? booking.id : await api.createBooking(payload);
+              if (booking) await api.updateBooking(booking.id, payload);
+            } catch (error) {
+              notify(error instanceof Error ? error.message : "تعذر حفظ الحجز", false);
+              return;
+            }
             const shouldNotify = shouldNotifyTechnician(booking, payload);
             if (shouldNotify) {
               try {

@@ -46,11 +46,15 @@ export default function ProductsPage({
           initial={product}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
-            if (product) await api.updateProduct(product.id, payload);
-            else await api.createProduct(payload);
-            notify("تم حفظ المنتج");
-            setModal(null);
-            await Promise.all([products.refresh(), refreshStats()]);
+            try {
+              if (product) await api.updateProduct(product.id, payload);
+              else await api.createProduct(payload);
+              notify("تم حفظ المنتج");
+              setModal(null);
+              await Promise.all([products.refresh(), refreshStats()]);
+            } catch (error) {
+              notify(error instanceof Error ? error.message : "تعذر حفظ المنتج", false);
+            }
           }}
         />
       ),

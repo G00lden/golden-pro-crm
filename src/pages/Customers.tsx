@@ -35,11 +35,15 @@ export default function CustomersPage({
           initial={customer}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
-            if (customer) await api.updateCustomer(customer.id, payload);
-            else await api.createCustomer(payload);
-            notify("تم حفظ العميل");
-            setModal(null);
-            await Promise.all([customers.refresh(), refreshStats()]);
+            try {
+              if (customer) await api.updateCustomer(customer.id, payload);
+              else await api.createCustomer(payload);
+              notify("تم حفظ العميل");
+              setModal(null);
+              await Promise.all([customers.refresh(), refreshStats()]);
+            } catch (error) {
+              notify(error instanceof Error ? error.message : "تعذر حفظ العميل", false);
+            }
           }}
         />
       ),
