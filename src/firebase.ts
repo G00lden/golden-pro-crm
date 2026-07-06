@@ -64,6 +64,14 @@ const LOCAL_AUTH_EVENT = "golden-pro-crm-local-auth";
 const isBrowser = typeof window !== "undefined";
 const isLocalHost = isBrowser && ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
 export const localAuthEnabled = isBrowser && (import.meta.env.VITE_LOCAL_AUTH === "true" || (import.meta.env.DEV && isLocalHost));
+
+// Build the `local-dev:` bearer token. When VITE_LOCAL_AUTH_TOKEN is configured
+// (build-time), the shared secret is appended so the server can verify it and
+// reject forged tokens; otherwise the legacy `local-dev:<uid>` form is used.
+export function buildLocalToken(uid: string): string {
+  const secret = (import.meta.env.VITE_LOCAL_AUTH_TOKEN as string | undefined) || "";
+  return secret ? `local-dev:${uid}:${secret}` : `local-dev:${uid}`;
+}
 const serverDataEnabled =
   import.meta.env.VITE_DATA_PROVIDER === "supabase" ||
   import.meta.env.VITE_DB_PROVIDER === "supabase";
@@ -125,7 +133,7 @@ export function getCurrentAppUser(): AppUser | null {
       email: account.email,
       displayName: account.name,
       local: true,
-      getIdToken: async () => `local-dev:${account.uid}`,
+      getIdToken: async () => buildLocalToken(account.uid),
     };
   } catch {
     return null;

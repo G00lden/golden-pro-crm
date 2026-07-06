@@ -62,7 +62,9 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
     next();
     return;
   }
-  if (allow.length === 0 || allow.includes(user.uid)) {
+  // Fail closed: a non-role-admin passes only when explicitly allow-listed.
+  // (Previously an empty allow-list let ANY authenticated user through.)
+  if (allow.includes(user.uid)) {
     next();
     return;
   }

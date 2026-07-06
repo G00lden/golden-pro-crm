@@ -358,8 +358,14 @@ export function registerUserAdminRoutes(app: Express) {
 
   app.post("/api/admin/users/:id/deactivate", requireRole(["admin"]), (req, res) => {
     const id = req.params.id;
-    if (!getUserById(id)) {
+    const target = getUserById(id);
+    if (!target) {
       res.status(404).json({ error: "المستخدم غير موجود." });
+      return;
+    }
+    const me = (req as AuthedRequest).user;
+    if (target.uid && me && target.uid === me.uid) {
+      res.status(400).json({ error: "لا يمكنك تعطيل حسابك أثناء استخدامه." });
       return;
     }
     const updated = updateUserFields(id, { active: false });

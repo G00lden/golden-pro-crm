@@ -17,6 +17,7 @@ import {
   orderBy,
   writeBatch,
   getCurrentAppUser,
+  buildLocalToken,
 } from "./firebase";
 
 export type Customer = {
@@ -999,7 +1000,7 @@ function requestOutboundCode() {
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const user = getCurrentAppUser();
-  const token = user?.local ? `local-dev:${user.uid}` : await user?.getIdToken?.();
+  const token = user?.local ? buildLocalToken(user.uid) : await user?.getIdToken?.();
   if (!token) throw new Error("يجب تسجيل الدخول أولا.");
 
   const headers = new Headers(init.headers);

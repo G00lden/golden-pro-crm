@@ -103,6 +103,10 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
   };
 
   const toggleActive = async (user: api.ManagedAppUser) => {
+    if (user.active && user.uid && user.uid === currentUid) {
+      notify("لا يمكنك تعليق حسابك أثناء استخدامه.", false);
+      return;
+    }
     try {
       await api.setAppUserActive(user.id, !user.active);
       notify(user.active ? "تم تعليق المستخدم" : "تم تفعيل المستخدم");
