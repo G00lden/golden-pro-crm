@@ -64,6 +64,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [qrAgeSec, setQrAgeSec] = useState(0);
   const lastQrSeenAt = useRef<number | null>(null);
+  const lastQrValue = useRef<string | null>(null);
 
   const [sendPhone, setSendPhone] = useState("");
   const [sendMessage, setSendMessage] = useState("رسالة اختبار من نظام BreeXe Pro CRM");
@@ -89,8 +90,16 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
       setRecent(msgs.items);
       setTemplates(tpls.templates);
       if (s.qr) {
-        if (lastQrSeenAt.current === null) lastQrSeenAt.current = Date.now();
+        // Restart the age clock every time a *new* QR string arrives (the code
+        // rotates ~every minute). Previously the timestamp was set only once,
+        // so the counter kept climbing across rotations and never reset.
+        if (lastQrValue.current !== s.qr) {
+          lastQrValue.current = s.qr;
+          lastQrSeenAt.current = Date.now();
+          setQrAgeSec(0);
+        }
       } else {
+        lastQrValue.current = null;
         lastQrSeenAt.current = null;
         setQrAgeSec(0);
       }
@@ -127,6 +136,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
       const s = await api.connectWhatsApp();
       setStatus(s);
       lastQrSeenAt.current = null;
+      lastQrValue.current = null;
       notify("تم بدء الاتصال — امسح الـ QR إذا ظهر");
       setTimeout(refresh, 2000);
     } catch (err) {
