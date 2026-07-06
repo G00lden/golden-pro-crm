@@ -209,6 +209,9 @@ function InvoiceFormModal({
   const [dueDate, setDueDate] = useState(initial?.due_date || "");
   const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent || 15));
   const [discount, setDiscount] = useState(String(initial?.discount || 0));
+  const [discountMode, setDiscountMode] = useState<'fixed' | 'percent'>(initial?.discount_mode || 'fixed');
+  const [paymentMethod, setPaymentMethod] = useState(initial?.payment_method || 'تحويل بنكي');
+  const [installments, setInstallments] = useState(String(initial?.installments || 1));
   const [sellerName, setSellerName] = useState(initial?.seller_name || "");
   const [sellerVat, setSellerVat] = useState(initial?.seller_vat_number || "");
   const [sellerAddress, setSellerAddress] = useState(initial?.seller_address || "");
@@ -266,10 +269,13 @@ function InvoiceFormModal({
         due_date: dueDate || null,
         vat_percent: Number(vatPercent || 15),
         discount: Number(discount || 0),
+        discount_mode: discountMode,
         currency: "SAR",
         items: normalizedItems.filter((i) => i.description.trim()),
         notes: notes.trim(),
         terms: terms.trim(),
+        payment_method: paymentMethod,
+        installments: Math.max(1, Number(installments || 1)),
         seller_name: sellerName.trim() || "Breexe Pro Co.",
         seller_vat_number: sellerVat.trim(),
         seller_address: sellerAddress.trim(),
@@ -313,7 +319,37 @@ function InvoiceFormModal({
           </select>
         </label>
         <label className="field"><span>نسبة الضريبة %</span><input className="input" type="number" step="0.01" value={vatPercent} onChange={(e) => setVatPercent(e.target.value)} /></label>
-        <label className="field"><span>الخصم</span><input className="input" type="number" step="0.01" value={discount} onChange={(e) => setDiscount(e.target.value)} /></label>
+        <label className="field">
+          <span>الخصم</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input className="input" type="number" step="0.01" min="0" value={discount} onChange={(e) => setDiscount(e.target.value)} style={{ flex: 1 }} />
+            <select className="input" value={discountMode} onChange={(e) => setDiscountMode(e.target.value as 'fixed' | 'percent')} style={{ width: 90 }}>
+              <option value="fixed">SAR</option>
+              <option value="percent">%</option>
+            </select>
+          </div>
+        </label>
+        <label className="field">
+          <span>طريقة الدفع</span>
+          <select className="input" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
+            <option value="تحويل بنكي">تحويل بنكي</option>
+            <option value="نقدي">نقدي</option>
+            <option value="بطاقة ائتمان">بطاقة ائتمان</option>
+            <option value="مدى / أبل باي">مدى / أبل باي</option>
+            <option value="شيك">شيك</option>
+            <option value="حوالة">حوالة</option>
+          </select>
+        </label>
+        <label className="field"><span>عدد الدفعات</span><input className="input" type="number" min="1" max="24" value={installments} onChange={(e) => setInstallments(e.target.value)} /></label>
+        {initial && initial.total_paid ? (
+          <label className="field">
+            <span>المدفوع / المتبقي</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span className="badge success">{money(initial.total_paid)} مدفوع</span>
+              <span className="badge warn">{money(Math.max(0, initial.total_with_vat - initial.total_paid))} متبقي</span>
+            </div>
+          </label>
+        ) : null}
       </div>
       <div className="form-grid">
         <label className="field"><span>اسم البائع</span><input className="input" value={sellerName} onChange={(e) => setSellerName(e.target.value)} /></label>

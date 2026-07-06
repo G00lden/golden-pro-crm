@@ -555,6 +555,7 @@ export type Invoice = {
   payment_method?: string;
   subtotal: number;
   discount: number;
+  discount_mode?: 'fixed' | 'percent';
   vat_percent: number;  // 15 for ZATCA standard
   vat_amount: number;
   total_with_vat: number;
@@ -563,6 +564,8 @@ export type Invoice = {
   items: InvoiceItem[];
   notes?: string;
   terms?: string;
+  installments?: number;
+  total_paid?: number;
   seller_name: string;
   seller_vat_number: string;
   seller_address: string;
@@ -1659,7 +1662,7 @@ function normalizeInvoiceItems(items: InvoiceItem[] = []) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15) {
+function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15, discount_mode: 'fixed' | 'percent' = 'fixed') {
   const cleanVatPercent = Math.max(0, Number(vat_percent || 15));
   const vatRate = cleanVatPercent / 100;
   const subtotal = items.reduce((sum, item) => {
@@ -1667,11 +1670,13 @@ function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15) {
     return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
   }, 0);
   const cleanDiscount = Math.max(0, Number(discount || 0));
-  const withoutVat = Math.max(0, subtotal - cleanDiscount);
+  const discountAmount = discount_mode === 'percent' ? subtotal * (cleanDiscount / 100) : cleanDiscount;
+  const withoutVat = Math.max(0, subtotal - discountAmount);
   const vatAmount = withoutVat * vatRate;
   return {
     subtotal: Math.round(subtotal * 100) / 100,
-    discount: cleanDiscount,
+    discount: Math.round(discountAmount * 100) / 100,
+    discount_mode,
     vat_percent: cleanVatPercent,
     vat_amount: Math.round(vatAmount * 100) / 100,
     total_with_vat: Math.round((withoutVat + vatAmount) * 100) / 100,
@@ -1715,7 +1720,7 @@ function invoiceStats(invoices: Invoice[]): InvoiceStats {
 
 function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings, existing?: Invoice): Invoice {
   const items = normalizeInvoiceItems(data.items);
-  const totals = invoiceTotals(items, data.discount, data.vat_percent);
+  const totals = invoiceTotals(items, data.discount, data.vat_percent, data.discount_mode || 'fixed');
   const now = nowIso();
   return {
     id: existing?.id || localId("inv"),
@@ -1732,6 +1737,8 @@ function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings
     due_date: data.due_date ?? existing?.due_date ?? addDays(today(), 30),
     paid_at: data.status === "paid" && !existing?.paid_at ? now : existing?.paid_at || null,
     payment_method: data.payment_method || existing?.payment_method || "",
+    installments: data.installments || existing?.installments || 1,
+    total_paid: existing?.total_paid || 0,
     currency: data.currency || existing?.currency || "SAR",
     items,
     notes: String(data.notes || existing?.notes || "").trim(),
@@ -1831,7 +1838,7 @@ export const updateInvoice = async (id: string, data: InvoiceInput) => {
       seller_name: String(data.seller_name || "").trim(),
       seller_vat_number: String(data.seller_vat_number || "").trim(),
       seller_address: String(data.seller_address || "").trim(),
-      ...invoiceTotals(items, data.discount, data.vat_percent),
+      ...invoiceTotals(items, data.discount, data.vat_percent, data.discount_mode || 'fixed'),
       updatedAt: nowIso(),
     }),
     OperationType.UPDATE,

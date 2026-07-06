@@ -255,7 +255,7 @@ export function InvoicePreview({ invoice, onCopy, onPrint }: {
           {/* Table */}
           <table className="quote-doc-table">
             <thead>
-              <tr><th>#</th><th>البيان</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr>
+              <tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة</th><th>الضريبة</th><th>الإجمالي</th></tr>
             </thead>
             <tbody>
               {invoice.items.map((item, i) => {
@@ -269,6 +269,7 @@ export function InvoicePreview({ invoice, onCopy, onPrint }: {
                     </td>
                     <td>{line.quantity}</td>
                     <td>{money(line.unitNet, invoice.currency)}</td>
+                    <td>{money(line.vat, invoice.currency)}</td>
                     <td>{money(line.gross, invoice.currency)}</td>
                   </tr>
                 );
@@ -284,9 +285,23 @@ export function InvoicePreview({ invoice, onCopy, onPrint }: {
             </div>
             <div className="invoice-doc-totals-slim">
               <p><span>الإجمالي قبل الضريبة</span> <strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
-              <p><span>الخصم</span> <strong>{money(invoice.discount, invoice.currency)}</strong></p>
+              {invoice.discount > 0 && (
+                <p><span>الخصم {invoice.discount_mode === 'percent' ? `(${invoice.discount}%)` : ''}</span> <strong>-{money(invoice.discount, invoice.currency)}</strong></p>
+              )}
               <p><span>ضريبة القيمة المضافة {invoice.vat_percent}%</span> <strong>{money(invoice.vat_amount, invoice.currency)}</strong></p>
               <p className="grand"><span>الإجمالي شامل الضريبة</span> <strong>{money(invoice.total_with_vat, invoice.currency)}</strong></p>
+              {invoice.installments && invoice.installments > 1 && (
+                <p><span>عدد الدفعات</span> <strong>{invoice.installments}</strong></p>
+              )}
+              {invoice.total_paid ? (
+                <>
+                  <p><span>المدفوع</span> <strong style={{ color: "var(--green-600)" }}>{money(invoice.total_paid, invoice.currency)}</strong></p>
+                  <p style={{ borderTop: "1px dashed var(--line)", paddingTop: 4 }}><span>المتبقي</span> <strong style={{ color: "var(--red-500)" }}>{money(Math.max(0, invoice.total_with_vat - invoice.total_paid), invoice.currency)}</strong></p>
+                </>
+              ) : null}
+              {invoice.payment_method && (
+                <p><span>طريقة الدفع</span> <strong>{invoice.payment_method}</strong></p>
+              )}
             </div>
           </div>
 
