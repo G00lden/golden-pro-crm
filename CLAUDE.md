@@ -27,7 +27,7 @@
 - **Never** commit secrets, `.env*`, local databases, `*-credentials*.json`, or `wa-qr.png`. `.gitignore` enforces this; double-check `git status` before commit.
 - **Never** force-push `main`. Branch + PR for anything multi-file.
 - **Never** mutate `AGENTS.md` or this file silently — they are the shared contract; change them deliberately.
-- Outbound WhatsApp is gated by `OUTBOUND_LAUNCH_CODE` env. Don't bypass it; the safety is intentional.
+- Outbound WhatsApp is gated by `OUTBOUND_MODE` (default `dry_run` = never sends), plus `OUTBOUND_CONFIRM_CODE`, `OUTBOUND_TEST_PHONE_ALLOWLIST`, and `OFFICIAL_LAUNCH_APPROVED` (see `server/outboundSafety.ts` and `.env.example`). Don't bypass these; the safety is intentional. (There is no `OUTBOUND_LAUNCH_CODE` env — that was a doc-only misnomer.)
 
 ## "Where it stopped" priorities
 

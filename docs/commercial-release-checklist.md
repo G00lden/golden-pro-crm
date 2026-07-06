@@ -33,7 +33,7 @@
 | 2.1 🔒 | No secrets ever in repo (precheck scan clean) | ✓ | supervisor | `.gitignore` hardened; `npm run supervisor:precheck` enforces |
 | 2.2 🔒 | Auth required on every mutating `/api/*` route | ◐ | supervisor | spot-checked; need full audit |
 | 2.3 🔒 | Store webhook HMAC verification mandatory in prod | ✓ | n/a | implemented in `server/storeWebhook.ts` |
-| 2.4 🔒 | Outbound WhatsApp gated by launch code in prod | ✓ | n/a | `OUTBOUND_LAUNCH_CODE` enforced |
+| 2.4 🔒 | Outbound WhatsApp gated in prod | ✓ | n/a | `OUTBOUND_MODE`/`OUTBOUND_CONFIRM_CODE`/`OFFICIAL_LAUNCH_APPROVED` enforced (server/outboundSafety.ts) |
 | 2.5 🔒 | Rate limiting on auth + webhooks + global `/api` | ✓ | codex | verified 2026-06-24: per-IP limiter on webhooks + global `/api`; live 429 confirmed |
 | 2.6 🔒 | Input validation (zod) on every public endpoint | ✓ | codex | verified 2026-06-24: `server/validation.ts` + `validate()` on customers/quotes/whatsapp/webhook/salla; bad input → 400 live |
 | 2.7 🔒 | npm audit critical=0, high≤1 (or documented exception) | ◐ | codex | re-checked 2026-07-04: `npm audit --omit=dev` → 11 vulns (1 critical: `protobufjs`; 2 high: `@whiskeysockets/baileys`, `@whiskeysockets/libsignal-node`; 8 moderate; 1 low) — same transitive-dependency shape as 2026-06-18, no regression, still unresolved upstream. |
