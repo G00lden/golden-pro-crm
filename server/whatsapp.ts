@@ -705,7 +705,9 @@ export async function sendWhatsAppTemplate(opts: {
   owner_uid?: string;
   outboundCode?: string;
 }) {
-  const body = renderTemplate(opts.template, opts.vars || {});
+  // strict:false → a missing/empty variable becomes "" instead of leaking the
+  // literal "{placeholder}" to the customer (e.g. "عزيزي {customer_name}،").
+  const body = renderTemplate(opts.template, opts.vars || {}, { strict: false });
   const result = await whatsappService.sendText(opts.phone, body, { confirmationCode: opts.outboundCode });
 
   recordWhatsAppMessage({
