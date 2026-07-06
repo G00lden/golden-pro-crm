@@ -722,7 +722,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
       <section className="invoice-a4-doc" dir="rtl">
         <header className="invoice-doc-head">
           <div className="invoice-brand-block">
-            <img src="/brand/logo-social.png" alt="BreeXe Pro" height={48} style={{ objectFit: "contain", flexShrink: 0 }} />
+            <img src="/brand/logo-256.png" alt="BreeXe Pro" height={48} style={{ objectFit: "contain", flexShrink: 0 }} />
             <div>
               <span dir="ltr">{invoice.seller_name || sellerEnglishName}</span>
               <strong>{sellerLegalName}</strong>

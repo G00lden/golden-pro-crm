@@ -526,7 +526,7 @@ export type QuoteListResponse = {
   stats: QuoteStats;
 };
 
-export type InvoiceStatus = "draft" | "issued" | "sent" | "paid" | "cancelled" | "refunded";
+export type InvoiceStatus = "draft" | "open" | "issued" | "sent" | "partially_paid" | "paid" | "cancelled" | "refunded";
 
 export type InvoiceItem = {
   product_id?: string | null;
@@ -580,19 +580,75 @@ export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "subt
 export type InvoiceStats = {
   total: number;
   draft: number;
+  open: number;
   issued: number;
   sent: number;
+  partially_paid: number;
   paid: number;
   cancelled: number;
   refunded: number;
   total_value: number;
   paid_value: number;
+  outstanding_value: number;
+  overdue_value: number;
 };
 
 export type InvoiceListResponse = {
   data: Invoice[];
   total: number;
   stats: InvoiceStats;
+};
+
+export type PaymentMethod = "تحويل بنكي" | "نقدي" | "بطاقة ائتمان" | "مدى" | "شيك" | "أخرى";
+
+export type Payment = {
+  id: string;
+  invoice_id: string;
+  invoice_number: string;
+  customer_name: string;
+  amount: number;
+  method: PaymentMethod;
+  reference?: string;
+  date: string;
+  note?: string;
+  createdBy?: string;
+  createdAt?: string;
+};
+
+export type PaymentInput = {
+  invoice_id: string;
+  amount: number;
+  method: PaymentMethod;
+  reference?: string;
+  date: string;
+  note?: string;
+};
+
+export type CreditNoteInput = {
+  invoice_id: string;
+  reason: string;
+  refund_amount: number;
+  items?: Array<{ description: string; quantity: number; unit_price: number }>;
+};
+
+export type AccountingDashboard = {
+  total_outstanding: number;
+  total_overdue: number;
+  paid_this_month: number;
+  paid_this_month_count: number;
+  draft_count: number;
+  open_count: number;
+  overdue_count: number;
+  overdue_invoices: Array<{
+    id: string;
+    invoice_number: string;
+    customer_name: string;
+    total: number;
+    paid: number;
+    due_date: string;
+    days_overdue: number;
+  }>;
+  recent_payments: Array<Payment>;
 };
 
 const nowIso = () => new Date().toISOString();
@@ -1635,16 +1691,25 @@ function filterInvoices(invoices: Invoice[], filter: { search?: string; status?:
 }
 
 function invoiceStats(invoices: Invoice[]): InvoiceStats {
+  const todayStr = new Date().toLocaleDateString("en-CA");
   return {
     total: invoices.length,
     draft: invoices.filter((item) => item.status === "draft").length,
+    open: invoices.filter((item) => item.status === "open").length,
     issued: invoices.filter((item) => item.status === "issued").length,
     sent: invoices.filter((item) => item.status === "sent").length,
+    partially_paid: invoices.filter((item) => item.status === "partially_paid").length,
     paid: invoices.filter((item) => item.status === "paid").length,
     cancelled: invoices.filter((item) => item.status === "cancelled").length,
     refunded: invoices.filter((item) => item.status === "refunded").length,
     total_value: invoices.reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
     paid_value: invoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+    outstanding_value: invoices
+      .filter((item) => !["paid", "cancelled", "refunded"].includes(item.status))
+      .reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+    overdue_value: invoices
+      .filter((item) => item.due_date && item.due_date < todayStr && !["paid", "cancelled", "refunded"].includes(item.status))
+      .reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
   };
 }
 
@@ -1933,6 +1998,103 @@ export const sendInvoiceWhatsApp = async (invoice: Invoice, message: string) => 
       metadata,
     }),
   });
+};
+
+/* ── Accounting: Payments & Credit Notes ────────────────── */
+
+export const getInvoicePayments = async (invoiceId: string): Promise<Payment[]> => {
+  if (serverDataEnabled()) {
+    return apiFetch<Payment[]>(`/api/invoices/${invoiceId}/payments`);
+  }
+  const user = getCurrentAppUser();
+  if (!user) return [];
+  const snap = await getDocs(query(
+    collection(db, "payments"),
+    where("invoice_id", "==", invoiceId),
+    orderBy("createdAt", "desc"),
+  ));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Payment);
+};
+
+export const registerPayment = async (input: PaymentInput) => {
+  if (serverDataEnabled()) {
+    return apiFetch<Payment>(`/api/invoices/${input.invoice_id}/payments`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+  const user = getUserOrThrow();
+  const uid = user.uid;
+  const id = doc(collection(db, "payments")).id;
+  const now = nowIso();
+  const payment: Payment = {
+    id,
+    ...input,
+    invoice_number: "",
+    customer_name: "",
+    createdBy: uid,
+    createdAt: now,
+  };
+  await wrap(
+    () => setDoc(doc(db, "payments", id), withoutId(payment)),
+    OperationType.CREATE,
+    `payments/${id}`,
+  );
+  return payment;
+};
+
+export const voidPayment = async (paymentId: string) => {
+  if (serverDataEnabled()) {
+    return apiFetch(`/api/payments/${paymentId}`, { method: "DELETE" });
+  }
+  return wrap(
+    () => deleteDoc(doc(db, "payments", paymentId)),
+    OperationType.DELETE,
+    `payments/${paymentId}`,
+  );
+};
+
+export const createCreditNote = async (input: CreditNoteInput) => {
+  if (serverDataEnabled()) {
+    return apiFetch<Invoice>(`/api/invoices/${input.invoice_id}/credit-note`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+  throw new Error("Credit notes require server mode.");
+};
+
+export const getAccountingDashboard = async (): Promise<AccountingDashboard> => {
+  if (serverDataEnabled()) {
+    return apiFetch<AccountingDashboard>("/api/accounting/dashboard");
+  }
+  const user = getCurrentAppUser();
+  if (!user) {
+    return { total_outstanding: 0, total_overdue: 0, paid_this_month: 0, paid_this_month_count: 0, draft_count: 0, open_count: 0, overdue_count: 0, overdue_invoices: [], recent_payments: [] };
+  }
+  const invoices = loadLocalDb(user.uid).invoices;
+  const todayStr = new Date().toLocaleDateString("en-CA");
+  const active = invoices.filter((i) => !["paid", "cancelled", "refunded"].includes(i.status));
+  const overdue = active.filter((i) => i.due_date && i.due_date < todayStr);
+  return {
+    total_outstanding: active.reduce((s, i) => s + Number(i.total_with_vat || 0), 0),
+    total_overdue: overdue.reduce((s, i) => s + Number(i.total_with_vat || 0), 0),
+    paid_this_month: 0,
+    paid_this_month_count: 0,
+    draft_count: invoices.filter((i) => i.status === "draft").length,
+    open_count: invoices.filter((i) => i.status === "open").length,
+    overdue_count: overdue.length,
+    overdue_invoices: overdue.map((i) => ({
+      id: i.id,
+      invoice_number: i.invoice_number,
+      customer_name: i.customer_name,
+      total: i.total_with_vat,
+      paid: 0,
+      due_date: i.due_date || "",
+      days_overdue: i.due_date ? Math.floor((Date.parse(todayStr) - Date.parse(i.due_date)) / 86400000) : 0,
+    })),
+    recent_payments: [],
+  };
 };
 
 /* ── Products ──────────────────────────────────────────── */

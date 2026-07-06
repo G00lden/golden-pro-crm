@@ -734,8 +734,8 @@ export function registerCrmApiRoutes(app: express.Express) {
 
 /* ── Invoice Routes (Firestore) ────────────────────────────────── */
 
-type InvoiceStatus = "draft" | "issued" | "sent" | "paid" | "cancelled" | "refunded";
-const invoiceStatuses = new Set(["draft", "issued", "sent", "paid", "cancelled", "refunded"]);
+type InvoiceStatus = "draft" | "open" | "issued" | "sent" | "partially_paid" | "paid" | "cancelled" | "refunded";
+const invoiceStatuses = new Set(["draft", "open", "issued", "sent", "partially_paid", "paid", "cancelled", "refunded"]);
 
 function invoiceNumber(seed = Date.now(), index = 1) {
   const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
@@ -1302,6 +1302,225 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       format: "TLV_BASE64",
       phase: "ZATCA phase 1 QR fields",
       fields: zatcaQrFields(sellerName, sellerVat, timestamp, total, vatTotal),
+    });
+  }));
+
+  /* ── Accounting: Payments, Credit Notes & Dashboard ───────────── */
+
+  // GET /api/invoices/:id/payments — list payments for an invoice
+  app.get("/api/invoices/:id/payments", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const invoice = await getOwned("invoices", req.params.id, uid);
+    if (!invoice) return res.status(404).json({ error: "الفاتورة غير موجودة." });
+
+    const snap = await adminDb.collection("payments")
+      .where("invoice_id", "==", req.params.id)
+      .where("createdBy", "==", uid)
+      .orderBy("createdAt", "desc")
+      .limit(100)
+      .get();
+    res.json(snap.docs.map((d: DocSnapshot) => docData(d)));
+  }));
+
+  // POST /api/invoices/:id/payments — register a payment
+  app.post("/api/invoices/:id/payments", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const invoice = await getOwned("invoices", req.params.id, uid);
+    if (!invoice) return res.status(404).json({ error: "الفاتورة غير موجودة." });
+
+    const amount = Math.max(0, Number(req.body?.amount || 0));
+    if (!amount) return res.status(400).json({ error: "المبلغ المدفوع مطلوب." });
+
+    const totalVat = Number(invoice.total_with_vat || 0);
+
+    // Sum existing payments
+    const existingPayments = await adminDb.collection("payments")
+      .where("invoice_id", "==", req.params.id)
+      .where("createdBy", "==", uid)
+      .get();
+    const totalPaid = existingPayments.docs.reduce(
+      (sum: number, d: DocSnapshot) => sum + Number(d.data().amount || 0), 0,
+    );
+    const newTotal = totalPaid + amount;
+
+    const paymentData = {
+      invoice_id: req.params.id,
+      invoice_number: invoice.invoice_number || "",
+      customer_name: invoice.customer_name || "",
+      amount,
+      method: String(req.body?.method || "تحويل بنكي").trim(),
+      reference: String(req.body?.reference || "").trim(),
+      date: String(req.body?.date || new Date().toISOString().slice(0, 10)).trim(),
+      note: String(req.body?.note || "").trim(),
+    };
+
+    const paymentId = await createOwned("payments", uid, paymentData);
+
+    // Update invoice status
+    const newStatus: InvoiceStatus = newTotal >= totalVat ? "paid" : "partially_paid";
+    await updateOwned("invoices", req.params.id, uid, {
+      status: newStatus,
+      paid_at: newStatus === "paid" ? nowIso() : invoice.paid_at || null,
+    });
+
+    const created = await getOwned("payments", paymentId, uid);
+    res.status(201).json(created ? docData(created as unknown as DocSnapshot) : null);
+  }));
+
+  // DELETE /api/payments/:id — void a payment
+  app.delete("/api/payments/:id", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const payment = await getOwned("payments", req.params.id, uid);
+    if (!payment) return res.status(404).json({ error: "الدفعة غير موجودة." });
+    const invoiceId = payment.invoice_id;
+
+    await deleteOwned("payments", req.params.id, uid);
+
+    // Recalculate invoice status
+    if (invoiceId) {
+      const invoice = await getOwned("invoices", invoiceId, uid);
+      if (invoice) {
+        const remainingPayments = await adminDb.collection("payments")
+          .where("invoice_id", "==", invoiceId)
+          .where("createdBy", "==", uid)
+          .get();
+        const totalPaid = remainingPayments.docs.reduce(
+          (sum: number, d: DocSnapshot) => sum + Number(d.data().amount || 0), 0,
+        );
+        const newStatus: InvoiceStatus = totalPaid <= 0
+          ? (invoice.status === "paid" || invoice.status === "partially_paid" ? "sent" : invoice.status)
+          : totalPaid >= Number(invoice.total_with_vat || 0) ? "paid" : "partially_paid";
+        await updateOwned("invoices", invoiceId, uid, { status: newStatus });
+      }
+    }
+    res.json({ success: true });
+  }));
+
+  // POST /api/invoices/:id/credit-note — create a credit note
+  app.post("/api/invoices/:id/credit-note", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const original = await getOwned("invoices", req.params.id, uid);
+    if (!original) return res.status(404).json({ error: "الفاتورة غير موجودة." });
+
+    const refundAmount = Math.max(0, Number(req.body?.refund_amount || 0));
+    const reason = String(req.body?.reason || "").trim();
+    if (!reason) return res.status(400).json({ error: "سبب الإشعار الدائن مطلوب." });
+
+    const all = await listOwned("invoices", uid, undefined, 10000);
+    const baseNumber = invoiceNumber(Date.now(), all.length + 1);
+
+    const creditNoteItems = (Array.isArray(req.body?.items) && req.body.items.length
+      ? req.body.items
+      : original.items || []
+    ).map((item: any) => ({
+      product_id: item.product_id || null,
+      product_sku: String(item.product_sku || "").trim(),
+      description: item.description || "إشعار دائن",
+      quantity: Number(item.quantity || 1),
+      unit_price: Math.max(0, Number(item.unit_price || 0)),
+      total: Math.max(0, Number(item.quantity || 1)) * Math.max(0, Number(item.unit_price || 0)),
+      vat_excluded: item.vat_excluded !== false,
+    }));
+
+    const subtotal = creditNoteItems.reduce((s: number, i: any) => s + i.total, 0);
+    const vatPct = Number(original.vat_percent || 15);
+    const vatAmount = Math.round((refundAmount || subtotal) * vatPct / (100 + vatPct) * 100) / 100;
+    const totalWithVat = refundAmount || subtotal;
+    const withoutVat = Math.round((totalWithVat - vatAmount) * 100) / 100;
+
+    const payload = {
+      invoice_number: `${baseNumber}-CN`,
+      quote_id: null,
+      customer_id: original.customer_id || null,
+      customer_name: original.customer_name || "",
+      customer_phone: original.customer_phone || "",
+      customer_city: original.customer_city || "",
+      customer_vat: original.customer_vat || "",
+      title: `إشعار دائن — ${reason} (${original.invoice_number || ""})`,
+      status: "refunded" as InvoiceStatus,
+      issue_date: new Date().toISOString().slice(0, 10),
+      due_date: null,
+      paid_at: nowIso(),
+      payment_method: original.payment_method || "",
+      currency: original.currency || "SAR",
+      items: creditNoteItems,
+      notes: reason,
+      terms: `إشعار دائن مقابل الفاتورة ${original.invoice_number || req.params.id}`,
+      seller_name: original.seller_name || "",
+      seller_vat_number: original.seller_vat_number || "",
+      seller_address: original.seller_address || "",
+      discount: 0,
+      vat_percent: vatPct,
+      vat_amount: vatAmount,
+      total_with_vat: totalWithVat,
+      total_without_vat: withoutVat,
+      subtotal,
+    };
+
+    const creditNoteId = await createOwned("invoices", uid, payload);
+    const creditNote = await getOwned("invoices", creditNoteId, uid);
+
+    // Mark original as refunded
+    await updateOwned("invoices", req.params.id, uid, { status: "refunded" });
+
+    res.status(201).json(creditNote ? normalizeInvoice(creditNote) : null);
+  }));
+
+  // GET /api/accounting/dashboard — accounting KPIs
+  app.get("/api/accounting/dashboard", asyncRoute(async (req, res) => {
+    const uid = userId(req);
+    const today = todayInTimeZone();
+    const now = new Date();
+    const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+
+    const invoices = await listOwned("invoices", uid, undefined, 5000);
+    const payments = await adminDb.collection("payments")
+      .where("createdBy", "==", uid)
+      .orderBy("createdAt", "desc")
+      .limit(100)
+      .get();
+
+    const paymentList = payments.docs.map((d: DocSnapshot) => docData(d));
+    const active = invoices.filter((i: any) => !["paid", "cancelled", "refunded"].includes(i.status));
+    const overdue = active.filter((i: any) => i.due_date && i.due_date < today);
+    const paidThisMonth = paymentList.filter((p: any) => p.date >= firstOfMonth);
+
+    res.json({
+      total_outstanding: active.reduce((s: number, i: any) => s + Number(i.total_with_vat || 0), 0),
+      total_overdue: overdue.reduce((s: number, i: any) => s + Number(i.total_with_vat || 0), 0),
+      paid_this_month: paidThisMonth.reduce((s: number, p: any) => s + Number(p.amount || 0), 0),
+      paid_this_month_count: paidThisMonth.length,
+      draft_count: invoices.filter((i: any) => i.status === "draft").length,
+      open_count: invoices.filter((i: any) => ["open", "issued", "sent"].includes(i.status)).length,
+      overdue_count: overdue.length,
+      overdue_invoices: overdue.slice(0, 10).map((i: any) => {
+        const invoicePayments = paymentList
+          .filter((p: any) => p.invoice_id === i.id)
+          .reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+        return {
+          id: i.id,
+          invoice_number: i.invoice_number || "",
+          customer_name: i.customer_name || "",
+          total: Number(i.total_with_vat || 0),
+          paid: invoicePayments,
+          due_date: i.due_date || "",
+          days_overdue: i.due_date
+            ? Math.floor((Date.parse(`${today}T00:00:00`) - Date.parse(`${i.due_date}T00:00:00`)) / 86400000)
+            : 0,
+        };
+      }),
+      recent_payments: paymentList.slice(0, 10).map((p: any) => ({
+        id: p.id,
+        invoice_id: p.invoice_id || "",
+        invoice_number: p.invoice_number || "",
+        customer_name: p.customer_name || "",
+        amount: Number(p.amount || 0),
+        method: p.method || "تحويل بنكي",
+        reference: p.reference || "",
+        date: p.date || "",
+        note: p.note || "",
+        createdAt: p.createdAt || "",
+      })),
     });
   }));
 
