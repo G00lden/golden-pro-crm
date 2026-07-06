@@ -97,6 +97,23 @@ for (const col of [
   ["booking_ids", "TEXT DEFAULT '[]'"],
   ["order_types", "TEXT DEFAULT '[]'"],
   ["customer_id", "TEXT"],
+  // Columns that ONLY existed in the full CREATE TABLE below (line ~262). Because
+  // the shell table above is created first, that CREATE ... IF NOT EXISTS is a
+  // no-op, so on a fresh DB these were never created and every store-order
+  // upsert threw "no such column: customer_name". Add them here so the ALTER
+  // loop materialises the complete schema.
+  ["store_order_id", "TEXT"],
+  ["customer_name", "TEXT"],
+  ["customer_phone", "TEXT"],
+  ["customer_city", "TEXT"],
+  ["product_name", "TEXT"],
+  ["product_sku", "TEXT"],
+  ["order_status", "TEXT"],
+  ["installation_status", "TEXT DEFAULT 'pending'"],
+  ["technician_id", "TEXT"],
+  ["technician_name", "TEXT"],
+  ["booking_id", "TEXT"],
+  ["notes", "TEXT DEFAULT ''"],
 ] as const) {
   if (!hasStoreOrderColumn(col[0])) {
     db.exec(`ALTER TABLE store_orders ADD COLUMN ${col[0]} ${col[1]}`);
