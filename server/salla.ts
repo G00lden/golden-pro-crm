@@ -34,6 +34,10 @@ type SallaIntegrationRecord = {
   last_product_sync_at?: string | null;
   last_product_sync_count?: number;
   last_product_sync_error?: string | null;
+  last_customer_sync_at?: string | null;
+  last_customer_sync_status?: "success" | "failed" | "error" | "idle" | null;
+  last_customer_sync_count?: number;
+  last_customer_sync_error?: string | null;
   last_remote_update_at?: string | null;
   updatedAt?: string;
   createdAt?: string;
@@ -1298,7 +1302,129 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   }
 }
 
-export async function syncSallaStoreForUser(currentUid: string): Promise<SyncResult & { orders: SyncResult; products: SyncResult }> {
+async function fetchCustomersPage(token: string, page: number) {
+  const url = new URL(`${SALLA_API_BASE}/customers`);
+  url.searchParams.set("page", String(page));
+  url.searchParams.set("per_page", String(pageSize()));
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.message || `Salla customers sync failed (${response.status}).`);
+  }
+  return body;
+}
+
+export async function syncSallaCustomersForUser(currentUid: string): Promise<SyncResult> {
+  if (!configured()) throw new Error("Salla integration is not configured on the server.");
+
+  const integration = await readIntegration(currentUid);
+  if (!integration) throw new Error("Salla is not linked for this CRM user.");
+  if (integration.status !== "connected" || (!integration.access_token && !integration.refresh_token)) {
+    throw new Error("Salla is not connected.");
+  }
+
+  const token = await ensureFreshAccessToken(currentUid, integration);
+  const syncedAt = nowIso();
+
+  let imported = 0;
+  let updated = 0;
+  let failed = 0;
+  let fetched = 0;
+  let pages = 0;
+  let firstFailureMessage: string | null = null;
+
+  try {
+    for (let page = 1; page <= maxSyncPages(); page += 1) {
+      const payload = await fetchCustomersPage(token, page);
+      const customers = asArray(payload.data || payload.customers || payload.items);
+      if (!customers.length) break;
+      pages += 1;
+      fetched += customers.length;
+
+      for (const remoteCustomer of customers) {
+        const phone = firstText(
+          remoteCustomer.mobile, remoteCustomer.phone,
+          asRecord(remoteCustomer.mobile)?.number,
+        )?.replace(/[^\d]/g, "");
+        if (!phone) { failed += 1; continue; }
+
+        const name = firstText(remoteCustomer.name, remoteCustomer.full_name, remoteCustomer.first_name)
+          || "Salla customer";
+        const city = firstText(remoteCustomer.city);
+
+        try {
+          const customerDocId = `cust_${crypto.createHash("sha1").update(`${currentUid}:salla:${phone}`).digest("hex").slice(0, 20)}`;
+
+          await adminDb.collection("customers").doc(customerDocId).set({
+            createdBy: currentUid,
+            name,
+            phone,
+            city: city || null,
+            source: "salla",
+            store_provider: "salla",
+            store_customer_id: String(remoteCustomer.id || ""),
+            createdAt: syncedAt,
+            updatedAt: syncedAt,
+          }, { merge: true });
+
+          imported += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+
+      const pagination = asRecord(payload.pagination);
+      const totalPages = Number(pagination.total_pages || pagination.last_page || 0);
+      if (totalPages && page >= totalPages) break;
+      if (customers.length < pageSize()) break;
+    }
+
+    await writeIntegration(currentUid, {
+      last_customer_sync_at: syncedAt,
+      last_customer_sync_status: "success",
+      last_customer_sync_count: imported + updated,
+      last_customer_sync_error: null,
+    });
+
+    return {
+      success: true,
+      imported,
+      updated,
+      failed,
+      fetched,
+      pages,
+      last_sync_at: syncedAt,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeIntegration(currentUid, {
+      last_customer_sync_at: syncedAt,
+      last_customer_sync_status: "failed",
+      last_customer_sync_count: imported + updated,
+      last_customer_sync_error: message,
+    });
+    const syncError = new Error(`Salla customer sync failed: ${message}`);
+    (syncError as any).detail = {
+      success: false,
+      imported,
+      updated,
+      failed,
+      fetched,
+      pages,
+      last_sync_at: syncedAt,
+      last_error: message,
+    };
+    throw syncError;
+  }
+}
+
+export async function syncSallaStoreForUser(currentUid: string): Promise<SyncResult & { orders: SyncResult; products: SyncResult; customers: SyncResult }> {
   const failedResult = (message: string): SyncResult => ({
     success: false,
     imported: 0,
@@ -1309,27 +1435,31 @@ export async function syncSallaStoreForUser(currentUid: string): Promise<SyncRes
     last_sync_at: nowIso(),
     last_error: message,
   });
+  const customers = await syncSallaCustomersForUser(currentUid).catch((error) =>
+    failedResult(error instanceof Error ? error.message : String(error)),
+  );
   const products = await syncSallaProductsForUser(currentUid).catch((error) =>
     failedResult(error instanceof Error ? error.message : String(error)),
   );
   const orders = await syncSallaOrdersForUser(currentUid).catch((error) =>
     failedResult(error instanceof Error ? error.message : String(error)),
   );
-  if (!products.success && !orders.success) {
-    throw new Error(orders.last_error || products.last_error || "Salla sync failed.");
+  if (!products.success && !orders.success && !customers.success) {
+    throw new Error(orders.last_error || products.last_error || customers.last_error || "Salla sync failed.");
   }
   return {
     ...orders,
-    success: products.success && orders.success,
+    success: products.success && orders.success && customers.success,
     imported: orders.imported,
     updated: orders.updated,
     failed: orders.failed,
     fetched: orders.fetched,
     pages: orders.pages,
     last_sync_at: orders.last_sync_at,
-    last_error: orders.last_error || products.last_error || null,
+    last_error: orders.last_error || products.last_error || customers.last_error || null,
     orders,
     products,
+    customers,
   };
 }
 
