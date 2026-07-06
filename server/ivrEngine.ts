@@ -628,7 +628,9 @@ export async function runMissedCallFlow(callSid: string): Promise<Record<string,
       await sendWhatsAppTemplate({
         phone: agentPhone,
         template: "missed_call_agent",
-        vars: { department_name: departmentName || "-", customer_phone: customerPhone || "-", call_time: callTime },
+        // Show the agent a canonical number (966… for local; genuine
+        // international numbers are left intact) instead of the raw provider form.
+        vars: { department_name: departmentName || "-", customer_phone: (customerPhone && normalizeDialNumber(customerPhone)) || "-", call_time: callTime },
         owner_uid: ownerUid,
       });
       updateCallBySid(callSid, { wa_agent_notified: 1 });
