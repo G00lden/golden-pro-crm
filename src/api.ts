@@ -1276,6 +1276,20 @@ export const deleteCustomer = (id: string) => {
   return wrap(() => deleteDoc(doc(db, "customers", id)), OperationType.DELETE, `customers/${id}`);
 };
 
+// Extract the trailing sequence from a formatted number like "INV-20260706-014".
+function sequenceOf(value: unknown): number {
+  const str = String(value ?? "");
+  const tail = str.includes("-") ? str.slice(str.lastIndexOf("-") + 1) : str;
+  const n = parseInt(tail, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// One past the highest number already issued, so a deletion never lets a
+// previously used invoice/quote number be reused (ZATCA uniqueness).
+function nextNumberIndex(records: Array<Record<string, unknown>>, field: string): number {
+  return records.reduce((max, row) => Math.max(max, sequenceOf(row[field])), 0) + 1;
+}
+
 function quoteNumber(seed = Date.now(), index = 1) {
   const d = new Date(seed);
   const ymd = d.toISOString().slice(0, 10).replace(/-/g, "");
@@ -1437,7 +1451,7 @@ export const createQuote = async (data: QuoteInput) => {
   if (user.local) {
     const localDb = loadLocalDb(uid);
     let quote = localQuotePayload(data, uid);
-    quote.quote_number = quoteNumber(Date.now(), localDb.quotes.length + 1);
+    quote.quote_number = quoteNumber(Date.now(), nextNumberIndex(localDb.quotes, "quote_number"));
     quote = ensureLocalQuoteCustomer(localDb, uid, quote);
     localDb.quotes.unshift(quote);
     saveLocalDb(uid, localDb);
@@ -1453,7 +1467,7 @@ export const createQuote = async (data: QuoteInput) => {
   const id = doc(collection(db, "quotes")).id;
   const payload = localQuotePayload(data, uid);
   payload.id = id;
-  payload.quote_number = quoteNumber(Date.now(), existing.stats.total + 1);
+  payload.quote_number = quoteNumber(Date.now(), nextNumberIndex(existing.data, "quote_number"));
   await wrap(() => setDoc(doc(db, "quotes", id), withoutId(payload)), OperationType.CREATE, `quotes/${id}`);
   return id;
 };
@@ -1721,7 +1735,7 @@ export const createInvoice = async (data: InvoiceInput) => {
   if (user.local) {
     const localDb = loadLocalDb(uid);
     let invoice = localInvoicePayload(data, uid, localDb.settings);
-    invoice.invoice_number = invoiceNumber(Date.now(), localDb.invoices.length + 1);
+    invoice.invoice_number = invoiceNumber(Date.now(), nextNumberIndex(localDb.invoices, "invoice_number"));
     localDb.invoices.unshift(invoice);
     saveLocalDb(uid, localDb);
     return invoice.id;
@@ -1736,7 +1750,7 @@ export const createInvoice = async (data: InvoiceInput) => {
   const id = doc(collection(db, "invoices")).id;
   const payload = localInvoicePayload(data, uid, defaultSettings());
   payload.id = id;
-  payload.invoice_number = invoiceNumber(Date.now(), existing.stats.total + 1);
+  payload.invoice_number = invoiceNumber(Date.now(), nextNumberIndex(existing.data, "invoice_number"));
   await wrap(() => setDoc(doc(db, "invoices", id), withoutId(payload)), OperationType.CREATE, `invoices/${id}`);
   return id;
 };

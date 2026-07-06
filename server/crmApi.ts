@@ -164,6 +164,21 @@ type QuoteStatus = "draft" | "issued" | "confirmed" | "declined" | "expired" | "
 
 const quoteStatuses = new Set(["draft", "issued", "confirmed", "declined", "expired", "follow_up"]);
 
+// Extract the trailing sequence from a formatted number like "INV-20260706-014".
+function sequenceOf(value: unknown): number {
+  const str = String(value ?? "");
+  const tail = str.includes("-") ? str.slice(str.lastIndexOf("-") + 1) : str;
+  const n = parseInt(tail, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Next sequence index: one past the highest number already issued for this owner.
+// Deriving from max (not the record count) means deleting an invoice never lets a
+// previously used number be reused — a ZATCA uniqueness requirement.
+function nextSequence(records: Array<Record<string, any>>, field: string): number {
+  return records.reduce((max, row) => Math.max(max, sequenceOf(row[field])), 0) + 1;
+}
+
 function quoteNumber(seed = Date.now(), index = 1) {
   const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
   return `QT-${ymd}-${String(index).padStart(3, "0")}`;
@@ -426,7 +441,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     const allQuotes = await listOwned("quotes", uid, undefined, 10000);
     const payload = {
       ...quotePayload({ ...req.body, items }, customer),
-      quote_number: quoteNumber(Date.now(), allQuotes.length + 1),
+      quote_number: quoteNumber(Date.now(), nextSequence(allQuotes, "quote_number")),
     };
     const id = await createOwned("quotes", uid, payload);
     const quote = await getOwned("quotes", id, uid);
@@ -1107,7 +1122,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const totals = invoiceTotals(items, req.body?.discount, req.body?.vat_percent);
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
-      invoice_number: invoiceNumber(Date.now(), all.length + 1),
+      invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
       quote_id: req.body?.quote_id || null,
       customer_id: req.body?.customer_id || null,
       customer_name: customerName,
@@ -1328,7 +1343,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const totals = invoiceTotals(items, quote.discount);
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
-      invoice_number: invoiceNumber(Date.now(), all.length + 1),
+      invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
       quote_id: req.params.id,
       customer_id: quote.customer_id || null,
       customer_name: quote.customer_name || "",
