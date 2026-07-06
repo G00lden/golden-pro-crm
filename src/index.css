@@ -291,21 +291,21 @@ textarea {
 
 .brand-mark {
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 42px;
+  height: 42px;
   place-items: center;
   border-radius: 8px;
-  background: var(--brand-white) url("/brand/icon-64.png") center / 30px no-repeat;
+  background: var(--brand-white) url("/brand/logo-social.png") center / contain no-repeat;
   color: transparent;                       /* hide any text fallback */
   font-size: 0;
   box-shadow: 0 0 0 1px rgba(11, 53, 92, 0.18), 0 8px 22px rgba(11, 53, 92, 0.20);
 }
 
 .brand-mark.large {
-  width: 88px;
-  height: 88px;
+  width: 100px;
+  height: 100px;
   margin: 0 auto 16px;
-  background-size: 72px;
+  background-size: contain;
   border-radius: 14px;
   box-shadow: 0 0 0 1px rgba(11, 53, 92, 0.18), 0 14px 36px rgba(11, 53, 92, 0.22);
 }
