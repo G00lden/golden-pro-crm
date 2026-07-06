@@ -506,13 +506,18 @@ function safeJson(raw: string): unknown {
  */
 export function recordCustomerConfirmation(uid: string, phone: string, message: string) {
   const normalized = phone.replace(/\D/g, "");
+  // Match on the last 9 digits (the KSA local significant number) anchored to
+  // the END, consistent with the rest of the app. The previous `%<last-8>%`
+  // substring match could confirm a DIFFERENT customer's reminder (and NULL the
+  // wrong installation's next_remind_type) when 8 digits collided mid-number.
+  const tail = normalized.slice(-9) || normalized;
   const reminder = db
     .prepare(
       `SELECT * FROM reminders
        WHERE owner_uid = ? AND customer_phone LIKE ?
        ORDER BY sent_at DESC LIMIT 1`,
     )
-    .get(uid, `%${normalized.slice(-8) || normalized}%`) as Record<string, unknown> | undefined;
+    .get(uid, `%${tail}`) as Record<string, unknown> | undefined;
   if (!reminder) return { matched: false };
 
   db.prepare("UPDATE reminders SET status = 'confirmed' WHERE id = ?").run(reminder.id);
