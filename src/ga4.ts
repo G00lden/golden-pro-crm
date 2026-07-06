@@ -31,8 +31,11 @@ export function initGA4(measurementId: string): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const w = window as any;
   w.dataLayer = w.dataLayer || [];
-  w.gtag = function gtag(...args: unknown[]) {
-    w.dataLayer.push(args);
+  w.gtag = function gtag() {
+    // gtag.js consumes the raw `arguments` object from dataLayer, not an array —
+    // pushing a plain array is not recognised as a gtag command.
+    // eslint-disable-next-line prefer-rest-params
+    w.dataLayer.push(arguments);
   };
 
   // Config call — tells GA4 to start collecting

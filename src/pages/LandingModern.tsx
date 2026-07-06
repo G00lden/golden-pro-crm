@@ -1,4 +1,4 @@
-import {useMemo, useState, type FormEvent} from "react";
+import {useEffect, useMemo, useState, type FormEvent} from "react";
 import {
   Droplets, Snowflake, Wrench, Shield,
   Phone, MessageCircle, Send, CheckCircle2,
@@ -62,8 +62,9 @@ export function LandingModern() {
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Capture UTM + page_view on mount
-  useMemo(() => {
+  // Capture UTM + fire page_view on mount. Side-effects belong in useEffect,
+  // not useMemo (which may run during render or be discarded/recomputed).
+  useEffect(() => {
     captureUtm();
     trackEvent({name: "page_view", meta: {page: "landing-v2"}});
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -10,6 +10,9 @@
  * trigger for every downstream tag (Meta Pixel, TikTok, Snap, GA4, etc.).
  */
 
+import { ga4Event } from "./ga4";
+import { trackMetaEvent } from "./metaPixel";
+
 declare global {
   interface Window {
     dataLayer?: Array<Record<string, unknown>>;
@@ -58,7 +61,11 @@ export function captureUtm(): UtmContext {
     captured.referrer = document.referrer || undefined;
     captured.ts = new Date().toISOString();
     try {
-      localStorage.setItem(UTM_KEY, JSON.stringify(captured));
+      // First-touch attribution: keep the earliest capture; don't overwrite it
+      // on later visits that arrive with fresh UTM params.
+      if (!localStorage.getItem(UTM_KEY)) {
+        localStorage.setItem(UTM_KEY, JSON.stringify(captured));
+      }
     } catch { /* private mode */ }
     return captured;
   }
@@ -100,6 +107,12 @@ export function trackEvent(event: TrackEvent): void {
   // 2. GTM dataLayer (becomes the trigger for every downstream tag once GTM is wired)
   window.dataLayer = window.dataLayer || [];
   window.dataLayer.push(payload);
+
+  // 2b. Direct GA4 + Meta Pixel fire — a belt-and-suspenders path alongside any
+  // GTM-managed tags. Both no-op until their respective init has run.
+  const eventParams = { value: event.value, currency: event.currency, ...(event.meta || {}) };
+  ga4Event(event.name, eventParams);
+  trackMetaEvent(event.name, eventParams);
 
   // 3. Best-effort server-side fire for CAPI dedup. Endpoint may not exist yet
   // and that's OK — we just swallow the error.
