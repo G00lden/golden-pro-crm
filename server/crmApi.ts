@@ -851,8 +851,17 @@ function normalizeInvoiceItems(items: unknown) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
+// Resolve a VAT percentage while treating an explicit 0 (zero-rated) as valid.
+// Only an unset value (undefined / null / "") or a non-numeric value falls back
+// to the default — `0 || 15` would otherwise turn a 0% invoice into 15%.
+function resolveVatPercent(value: unknown, fallback = 15): number {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+}
+
 function invoiceTotals(items: Array<{ total: number; vat_excluded?: boolean }>, discount = 0, vatPercent = 15) {
-  const cleanVatPercent = Math.max(0, Number(vatPercent || 15));
+  const cleanVatPercent = resolveVatPercent(vatPercent);
   const vatRate = cleanVatPercent / 100;
   const subtotal = items.reduce((sum, item) => {
     const total = Number(item.total || 0);
@@ -935,7 +944,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
   });
   const currency = String(invoice.currency || "SAR");
   const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
-    const line = invoiceLineAmounts(item, Number(invoice.vat_percent || 15));
+    const line = invoiceLineAmounts(item, resolveVatPercent(invoice.vat_percent));
     const sku = item.product_sku ? `<small style="display:block;opacity:.6;font-size:.85em;direction:ltr">${escapeHtml(item.product_sku)}</small>` : "";
     return `<tr>
       <td>${index + 1}</td>
@@ -1031,7 +1040,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     <section class="totals">
       <p><span>الإجمالي غير شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
       <p><span>الخصم</span><strong>${escapeHtml(formatMoney(invoice.discount, currency))}</strong></p>
-      <p><span>ضريبة القيمة المضافة (${escapeHtml(invoice.vat_percent || 15)}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
+      <p><span>ضريبة القيمة المضافة (${escapeHtml(resolveVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
       <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
     </section>
     ${invoice.terms ? `<section class="terms">${escapeHtml(invoice.terms)}</section>` : ""}
