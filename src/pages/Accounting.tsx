@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import * as api from "../api";
+import { InvoicePreview } from "../components/InvoicePreview";
 
 type Notifier = (message: string, ok?: boolean) => void;
 type AccountingTab = "dashboard" | "invoices" | "payments";
@@ -362,6 +363,7 @@ export function AccountingPage({ notify, refreshStats }: { notify: Notifier; ref
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<api.Invoice | null>(null);
   const [payingInvoice, setPayingInvoice] = useState<api.Invoice | null>(null);
+  const [preview, setPreview] = useState<api.Invoice | null>(null);
 
   const dash = useAsyncData(() => api.getAccountingDashboard(), [tab]);
   const invoices = useAsyncData(() => api.getInvoices({ search, status }), [search, status, tab]);
@@ -401,6 +403,36 @@ export function AccountingPage({ notify, refreshStats }: { notify: Notifier; ref
     } catch (err) {
       notify(err instanceof Error ? err.message : "فشل إنشاء الإشعار الدائن", false);
     }
+  };
+
+  const copyInvoiceText = async (inv: api.Invoice) => {
+    const kind = inv.total_with_vat >= 1000 ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة";
+    const text = [
+      `${kind} — ${inv.invoice_number}`,
+      `العميل: ${inv.customer_name}`,
+      `الجوال: ${inv.customer_phone || "-"}`,
+      `التاريخ: ${inv.issue_date}`,
+      `الإجمالي شامل الضريبة: ${inv.total_with_vat.toFixed(2)} SAR`,
+      inv.due_date ? `الاستحقاق: ${inv.due_date}` : "",
+    ].filter(Boolean).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      notify("تم نسخ نص الفاتورة");
+    } catch {
+      notify("فشل النسخ", false);
+    }
+  };
+
+  const shareInvoiceWhatsApp = (inv: api.Invoice) => {
+    if (!inv.customer_phone) { notify("العميل ليس لديه رقم جوال", false); return; }
+    const kind = inv.total_with_vat >= 1000 ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة";
+    const msg = encodeURIComponent(
+      `عزيزي ${inv.customer_name}\n` +
+      `مرفق ${kind} رقم ${inv.invoice_number}\n` +
+      `الإجمالي: ${inv.total_with_vat.toFixed(2)} SAR\n` +
+      `التاريخ: ${inv.issue_date}`
+    );
+    window.open(`https://wa.me/${inv.customer_phone.replace(/^0+|\+/g, "").replace(/^966/, "")}?text=${msg}`, "_blank");
   };
 
   const stats = invoices.data?.stats || { total: 0, draft: 0, open: 0, issued: 0, sent: 0, partially_paid: 0, paid: 0, cancelled: 0, refunded: 0, total_value: 0, paid_value: 0, outstanding_value: 0, overdue_value: 0 };
@@ -576,7 +608,21 @@ export function AccountingPage({ notify, refreshStats }: { notify: Notifier; ref
                   <button className="icon-btn success" type="button" title="تسجيل دفعة" onClick={() => setPayingInvoice(inv)}>
                     <Banknote size={15} />
                   </button>
-                  <button className="icon-btn" type="button" title="تعليم كمدفوعة" onClick={() => handleStatus(inv, "paid")} disabled={inv.status === "paid"}>
+                  <button className="icon-btn" type="button" title="معاينة" onClick={() => setPreview(inv)}>
+                    <Eye size={15} />
+                  </button>
+                  <button className="icon-btn" type="button" title="طباعة" onClick={() => { setPreview(inv); }}>
+                    <Printer size={15} />
+                  </button>
+                  <button className="icon-btn" type="button" title="نسخ" onClick={() => copyInvoiceText(inv)}>
+                    <Copy size={15} />
+                  </button>
+                  {inv.customer_phone && (
+                    <button className="icon-btn" type="button" title="واتساب" onClick={() => shareInvoiceWhatsApp(inv)}>
+                      <MessageCircle size={15} />
+                    </button>
+                  )}
+                  <button className="icon-btn success" type="button" title="تعليم كمدفوعة" onClick={() => handleStatus(inv, "paid")} disabled={inv.status === "paid"}>
                     <CheckCircle2 size={15} />
                   </button>
                   <button className="icon-btn" type="button" title="تعليم كمرسلة" onClick={() => handleStatus(inv, "sent")} disabled={inv.status === "sent" || inv.status === "paid" || inv.status === "partially_paid"}>
@@ -676,6 +722,27 @@ export function AccountingPage({ notify, refreshStats }: { notify: Notifier; ref
       {payingInvoice && (
         <Modal title={`تسجيل دفعة — ${payingInvoice.invoice_number}`} onClose={() => setPayingInvoice(null)}>
           <PaymentForm invoice={payingInvoice} notify={notify} onClose={() => setPayingInvoice(null)} onDone={refreshAll} />
+        </Modal>
+      )}
+      {preview && (
+        <Modal title={`معاينة ${preview.invoice_number}`} onClose={() => setPreview(null)}>
+          <InvoicePreview
+            invoice={preview}
+            onCopy={() => copyInvoiceText(preview)}
+            onPrint={(asPdf) => {
+              const printWindow = asPdf ? null : window.open("", "_blank");
+              if (!asPdf && printWindow) {
+                const kind = preview.total_with_vat >= 1000 ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة";
+                const doc = printWindow.document;
+                const html = `<!doctype html><html dir="rtl"><head><meta charset="utf-8"><title>${kind} ${preview.invoice_number}</title></head><body><p>الرجاء استخدام زر الطباعة من المعاينة</p></body></html>`;
+                doc.open();
+                doc.write(html);
+                doc.close();
+                setTimeout(() => printWindow.print(), 500);
+              }
+              notify(asPdf ? "استخدم معاينة الفواتير للتصدير PDF" : "تم فتح نافذة الطباعة");
+            }}
+          />
         </Modal>
       )}
     </div>
