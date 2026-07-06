@@ -40,11 +40,15 @@ export default function InstallationsPage({
           initial={installation}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
-            if (installation) await api.updateInstallation(installation.id, payload);
-            else await api.createInstallation(payload);
-            notify("تم حفظ الصيانة");
-            setModal(null);
-            await Promise.all([installations.refresh(), refreshStats()]);
+            try {
+              if (installation) await api.updateInstallation(installation.id, payload);
+              else await api.createInstallation(payload);
+              notify("تم حفظ الصيانة");
+              setModal(null);
+              await Promise.all([installations.refresh(), refreshStats()]);
+            } catch (error) {
+              notify(error instanceof Error ? error.message : "تعذر حفظ الصيانة", false);
+            }
           }}
         />
       ),
