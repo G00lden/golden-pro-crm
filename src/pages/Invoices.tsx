@@ -883,7 +883,7 @@ function InvoiceForm({
   const [status, setStatus] = useState<api.InvoiceStatus>(initial?.status || "issued");
   const [issueDate, setIssueDate] = useState(initial?.issue_date || today());
   const [dueDate, setDueDate] = useState(initial?.due_date || addDays(today(), 30));
-  const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent || 15));
+  const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent ?? 15));
   const [discount, setDiscount] = useState(String(initial?.discount || 0));
   const [sellerName, setSellerName] = useState(initial?.seller_name || "");
   const [sellerVat, setSellerVat] = useState(initial?.seller_vat_number || "");

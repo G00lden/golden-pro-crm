@@ -266,6 +266,10 @@ function numericValue(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
     const normalized = value.replace(/[^\d.-]/g, "");
+    // No digit at all (empty or purely non-numeric like "" / "-" / "N/A") is
+    // "absent", not zero. Returning 0 here made optionalNumberValue stop at the
+    // first empty field and zero out prices that were present in a later field.
+    if (!/\d/.test(normalized)) return undefined;
     const n = Number(normalized);
     return Number.isFinite(n) ? n : undefined;
   }
