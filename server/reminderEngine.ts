@@ -559,7 +559,10 @@ export async function runDueReminders(options: ReminderRunOptions = {}) {
   const mode = options.mode || "manual";
   const startedAt = new Date().toISOString();
 
-  if (schedulerState.running && mode === "scheduled") {
+  // Block ANY overlapping run (manual or scheduled). Previously only scheduled
+  // runs were guarded, so a manual run started while the cron run was mid-flight
+  // (or two manual runs) could both read isSentToday=false and send twice.
+  if (schedulerState.running) {
     return {
       success: false,
       checked: 0,
@@ -655,7 +658,10 @@ export async function runDueReminders(options: ReminderRunOptions = {}) {
 
       try {
         const sendResult = await sendReminderForInstallation(doc.id, inst.createdBy, effectiveStage, mode);
-        escalateIfNeeded(doc.id, inst, inst.createdBy);
+        // Escalate only on a genuine send. Escalating after a dry-run/skipped
+        // result re-appended an escalation_required history row on every run
+        // (in dry-run mode the cycle never advances, so it repeated daily).
+        if (sendResult?.success) escalateIfNeeded(doc.id, inst, inst.createdBy);
         results.push(sendResult);
       } catch (error) {
         results.push({
