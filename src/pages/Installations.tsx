@@ -185,7 +185,12 @@ function InstallationForm({
         product_sku: selectedProduct.sku || "",
         install_date: installDate,
         next_maintenance: nextMaintenance,
-        next_remind_type: initial?.next_remind_type || "first",
+        // Preserve the reminder stage when editing — a null stage means the
+        // cycle already finished, so `|| "first"` would silently re-arm it and
+        // resend reminders. Only a brand-new installation starts at "first".
+        next_remind_type: initial
+          ? (initial.next_remind_type === undefined ? "first" : initial.next_remind_type)
+          : "first",
         label: label.trim(),
       });
     } finally {
