@@ -27,7 +27,7 @@ export type Page =
   | "dash"
   | "customers"
   | "quotes"
-  | "invoices"
+  | "accounting"
   | "odooCrm"
   | "products"
   | "installations"

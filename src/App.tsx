@@ -4,6 +4,7 @@ import {
   CircleAlert,
   ClipboardList,
   FileText,
+  Landmark,
   LogIn,
   LogOut,
   Menu,
@@ -41,7 +42,7 @@ import {
   registerWithEmail,
 } from "./firebase";
 import { AdminUsersPage } from "./pages/AdminUsers";
-import { InvoicesPage } from "./pages/Invoices";
+import { AccountingPage } from "./pages/Accounting";
 import { QuotesPage } from "./pages/Quotes";
 import { WhatsAppConsole } from "./pages/WhatsAppConsole";
 import { ReminderDashboard } from "./components/ReminderDashboard";
@@ -335,7 +336,7 @@ export default function App() {
     { id: "dash" as Page, label: "الرئيسية", icon: ClipboardList },
     { id: "customers" as Page, label: "العملاء", icon: Users },
     { id: "quotes" as Page, label: "عروض الأسعار", icon: FileText, badge: summary.quoteFollowUps },
-    { id: "invoices" as Page, label: "الفواتير", icon: Receipt },
+    { id: "accounting" as Page, label: "المحاسبة", icon: Landmark },
     { id: "odooCrm" as Page, label: "CRM Odoo", icon: ClipboardList },
     { id: "products" as Page, label: "المنتجات", icon: Package },
     { id: "installations" as Page, label: "الصيانة", icon: Wrench, badge: summary.overdue },
@@ -365,7 +366,7 @@ export default function App() {
     dash: <Dashboard stats={summary} notify={notify} refreshStats={stats.refresh} go={openPage} />,
     customers: <CustomersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     quotes: <QuotesPage notify={notify} refreshStats={stats.refresh} />,
-    invoices: <InvoicesPage notify={notify} refreshStats={stats.refresh} />,
+    accounting: <AccountingPage notify={notify} refreshStats={stats.refresh} />,
     odooCrm: <OdooCrmPage notify={notify} />,
     products: <ProductsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     installations: <InstallationsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
