@@ -372,12 +372,12 @@ export default function StoreOrdersPage({
                   <th aria-label="تحديد"></th>
                   <th>رقم الطلب</th>
                   <th>تاريخ الطلب</th>
-                  <th>الحالة</th>
                   <th>العميل</th>
+                  <th>المدينة</th>
                   <th>المنتجات</th>
                   <th>القيمة</th>
+                  <th>حالة سلة</th>
                   <th>نوع الرحلة</th>
-                  <th>الفني/الحجز</th>
                   <th>الموعد</th>
                   <th>إجراء</th>
                 </tr>
@@ -385,36 +385,33 @@ export default function StoreOrdersPage({
               <tbody>
                 {filteredOrders.map((order) => {
                   const needsReview = order.journey_status === "needs_review" || order.items?.some((item) => item.status === "needs_review");
+                  const sallaStatus = order.status || "-";
+                  const total = orderTotal(order);
                   return (
-                    <tr key={order.id}>
+                    <tr key={order.id} className={needsReview ? "row-needs-review" : ""}>
                       <td><input type="checkbox" aria-label={`تحديد الطلب ${order.order_number || order.order_id}`} /></td>
                       <td>
                         <div className="order-id-cell">
                           <strong>{order.order_number || order.order_id}</strong>
-                          <span>{order.provider || "salla"}</span>
+                          <Badge tone={journeyTone(order.journey_status)}>{journeyLabel(order.journey_status)}</Badge>
                         </div>
                       </td>
                       <td>{fmtDate(order.order_date || order.imported_at)}</td>
-                      <td><Badge tone={journeyTone(order.journey_status)}>{journeyLabel(order.journey_status)}</Badge></td>
                       <td>
                         <div className="order-customer-cell">
                           <strong>{order.customer_name || "-"}</strong>
                           <span>{phoneLabel(order.customer_phone)}</span>
                         </div>
                       </td>
+                      <td>{order.customer_city || <span className="muted">-</span>}</td>
                       <td>
                         <div className="order-products-cell">
                           <span>{productsLabelDetailed(order)}</span>
-                          {(order.items || []).slice(0, 2).map((item) => (
-                            <button key={`${order.id}-${item.sku}`} type="button" onClick={() => openWorkflowForm(order, item)}>
-                              {item.sku || "بدون SKU"} · {journeyLabel(item.status)}
-                            </button>
-                          ))}
                         </div>
                       </td>
-                      <td>{moneyLabel(orderTotal(order))}</td>
+                      <td><strong className="money-val">{moneyLabel(total)}</strong></td>
+                      <td><span className="salla-status">{sallaStatus}</span></td>
                       <td>{orderTypeLabel(order)}</td>
-                      <td>{order.booking_ids?.length ? `${order.booking_ids.length} حجز` : "لم يحول"}</td>
                       <td>{order.scheduled_date ? `${fmtDate(order.scheduled_date)} ${order.scheduled_time || ""}` : "غير مجدول"}</td>
                       <td>
                         <div className="table-actions">

@@ -846,6 +846,31 @@ main {
   color: var(--muted);
 }
 
+.money-val {
+  color: var(--gold);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.salla-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.05);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.row-needs-review {
+  background: rgba(201, 164, 122, 0.06) !important;
+  border-right: 3px solid var(--gold);
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .order-products-cell button {
   width: max-content;
   max-width: 280px;
