@@ -2198,6 +2198,39 @@ img.quote-cover-logo {
   color: #0b355c;
 }
 
+/* Terms & Notes section */
+.invoice-terms-section {
+  margin: 18px 32px;
+  display: grid;
+  gap: 10px;
+}
+.invoice-terms-block {
+  padding: 12px 16px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.invoice-terms-block h4 {
+  margin: 0 0 8px;
+  color: #0b355c;
+  font-size: 13px;
+  font-weight: 800;
+}
+.invoice-terms-block p {
+  margin: 0;
+  color: #334155;
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.invoice-notes-block {
+  border-color: #d6a84f;
+  background: #fffdf7;
+}
+.invoice-notes-block h4 {
+  color: #b8860b;
+}
+
 /* ── Legacy invoice (still used) ───────────────────────── */
 
 .invoice-a4-doc {

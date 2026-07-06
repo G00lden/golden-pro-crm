@@ -344,6 +344,15 @@ function InvoiceFormModal({
       <button className="btn muted" type="button" onClick={() => setItems((cur) => [...cur, { description: "", quantity: 1, unit_price: 0, total: 0, vat_excluded: true }])}>
         + إضافة بند
       </button>
+      <hr />
+      <label className="field">
+        <span>الشروط والأحكام</span>
+        <textarea className="input" value={terms} onChange={(e) => setTerms(e.target.value)} rows={3} placeholder="شروط الدفع، سياسة الاسترجاع، الضمان..." />
+      </label>
+      <label className="field">
+        <span>ملاحظات إضافية (تظهر في الفاتورة)</span>
+        <textarea className="input" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="ملاحظات للفريق، لا تظهر للعميل..." />
+      </label>
       <div className="form-actions" style={{ marginTop: "1rem" }}>
         <button className="btn muted" type="button" onClick={onClose}>إلغاء</button>
         <button className="btn primary" type="submit" disabled={saving}>{saving ? "جاري..." : initial ? "حفظ التعديلات" : "إصدار الفاتورة"}</button>

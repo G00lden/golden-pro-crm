@@ -290,8 +290,19 @@ export function InvoicePreview({ invoice, onCopy, onPrint }: {
             </div>
           </div>
 
-          {invoice.terms && <p className="quote-doc-note" style={{ marginTop: 12 }}>{invoice.terms}</p>}
-          {invoice.notes && <p className="quote-doc-note">{invoice.notes}</p>}
+          {/* Terms & Notes Section — always visible as template */}
+          <div className="invoice-terms-section">
+            <div className="invoice-terms-block">
+              <h4>الشروط والأحكام</h4>
+              <p>{invoice.terms || "شروط الدفع، سياسة الاسترجاع، فترة الضمان، والرسوم الإضافية إن وجدت."}</p>
+            </div>
+            {invoice.notes && (
+              <div className="invoice-terms-block invoice-notes-block">
+                <h4>ملاحظات</h4>
+                <p>{invoice.notes}</p>
+              </div>
+            )}
+          </div>
 
           <footer className="quote-doc-foot" style={{ marginTop: "auto", paddingTop: 16, borderTop: "1px solid var(--line)" }}>
             <span>{sellerEnglishName}</span>
