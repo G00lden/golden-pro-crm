@@ -304,10 +304,25 @@ function cleanSignature(value?: string) {
   return String(value || "").trim().replace(/^sha256=/i, "");
 }
 
+// Canonical phone form (digits only, KSA-normalized to a 966 prefix) matching
+// server/whatsapp.ts (normalizePhone/toJid) and server/storeWebhook.ts, so
+// synced Salla orders dedupe against webhook imports and manual customers.
 function normalizePhone(phone: string) {
-  const trimmed = String(phone || "").trim();
-  if (trimmed.startsWith("+")) return truncate(`+${trimmed.replace(/\D/g, "")}`, 24);
-  return truncate(trimmed.replace(/[^\d+]/g, ""), 24);
+  let digits = String(phone || "").trim().replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
+  if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
+  return truncate(digits, 24);
+}
+
+// Salla splits the buyer number into `mobile` (551496683) and `mobile_code`
+// ("+966"); join them so the country code is never dropped.
+function joinCountryCode(code: unknown, number: unknown) {
+  const num = String(number ?? "").trim();
+  if (!num || num.startsWith("+")) return num;
+  const dialCode = String(code ?? "").trim();
+  return dialCode ? `${dialCode}${num}` : num;
 }
 
 function dateOnly(value: unknown, fallback = new Date()) {
@@ -649,12 +664,15 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
 
   const phone = normalizePhone(
     firstText(
+      joinCountryCode(customer.mobile_code, customer.mobile),
       customer.mobile,
       customer.phone,
       remoteOrder.mobile,
       remoteOrder.phone,
+      joinCountryCode(shipping.mobile_code, shipping.mobile),
       shipping.mobile,
       shipping.phone,
+      joinCountryCode(billing.mobile_code, billing.mobile),
       billing.mobile,
       billing.phone,
     ),
