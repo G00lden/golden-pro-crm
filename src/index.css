@@ -2238,6 +2238,13 @@ img.quote-cover-logo {
   flex-shrink: 0;
 }
 
+.invoice-brand-icon {
+  width: 46px;
+  height: 46px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
 .invoice-brand-block span,
 .invoice-title-block span {
   display: block;

@@ -212,7 +212,7 @@ export function InvoicePreview({ invoice, onCopy, onPrint }: {
               </small>
             </div>
             <div style={{ textAlign: "left" }}>
-              <img src="/brand/logo-256.png" alt="BreeXe Pro" className="invoice-brand-logo" />
+              <img src="/brand/icon-256.png" alt="BreeXe Pro" className="invoice-brand-icon" />
             </div>
           </header>
 
