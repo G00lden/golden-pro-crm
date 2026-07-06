@@ -60,6 +60,17 @@ export class WhatsAppService {
   private handledCalls = new Set<string>();
   private answeredCalls = new Set<string>();
 
+  // Add to a call-dedup set, evicting only the OLDEST entry when over the cap.
+  // (A full clear() would drop every id, so a late terminal event for an
+  // already-handled call could re-fire the missed-call apology.)
+  private boundedAdd(set: Set<string>, id: string, limit = 500) {
+    set.add(id);
+    if (set.size > limit) {
+      const oldest = set.values().next().value;
+      if (oldest !== undefined) set.delete(oldest);
+    }
+  }
+
   // Cache of recently-sent message content, keyed by message id. When a
   // recipient's device can't decrypt a message it shows "Waiting for this
   // message" and auto-sends a retry receipt; Baileys then calls getMessage() to
@@ -387,7 +398,7 @@ export class WhatsAppService {
         const status = String(call?.status || "");
 
         if (status === "accept") {
-          this.answeredCalls.add(id);
+          this.boundedAdd(this.answeredCalls, id);
           continue;
         }
 
@@ -403,9 +414,7 @@ export class WhatsAppService {
         // Treat a non-answered terminal status (or a rejected offer) as missed.
         const isMissed = status === "timeout" || status === "reject" || (status === "offer" && autoReject);
         if (isMissed && !this.answeredCalls.has(id) && !this.handledCalls.has(id)) {
-          this.handledCalls.add(id);
-          // bound memory: keep the set from growing unbounded
-          if (this.handledCalls.size > 500) this.handledCalls.clear();
+          this.boundedAdd(this.handledCalls, id);
           try {
             await this.incomingCallHandler?.(fromPhone);
           } catch (err) {

@@ -260,9 +260,11 @@ export async function handleWebhook(
 
           // 2. Confirmation keyword → stop reminders for that installation.
           const confirmed = parseConfirmation(text);
+          let customerConfirmed = false;
           if (confirmed) {
             try {
               const conf = recordCustomerConfirmation(ownerUid, String(message?.from || ""), text);
+              customerConfirmed = Boolean((conf as { matched?: boolean })?.matched);
               summary.push({ kind: "confirmation", phone: message?.from, matched_keyword: confirmed, ...conf });
             } catch (err) {
               logError("whatsapp.webhook.confirmation_save_failed", err);
@@ -280,8 +282,11 @@ export async function handleWebhook(
             }
           }
 
-          // 4. Technician acknowledgement → mark booking as confirmed.
-          const ack = isTechnicianAck(text);
+          // 4. Technician acknowledgement → mark booking as confirmed. Skipped
+          // when the message already confirmed a customer's reminder, so an
+          // overlapping keyword ("موافق"/"ok") isn't double-counted for a number
+          // that is both a customer and a technician.
+          const ack = customerConfirmed ? null : isTechnicianAck(text);
           if (ack) {
             try {
               const a = recordTechnicianAck(ownerUid, String(message?.from || ""));
