@@ -256,3 +256,24 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 ### للوكيل التالي
 - بقايا Definition-of-Done: 4.1 (بوابة دفع — Codex)، بنود الأمان (2.7/2.8/2.9/2.11/2.12)، وبنود التتبع/التشغيل.
 - 3.1 يستحق تدقيقًا كاملًا لكل النصوص الظاهرة (Hermes).
+
+---
+
+## آخر تحديث: 2026-07-05 — فحص تكامل Salla + دليل الربط [Claude Code]
+
+### فحص شامل (تم)
+راجعت تكامل Salla بالكامل (`server/salla.ts`, `routes-salla.ts`, `routes-store.ts`, `storeWebhook.ts`, التسجيل في `server.ts`). **النتيجة: جاهز إنتاجيًا، مفيش ثغرات حاجبة.**
+- أمان الـ webhook: HMAC-SHA256 على rawBody (محفوظ عبر `express.json({verify})` سطر 180)، مقارنة ثابتة الزمن، fail-closed (503/401). ✓
+- OAuth + Easy Mode + تجديد توكن تلقائي. ✓
+- الأحداث: app.store.authorize / app.uninstalled / order.* / product.* كلها معالَجة. ✓
+- منع تكرار عبر معرّفات مستندات ثابتة + merge. ✓
+- الراوتس مسجّلة (296)، الكرون كل 15د لو `SALLA_SYNC_CRON_ENABLED=true` (440). ✓
+
+### ملاحظة كفاءة (غير حاجبة)
+- كل حدث `product.*` يشغّل مزامنة منتجات كاملة — يستحق debounce لاحقًا لو زادت أحجام التحديثات.
+
+### أُضيف
+- `docs/salla-connect-runbook.md` — دليل ربط تطبيق سلة بالـ CRM (مسارات، env vars، أحداث، تحقق، استكشاف أخطاء).
+
+### الخطوة المتبقية (إعداد فقط — مهمة على جهاز الاستضافة)
+- ضبط env vars الخاصة بـ Salla في `.env` + إعداد لوحة Salla Partner + تثبيت التطبيق من المتجر. الكود لا يحتاج تعديلًا.
