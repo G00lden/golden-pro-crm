@@ -25,26 +25,32 @@ export function initMetaPixel(pixelId: string): void {
   if (initialized || typeof window === "undefined") return;
   initialized = true;
 
-  // Standard fbq base code
+  // Canonical Meta Pixel base code. When fbevents.js loads it replays
+  // `fbq.queue` via `fbq.callMethod`, so the queue/callMethod shape below must
+  // match Meta's official snippet — the previous stub pushed to a plain `_fbq`
+  // array that fbevents.js never reads, so init/track calls were never sent.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const win = window as any;
-  win.fbq =
-    win.fbq ||
-    function fbq(...args: unknown[]) {
-      win._fbq = win._fbq || [];
-      win._fbq.push(args);
+  const w = window as any;
+  if (!w.fbq) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n: any = function (...args: unknown[]) {
+      n.callMethod ? n.callMethod.apply(n, args) : n.queue.push(args);
     };
+    w.fbq = n;
+    if (!w._fbq) w._fbq = n;
+    n.push = n;
+    n.loaded = true;
+    n.version = "2.0";
+    n.queue = [];
 
-  // Load the fbq script
-  const script = document.createElement("script");
-  script.async = true;
-  script.src = "https://connect.facebook.net/en_US/fbevents.js";
-  document.head.appendChild(script);
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://connect.facebook.net/en_US/fbevents.js";
+    document.head.appendChild(script);
+  }
 
-  // Initial PageView — Meta requires this immediately after init
-  win._fbq = win._fbq || [];
-  win._fbq.push(["init", pixelId]);
-  win._fbq.push(["track", "PageView"]);
+  w.fbq("init", pixelId);
+  w.fbq("track", "PageView");
 }
 
 /**

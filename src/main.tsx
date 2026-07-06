@@ -15,6 +15,10 @@ import './index.css';
 // No third-party tracker loads until the visitor accepts the consent banner.
 // A returning visitor who already accepted is initialised immediately.
 function startTracking(): void {
+  // Master switch: VITE_ENABLE_TRACKING gates every tracker (GTM, GA4, Meta),
+  // not just GTM. Previously GA4/Meta loaded whenever their IDs were set even
+  // with tracking disabled.
+  if (import.meta.env.VITE_ENABLE_TRACKING !== 'true') return;
   initializeTracking(import.meta.env);
   const ga4Id = import.meta.env.VITE_GA4_ID as string | undefined;
   if (ga4Id) initGA4(ga4Id);
