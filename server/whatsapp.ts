@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { rm } from "fs/promises";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
 import type { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
@@ -27,6 +28,17 @@ export type WhatsAppStatus = {
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** True if a process with this PID is currently running. */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // ESRCH = no such process (dead). EPERM = exists but not ours (alive).
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
 
 export class WhatsAppService {
   private sock: any;
@@ -62,6 +74,75 @@ export class WhatsAppService {
     if (this.sentMessages.size > WhatsAppService.SENT_CACHE_LIMIT) {
       const oldest = this.sentMessages.keys().next().value;
       if (oldest !== undefined) this.sentMessages.delete(oldest);
+    }
+  }
+
+  /**
+   * Content Baileys should resend when a recipient's retry receipt arrives.
+   * Falls back to the persisted message text so retries still work after a
+   * server restart (when the in-memory cache is empty).
+   */
+  private resolveOutgoingMessage(id?: string | null): unknown {
+    if (!id) return undefined;
+    const cached = this.sentMessages.get(id);
+    if (cached) return cached;
+    try {
+      const row = db
+        .prepare(
+          "SELECT message FROM whatsapp_messages WHERE message_id = ? AND direction = 'outbound' ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(id) as { message?: string } | undefined;
+      if (row?.message) return { conversation: String(row.message) };
+    } catch {
+      /* DB unavailable — fall through */
+    }
+    return undefined;
+  }
+
+  private lockPath() {
+    return path.join(this.sessionDir, ".instance.lock");
+  }
+
+  /**
+   * Refuse to start if another *live* process already owns this WhatsApp
+   * session. Two sockets on one session desync the Signal encryption ratchet,
+   * which is the top cause of recipients seeing "Waiting for this message".
+   * Stale locks (dead PID) are taken over automatically; set
+   * WA_IGNORE_SESSION_LOCK=true to bypass.
+   */
+  private acquireSessionLock() {
+    if (process.env.WA_IGNORE_SESSION_LOCK === "true") return;
+    try {
+      mkdirSync(this.sessionDir, { recursive: true });
+    } catch {
+      /* ignore */
+    }
+    try {
+      const { pid } = JSON.parse(readFileSync(this.lockPath(), "utf8")) as { pid?: number };
+      if (typeof pid === "number" && pid !== process.pid && isProcessAlive(pid)) {
+        throw new Error(
+          `WhatsApp session "${this.sessionDir}" is already in use by another running process (PID ${pid}). ` +
+            `Running two instances on one session corrupts encryption and makes recipients see "Waiting for this message". ` +
+            `Stop the other instance, or set WA_IGNORE_SESSION_LOCK=true to override.`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("already in use")) throw err;
+      /* no/invalid lock file — safe to take over */
+    }
+    try {
+      writeFileSync(this.lockPath(), JSON.stringify({ pid: process.pid, ts: Date.now() }));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private releaseSessionLock() {
+    try {
+      const { pid } = JSON.parse(readFileSync(this.lockPath(), "utf8")) as { pid?: number };
+      if (pid === process.pid) unlinkSync(this.lockPath());
+    } catch {
+      /* ignore */
     }
   }
 
@@ -203,6 +284,9 @@ export class WhatsAppService {
   }
 
   private async createSocket() {
+    // Guard against two processes sharing one session (ratchet desync).
+    this.acquireSessionLock();
+
     const [
       {
         default: makeWASocket,
@@ -228,8 +312,7 @@ export class WhatsAppService {
       // Lets Baileys resend a message when the recipient's device failed to
       // decrypt it (retry receipt). Fixes recipients seeing "Waiting for this
       // message. This may take a while." indefinitely.
-      getMessage: async (key: any) =>
-        (key?.id ? this.sentMessages.get(key.id) : undefined) as any,
+      getMessage: async (key: any) => this.resolveOutgoingMessage(key?.id) as any,
     });
 
     this.sock = sock;
@@ -266,6 +349,10 @@ export class WhatsAppService {
         this.status = shouldReconnect ? "connecting" : "disconnected";
         this.lastError = lastDisconnect?.error?.message || "";
         this.notifyWaiters();
+
+        // Reconnecting keeps ownership; a terminal close (logout/manual) frees
+        // the session lock so a fresh instance can take over cleanly.
+        if (!shouldReconnect) this.releaseSessionLock();
 
         if (shouldReconnect) {
           await sleep(2_000);
