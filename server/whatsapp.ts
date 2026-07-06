@@ -68,6 +68,22 @@ export class WhatsAppService {
   private sentMessages = new Map<string, unknown>();
   private static readonly SENT_CACHE_LIMIT = 1000;
 
+  // Ids of inbound messages already routed, so a reconnect/redelivery doesn't
+  // re-process the same "نعم" and re-confirm reminders or re-fire auto-replies.
+  private processedInboundIds = new Set<string>();
+  private static readonly INBOUND_DEDUP_LIMIT = 2000;
+
+  private isDuplicateInbound(id: string | null | undefined): boolean {
+    if (!id) return false;
+    if (this.processedInboundIds.has(id)) return true;
+    this.processedInboundIds.add(id);
+    if (this.processedInboundIds.size > WhatsAppService.INBOUND_DEDUP_LIMIT) {
+      const oldest = this.processedInboundIds.values().next().value;
+      if (oldest !== undefined) this.processedInboundIds.delete(oldest);
+    }
+    return false;
+  }
+
   private rememberSentMessage(id: string | null | undefined, content: unknown) {
     if (!id || !content) return;
     this.sentMessages.set(id, content);
@@ -404,6 +420,9 @@ export class WhatsAppService {
     // digit). Skips our own messages, groups, and status broadcasts.
     sock.ev.on("messages.upsert", async (payload: any) => {
       if (!this.inboundMessageHandler) return;
+      // Only live messages. "append" carries history/offline sync that Baileys
+      // replays on reconnect — processing it would re-route old confirmations.
+      if (payload?.type && payload.type !== "notify") return;
       const messages = Array.isArray(payload?.messages) ? payload.messages : [];
       for (const m of messages) {
         try {
@@ -418,6 +437,7 @@ export class WhatsAppService {
             "";
           const fromPhone = this.jidToPhone(jid);
           if (!fromPhone || !text) continue;
+          if (this.isDuplicateInbound(m.key?.id)) continue; // WhatsApp redelivery
           await this.inboundMessageHandler(fromPhone, String(text));
         } catch (err) {
           void err;

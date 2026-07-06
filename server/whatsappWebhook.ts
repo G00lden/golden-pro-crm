@@ -235,6 +235,14 @@ export async function handleWebhook(
         const statuses = Array.isArray(value.statuses) ? value.statuses : [];
 
         for (const message of messages) {
+          // Meta retries webhook deliveries until it gets a 200; skip a message
+          // already recorded so we don't double-record or re-run confirmations.
+          if (message?.id) {
+            const seen = db
+              .prepare("SELECT 1 FROM whatsapp_messages WHERE message_id = ? AND direction = 'inbound' LIMIT 1")
+              .get(String(message.id));
+            if (seen) continue;
+          }
           const text = message?.text?.body || "";
           // 1. Persist inbound message for the conversation viewer.
           recordWhatsAppMessage({
