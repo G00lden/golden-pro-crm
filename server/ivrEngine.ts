@@ -518,7 +518,22 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
     ];
   }
 
-  const agent = pickAgentRoundRobin(department);
+  // Idempotent per call: if this call already picked an agent (e.g. the provider
+  // re-posted the DTMF webhook), reuse it instead of advancing the round-robin
+  // pointer again — which would skew distribution and reassign the call.
+  const existing = getCallBySid(call.callSid);
+  const agent: IvrAgent | null = existing?.agent_phone
+    ? {
+        id: String(existing.agent_user_id || existing.agent_phone || ""),
+        department_id: department.id,
+        owner_uid: ownerUid,
+        user_id: existing.agent_user_id != null ? String(existing.agent_user_id) : null,
+        name: String(existing.agent_name || ""),
+        phone: String(existing.agent_phone),
+        sort_order: 0,
+        active: true,
+      }
+    : pickAgentRoundRobin(department);
   if (!agent || !agent.phone) {
     // No reachable agent → treat as a missed call immediately so the customer
     // still gets a WhatsApp follow-up.
