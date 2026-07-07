@@ -754,7 +754,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
             <strong>{invoice.seller_vat_number || "-"}</strong>
           </article>
           <article>
-            <span>اسم البائع</span>
+            <span>المندوب</span>
             <strong>{exportSellerName || "-"}</strong>
           </article>
         </section>
@@ -838,7 +838,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
       <div className="form-actions">
         <div className="invoice-export-options">
           <label>
-            <span>اسم البائع عند التصدير</span>
+            <span>المندوب (يظهر على الفاتورة)</span>
             <select className="input" value={sellerOption} onChange={(event) => setSellerOption(event.target.value)}>
               {invoiceSellerOptions.map((name) => <option key={name} value={name}>{name}</option>)}
               <option value="custom">إضافة جديد</option>
