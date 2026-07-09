@@ -30,7 +30,9 @@
     "clean:win": "powershell -NoProfile -Command \"Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue\"",
     "lint": "tsc --noEmit",
     "supervisor:precheck": "node scripts/supervisor-precheck.mjs",
-    "supervisor:checklist": "node scripts/supervisor-checklist-stats.mjs"
+    "supervisor:checklist": "node scripts/supervisor-checklist-stats.mjs",
+    "backup:now": "node scripts/backup-now.mjs",
+    "restore:latest": "node scripts/restore-latest-backup.mjs"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
