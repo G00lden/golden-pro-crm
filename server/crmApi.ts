@@ -95,10 +95,17 @@ async function createOwned(table: string, uid: string, data: Record<string, unkn
   return ref.id;
 }
 
+// Fields a client must never be able to set through an update body. Several PUT
+// endpoints forward req.body straight here, so without this a caller could send
+// createdBy/owner_uid and reassign a record's ownership (mass assignment).
+const PROTECTED_UPDATE_FIELDS = ["createdBy", "owner_uid", "id", "createdAt"] as const;
+
 async function updateOwned(table: string, id: string, uid: string, data: Record<string, unknown>) {
   const existing = await getOwned(table, id, uid);
   if (!existing) return false;
-  await adminDb.collection(table).doc(id).update(clean({ ...data, updatedAt: nowIso() }));
+  const safe: Record<string, unknown> = { ...(data || {}) };
+  for (const field of PROTECTED_UPDATE_FIELDS) delete safe[field];
+  await adminDb.collection(table).doc(id).update(clean({ ...safe, updatedAt: nowIso() }));
   return true;
 }
 
