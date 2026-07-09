@@ -777,4 +777,18 @@ for (const col of [
   }
 }
 
+// Seller identity is saved per-owner via PUT /api/settings (defaultSettings
+// always includes these), but the settings table never declared the columns —
+// so on a fresh DB the seller name / VAT number / address never persisted.
+for (const col of [
+  ["seller_name", "TEXT DEFAULT ''"],
+  ["seller_vat", "TEXT DEFAULT ''"],
+  ["seller_vat_number", "TEXT DEFAULT ''"],
+  ["seller_address", "TEXT DEFAULT ''"],
+] as const) {
+  if (!hasColumn("settings", col[0])) {
+    db.exec(`ALTER TABLE settings ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
 export default db;
