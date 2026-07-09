@@ -155,6 +155,10 @@ export async function requireFirebaseUser(
       email,
       name,
       provider: (decoded.firebase as { sign_in_provider?: string })?.sign_in_provider || "firebase",
+      // Only trust the email for account-linking / first-admin seeding when
+      // Firebase says it's verified — otherwise an unverified email matching a
+      // pre-provisioned invite could inherit that account's role.
+      emailVerified: (decoded as { email_verified?: boolean }).email_verified === true,
     });
 
     if (!record.active) {
