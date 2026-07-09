@@ -468,6 +468,12 @@ export type QuoteItem = {
   vat_excluded?: boolean;
 };
 
+export type QuoteInstallment = {
+  percent: number;
+  label: string;
+  deadline_days?: number;
+};
+
 export type Quote = {
   id: string;
   quote_number: string;
@@ -495,6 +501,7 @@ export type Quote = {
   payment_account?: string;
   payment_iban?: string;
   payment_note?: string;
+  installments?: QuoteInstallment[];
   items: QuoteItem[];
   notes?: string;
   terms?: string;

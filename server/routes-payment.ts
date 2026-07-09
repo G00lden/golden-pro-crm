@@ -227,7 +227,7 @@ async function createTapCharge(params: {
 
   return {
     tapChargeId: raw.id as string,
-    redirectUrl: (raw.transaction?.url as string) || (raw as any).url || "",
+    redirectUrl: (raw.transaction as { url?: string } | undefined)?.url || (raw as any).url || "",
     status: raw.status as string,
     raw,
   };
@@ -352,7 +352,7 @@ export function registerPaymentWebhookRoute(app: Express) {
         markInvoicePaid(payment.invoice_id);
       }
 
-      logEvent("payment.webhook_received", {
+      logEvent("info", "payment.webhook_received", {
         paymentId: payment.id,
         tapChargeId,
         tapStatus: chargeStatus,
@@ -452,7 +452,7 @@ export function registerPaymentRoutes(app: Express) {
         webhook_data: null,
       });
 
-      logEvent("payment.charge_created", {
+      logEvent("info", "payment.charge_created", {
         paymentId,
         invoiceId: invoice.id,
         tapChargeId: tapResult.tapChargeId,
@@ -536,7 +536,7 @@ export function registerPaymentRoutes(app: Express) {
         markInvoicePaid(payment.invoice_id);
       }
 
-      logEvent("payment.webhook_received", {
+      logEvent("info", "payment.webhook_received", {
         paymentId: payment.id,
         tapChargeId,
         tapStatus: chargeStatus,
