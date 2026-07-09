@@ -1,0 +1,47 @@
+name: Deploy to VPS
+
+# Continuous deployment: on every push to main (after CI passes), SSH into the
+# VPS and run the update script, which pulls, rebuilds, health-checks, and rolls
+# back automatically if the new build is unhealthy.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   VPS_HOST     — server IP or hostname
+#   VPS_USER     — SSH user that owns the app dir (e.g. goldencrm or root)
+#   VPS_SSH_KEY  — the PRIVATE SSH key whose public half is in the VPS user's authorized_keys
+#   APP_DIR      — absolute path of the cloned repo on the VPS (e.g. /opt/golden-pro-crm)
+# Optional:
+#   VPS_PORT     — SSH port (defaults to 22)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # allow manual "Run workflow"
+
+concurrency:
+  group: deploy-production   # never run two deploys at once
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VPS_HOST:-}" ] || [ -z "${VPS_USER:-}" ] || [ -z "${VPS_SSH_KEY:-}" ] || [ -z "${APP_DIR:-}" ]; then
+            echo "::notice::VPS secrets not configured yet — skipping deploy. Set VPS_HOST, VPS_USER, VPS_SSH_KEY, APP_DIR to enable (see docs/vps-cicd-backups-ar.md)."
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          PORT="${VPS_PORT:-22}"
+          ssh-keyscan -p "$PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/id_deploy -p "$PORT" -o StrictHostKeyChecking=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "cd '$APP_DIR' && DEPLOY_BRANCH=main bash scripts/vps-update.sh"
