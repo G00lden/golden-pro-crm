@@ -103,9 +103,20 @@ export function countUsers(): number {
   return Number(row?.c || 0);
 }
 
-function countFirebaseAdmins(): number {
+// Count admins of ANY provider. The seed-admin rule must not auto-promote a new
+// sign-in whenever *this* provider has no admin yet — if a local-dev owner or a
+// manually-invited admin already exists, the system already has an administrator.
+function countAdmins(): number {
   const row = db
-    .prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND IFNULL(provider,'') NOT IN ('local-dev','manual')")
+    .prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'")
+    .get() as { c: number };
+  return Number(row?.c || 0);
+}
+
+// Active admins only — used to block removing/demoting the last one (lockout guard).
+function countActiveAdmins(): number {
+  const row = db
+    .prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1")
     .get() as { c: number };
   return Number(row?.c || 0);
 }
@@ -173,12 +184,14 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
   // Seed-admin rule:
   //   * The configured local-dev owner remains admin for single-tenant demos.
   //   * Arbitrary local-dev:<uid> identities join as users.
-  //   * The FIRST real Firebase/Google sign-in becomes admin if no Firebase admin
-  //     exists yet — but only when its email is VERIFIED (never an unverified one).
+  //   * The FIRST real Firebase/Google sign-in becomes admin if NO admin exists
+  //     yet (any provider) — but only when its email is VERIFIED. Once any admin
+  //     exists (local-dev owner or a manual invite included), new sign-ins do not
+  //     self-promote.
   //   * Everyone afterwards joins as "user" and must be promoted by an admin.
   const role: UserRole =
     (isLocalDev && input.uid === localOwnerUid) ||
-    (!isLocalDev && input.emailVerified === true && countFirebaseAdmins() === 0)
+    (!isLocalDev && input.emailVerified === true && countAdmins() === 0)
       ? "admin"
       : "user";
   const id = newId();
@@ -350,7 +363,8 @@ export function registerUserAdminRoutes(app: Express) {
 
   app.put("/api/admin/users/:id", requireRole(["admin"]), (req, res) => {
     const id = req.params.id;
-    if (!getUserById(id)) {
+    const target = getUserById(id);
+    if (!target) {
       res.status(404).json({ error: "المستخدم غير موجود." });
       return;
     }
@@ -362,6 +376,20 @@ export function registerUserAdminRoutes(app: Express) {
       permissions: Record<string, boolean>;
       active: boolean;
     }>;
+    const me = (req as AuthedRequest).user;
+    const willDeactivate = body.active === false;
+    const willDemote = body.role !== undefined && normalizeRole(body.role) !== "admin";
+    // Same self-guard as /deactivate: can't disable your own account mid-session.
+    if (willDeactivate && target.uid && me && target.uid === me.uid) {
+      res.status(400).json({ error: "لا يمكنك تعطيل حسابك أثناء استخدامه." });
+      return;
+    }
+    // Never let the last active admin be demoted or deactivated — it would lock
+    // everyone out of every admin-gated route.
+    if (target.role === "admin" && target.active && (willDeactivate || willDemote) && countActiveAdmins() <= 1) {
+      res.status(400).json({ error: "لا يمكن إزالة آخر مسؤول نشط في النظام." });
+      return;
+    }
     const updated = updateUserFields(id, body);
     res.json({ user: updated });
   });
@@ -376,6 +404,10 @@ export function registerUserAdminRoutes(app: Express) {
     const me = (req as AuthedRequest).user;
     if (target.uid && me && target.uid === me.uid) {
       res.status(400).json({ error: "لا يمكنك تعطيل حسابك أثناء استخدامه." });
+      return;
+    }
+    if (target.role === "admin" && target.active && countActiveAdmins() <= 1) {
+      res.status(400).json({ error: "لا يمكن تعطيل آخر مسؤول نشط في النظام." });
       return;
     }
     const updated = updateUserFields(id, { active: false });
@@ -402,6 +434,10 @@ export function registerUserAdminRoutes(app: Express) {
     const me = (req as AuthedRequest).user;
     if (target.uid && me && target.uid === me.uid) {
       res.status(400).json({ error: "لا يمكنك حذف حسابك أثناء استخدامه." });
+      return;
+    }
+    if (target.role === "admin" && target.active && countActiveAdmins() <= 1) {
+      res.status(400).json({ error: "لا يمكن حذف آخر مسؤول نشط في النظام." });
       return;
     }
     db.prepare("DELETE FROM users WHERE id = ?").run(id);
