@@ -116,6 +116,35 @@ async function deleteOwned(table: string, id: string, uid: string) {
   return true;
 }
 
+/** Count the owner's rows in `table` whose `field` equals `value`. */
+async function countReferencing(table: string, field: string, value: string, uid: string): Promise<number> {
+  const snap = await adminDb
+    .collection(table)
+    .where("createdBy", "==", uid)
+    .where(field, "==", value)
+    .get();
+  return snap.size;
+}
+
+/**
+ * Reference-integrity guard for hard-deletes. Returns an Arabic description of
+ * the records that still point at this entity (so deleting it would orphan
+ * their foreign keys), or null when nothing references it. We RESTRICT rather
+ * than cascade — cascading a customer/product delete would silently destroy the
+ * linked installations and bookings.
+ */
+async function findBlockingReferences(
+  uid: string,
+  checks: Array<{ table: string; field: string; value: string; label: string }>,
+): Promise<string | null> {
+  const blockers: string[] = [];
+  for (const c of checks) {
+    const count = await countReferencing(c.table, c.field, c.value, uid);
+    if (count > 0) blockers.push(`${c.label} (${count})`);
+  }
+  return blockers.length ? blockers.join("، ") : null;
+}
+
 async function stats(uid: string) {
   const [customers, products, technicians, installations, reminders, quotes, settings] = await Promise.all([
     listOwned("customers", uid, undefined, 1000),
@@ -428,7 +457,16 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.delete("/api/customers/:id", asyncRoute(async (req, res) => {
-    if (!(await deleteOwned("customers", req.params.id, userId(req)))) return res.status(404).json({ error: "Customer was not found." });
+    const uid = userId(req);
+    const id = req.params.id;
+    const blocking = await findBlockingReferences(uid, [
+      { table: "installations", field: "customer_id", value: id, label: "تركيبات" },
+      { table: "bookings", field: "customer_id", value: id, label: "حجوزات" },
+    ]);
+    if (blocking) {
+      return res.status(409).json({ error: `لا يمكن حذف العميل لارتباطه بسجلات: ${blocking}. احذفها أو أعد إسنادها أولًا.` });
+    }
+    if (!(await deleteOwned("customers", id, uid))) return res.status(404).json({ error: "Customer was not found." });
     res.json({ success: true });
   }));
 
@@ -585,7 +623,16 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.delete("/api/products/:id", asyncRoute(async (req, res) => {
-    if (!(await deleteOwned("products", req.params.id, userId(req)))) return res.status(404).json({ error: "Product was not found." });
+    const uid = userId(req);
+    const id = req.params.id;
+    const blocking = await findBlockingReferences(uid, [
+      { table: "installations", field: "product_id", value: id, label: "تركيبات" },
+      { table: "bookings", field: "product_id", value: id, label: "حجوزات" },
+    ]);
+    if (blocking) {
+      return res.status(409).json({ error: `لا يمكن حذف المنتج لارتباطه بسجلات: ${blocking}. احذفها أو أعد إسنادها أولًا.` });
+    }
+    if (!(await deleteOwned("products", id, uid))) return res.status(404).json({ error: "Product was not found." });
     res.json({ success: true });
   }));
 
@@ -650,7 +697,16 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.delete("/api/technicians/:id", asyncRoute(async (req, res) => {
-    if (!(await deleteOwned("technicians", req.params.id, userId(req)))) return res.status(404).json({ error: "Technician was not found." });
+    const uid = userId(req);
+    const id = req.params.id;
+    // installations carry no technician_id — only bookings reference technicians.
+    const blocking = await findBlockingReferences(uid, [
+      { table: "bookings", field: "technician_id", value: id, label: "حجوزات" },
+    ]);
+    if (blocking) {
+      return res.status(409).json({ error: `لا يمكن حذف الفني لارتباطه بسجلات: ${blocking}. احذفها أو أعد إسنادها أولًا.` });
+    }
+    if (!(await deleteOwned("technicians", id, uid))) return res.status(404).json({ error: "Technician was not found." });
     res.json({ success: true });
   }));
 
