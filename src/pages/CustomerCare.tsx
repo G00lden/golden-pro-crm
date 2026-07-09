@@ -26,6 +26,16 @@ export default function CustomerCarePage({
   const queue = useData(api.getCustomerCareQueue);
   const [sendingId, setSendingId] = useState("");
 
+  const copyPhone = async (phone: string) => {
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(phone);
+      notify("تم نسخ رقم العميل");
+    } catch {
+      notify(`تعذّر النسخ تلقائيًا. الرقم: ${phone}`, false);
+    }
+  };
+
   const sendReminder = async (item: api.CustomerCareItem) => {
     if (!item.installation_id) {
       notify("هذا العميل يحتاج تواصل يدوي أولا قبل إرسال تذكير صيانة.", false);
@@ -72,7 +82,7 @@ export default function CustomerCarePage({
                     <Send size={16} /> إرسال تذكير
                   </Button>
                 ) : (
-                  <Button tone="muted" onClick={() => navigator.clipboard?.writeText(item.customer_phone)}>
+                  <Button tone="muted" onClick={() => copyPhone(item.customer_phone)}>
                     <ClipboardList size={16} /> نسخ الرقم
                   </Button>
                 )}

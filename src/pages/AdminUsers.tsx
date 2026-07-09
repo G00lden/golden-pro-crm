@@ -1,5 +1,5 @@
 import { Edit3, Plus, RefreshCcw, Save, Search, Trash2, UserPlus, UserRoundCog, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import { UserRoleBadge } from "../components/UserRoleBadge";
 
@@ -42,7 +42,13 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
   const [edit, setEdit] = useState<api.ManagedAppUser | null>(null);
   const [create, setCreate] = useState(false);
 
+  const requestSeq = useRef(0);
+
   const refresh = useCallback(async () => {
+    // Guard against out-of-order responses: a slower earlier request must not
+    // overwrite the results of a newer filter/search. Only the latest request
+    // is allowed to apply its result.
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError("");
     try {
@@ -51,11 +57,13 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
         role: roleFilter || undefined,
         active: activeFilter === "" ? undefined : activeFilter === "true",
       });
+      if (seq !== requestSeq.current) return;
       setUsers(res.users);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [search, roleFilter, activeFilter]);
 
