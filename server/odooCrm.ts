@@ -2,6 +2,7 @@ import crypto from "crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import db from "./db";
 import type { AuthedRequest } from "./auth";
+import { todayInTimeZone } from "./reminderEngine";
 
 type CrmStage = "lead" | "opportunity" | "quote" | "invoice" | "paid" | "lost";
 type CrmTaskStatus = "open" | "done" | "cancelled";
@@ -113,12 +114,32 @@ function listPipeline(ownerUid: string) {
   const linkedQuotes = new Set(deals.map((deal) => String(deal.quote_id || "")).filter(Boolean));
   const linkedInvoices = new Set(deals.map((deal) => String(deal.invoice_id || "")).filter(Boolean));
 
+  // Terminal statuses are no longer live pipeline: a declined/expired quote or a
+  // cancelled/refunded invoice is a dead sale and must not be counted as active
+  // pipeline value.
+  const DEAD_QUOTE_STATUSES = new Set(["declined", "expired"]);
+  const DEAD_INVOICE_STATUSES = new Set(["cancelled", "refunded"]);
+
+  const invoiceRows = rows(
+    `SELECT id, invoice_number, quote_id, customer_id, customer_name, customer_phone, title, status, total_with_vat, currency, due_date, paid_at, updated_at, created_at
+     FROM invoices WHERE owner_uid = ? ORDER BY created_at DESC LIMIT 300`,
+    ownerUid,
+  );
+
+  // A quote that has already been converted to an invoice is represented by that
+  // invoice — don't also count it in the "quote" stage, or one sale is counted twice.
+  const invoicedQuoteIds = new Set(
+    invoiceRows.map((invoice) => String(invoice.quote_id || "")).filter(Boolean),
+  );
+
   const quoteDeals = rows(
     `SELECT id, quote_number, customer_id, customer_name, customer_phone, title, status, total, currency, follow_up_date, updated_at, created_at
      FROM quotes WHERE owner_uid = ? ORDER BY created_at DESC LIMIT 300`,
     ownerUid,
   )
     .filter((quote) => !linkedQuotes.has(String(quote.id)))
+    .filter((quote) => !invoicedQuoteIds.has(String(quote.id)))
+    .filter((quote) => !DEAD_QUOTE_STATUSES.has(String(quote.status || "")))
     .map((quote) => ({
       id: `quote:${quote.id}`,
       record_type: "quote",
@@ -139,12 +160,9 @@ function listPipeline(ownerUid: string) {
       source: "quote",
     }));
 
-  const invoiceDeals = rows(
-    `SELECT id, invoice_number, quote_id, customer_id, customer_name, customer_phone, title, status, total_with_vat, currency, due_date, paid_at, updated_at, created_at
-     FROM invoices WHERE owner_uid = ? ORDER BY created_at DESC LIMIT 300`,
-    ownerUid,
-  )
+  const invoiceDeals = invoiceRows
     .filter((invoice) => !linkedInvoices.has(String(invoice.id)))
+    .filter((invoice) => !DEAD_INVOICE_STATUSES.has(String(invoice.status || "")))
     .map((invoice) => ({
       id: `invoice:${invoice.id}`,
       record_type: "invoice",
@@ -181,7 +199,9 @@ function listPipeline(ownerUid: string) {
 
 function dashboard(ownerUid: string) {
   const pipeline = listPipeline(ownerUid);
-  const today = new Date().toISOString().slice(0, 10);
+  // Use the project's Asia/Riyadh day boundary — not UTC — so overdue/follow-up
+  // counts don't shift by a day during the nightly UTC/KSA window.
+  const today = todayInTimeZone();
   const paid = row<{ total: number; count: number }>(
     "SELECT COALESCE(SUM(total_with_vat),0) AS total, COUNT(*) AS count FROM invoices WHERE owner_uid = ? AND status = 'paid'",
     ownerUid,
@@ -196,7 +216,10 @@ function dashboard(ownerUid: string) {
     today,
   ) || { total: 0, count: 0 };
   const followUps = row<{ count: number }>(
-    "SELECT COUNT(*) AS count FROM quotes WHERE owner_uid = ? AND status IN ('issued','sent') AND follow_up_date IS NOT NULL AND follow_up_date <= ?",
+    // Follow-ups are open quotes that still need chasing: 'issued' (sent, awaiting a
+    // decision) and 'follow_up' (explicitly flagged). 'sent' is an invoice status, not
+    // a quote status, so the old filter matched nothing there and dropped 'follow_up'.
+    "SELECT COUNT(*) AS count FROM quotes WHERE owner_uid = ? AND status IN ('issued','follow_up') AND follow_up_date IS NOT NULL AND follow_up_date <= ?",
     ownerUid,
     today,
   ) || { count: 0 };
