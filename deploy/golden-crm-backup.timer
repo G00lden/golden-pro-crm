@@ -1,0 +1,11 @@
+# Daily backup at 03:15 server time, with catch-up if the server was off.
+[Unit]
+Description=Daily Golden Pro CRM backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
