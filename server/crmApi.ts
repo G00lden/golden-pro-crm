@@ -217,6 +217,15 @@ function quoteTotals(items: Array<{ total: number }>, discount = 0, tax = 0) {
 }
 
 function quotePaymentFields(row: Record<string, any>, existing?: Record<string, any>) {
+  const installments = (() => {
+    const raw = row.installments ?? existing?.installments;
+    if (Array.isArray(raw) && raw.length) return raw;
+    // fallback: build from legacy flat fields
+    return [
+      { percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70), label: String(row.payment_down_text || existing?.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim(), deadline_days: undefined },
+      { percent: Number(row.payment_final_percent ?? existing?.payment_final_percent ?? 30), label: String(row.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim(), deadline_days: undefined },
+    ];
+  })();
   return {
     payment_method: String(row.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
     payment_down_percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70),
@@ -227,12 +236,17 @@ function quotePaymentFields(row: Record<string, any>, existing?: Record<string, 
     payment_account: String(row.payment_account || existing?.payment_account || "Breexe Pro").trim(),
     payment_iban: String(row.payment_iban || existing?.payment_iban || "").trim(),
     payment_note: String(row.payment_note || existing?.payment_note || "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.").trim(),
+    installments: JSON.stringify(installments),
   };
 }
 
 function normalizeQuote(row: Record<string, any>): Record<string, any> {
   const items = normalizeQuoteItems(row.items);
   const totals = quoteTotals(items, row.discount, row.tax);
+  let installments = row.installments;
+  if (typeof installments === "string") {
+    try { installments = JSON.parse(installments); } catch { installments = undefined; }
+  }
   return {
     ...row,
     customer_id: row.customer_id || null,
@@ -247,6 +261,7 @@ function normalizeQuote(row: Record<string, any>): Record<string, any> {
     confirmed_at: row.confirmed_at || null,
     items,
     ...quotePaymentFields(row),
+    installments: installments || undefined,
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
     tax: Number(row.tax ?? totals.tax),

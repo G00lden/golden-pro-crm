@@ -81,6 +81,10 @@ const defaultPayment = {
   account: "BreeXe Pro",
   iban: "",
   note: "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.",
+  installments: [
+    { percent: 70, label: "عند اعتماد العرض وبدء تنفيذ الطلب." },
+    { percent: 30, label: "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل." },
+  ] as api.QuoteInstallment[],
 };
 
 const quoteTemplates = [
@@ -149,17 +153,26 @@ const escapeHtml = (value: string) =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-const paymentForQuote = (quote: api.Quote) => ({
-  method: quote.payment_method || defaultPayment.method,
-  downPercent: Number(quote.payment_down_percent ?? defaultPayment.downPercent),
-  finalPercent: Number(quote.payment_final_percent ?? defaultPayment.finalPercent),
-  downText: quote.payment_down_text || defaultPayment.downText,
-  finalText: quote.payment_final_text || defaultPayment.finalText,
-  bank: quote.payment_bank || defaultPayment.bank,
-  account: quote.payment_account || defaultPayment.account,
-  iban: quote.payment_iban || defaultPayment.iban,
-  note: quote.payment_note || defaultPayment.note,
-});
+const paymentForQuote = (quote: api.Quote) => {
+  const installments = quote.installments?.length
+    ? quote.installments
+    : [
+        { percent: Number(quote.payment_down_percent ?? defaultPayment.downPercent), label: quote.payment_down_text || defaultPayment.downText },
+        { percent: Number(quote.payment_final_percent ?? defaultPayment.finalPercent), label: quote.payment_final_text || defaultPayment.finalText },
+      ];
+  return {
+    method: quote.payment_method || defaultPayment.method,
+    downPercent: Number(quote.payment_down_percent ?? defaultPayment.downPercent),
+    finalPercent: Number(quote.payment_final_percent ?? defaultPayment.finalPercent),
+    downText: quote.payment_down_text || defaultPayment.downText,
+    finalText: quote.payment_final_text || defaultPayment.finalText,
+    bank: quote.payment_bank || defaultPayment.bank,
+    account: quote.payment_account || defaultPayment.account,
+    iban: quote.payment_iban || defaultPayment.iban,
+    note: quote.payment_note || defaultPayment.note,
+    installments,
+  };
+};
 
 const quoteStandaloneCss = `
   @page { size: A4; margin: 0; }
@@ -732,12 +745,14 @@ function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: ()
             <h3>طريقة الدفع</h3>
             <div className="quote-payment-summary">
               <article><span>الطريقة</span><strong>{payment.method}</strong></article>
-              <article><span>الدفعة الأولى</span><strong>{payment.downPercent}% · {money((quote.total || 0) * payment.downPercent / 100, quote.currency)}</strong></article>
-              <article><span>الدفعة النهائية</span><strong>{payment.finalPercent}% · {money((quote.total || 0) * payment.finalPercent / 100, quote.currency)}</strong></article>
+              {payment.installments.map((inst, i) => (
+                <article key={i}><span>{i === 0 ? "الدفعة الأولى" : i === payment.installments.length - 1 ? "الدفعة النهائية" : `الدفعة ${i + 1}`}</span><strong>{inst.percent}% · {money((quote.total || 0) * inst.percent / 100, quote.currency)}</strong></article>
+              ))}
             </div>
             <div className="quote-payment-grid">
-              <p><strong>الدفعة الأولى:</strong><br />{payment.downText}</p>
-              <p><strong>الدفعة النهائية:</strong><br />{payment.finalText}</p>
+              {payment.installments.map((inst, i) => (
+                <p key={i}><strong>{i === 0 ? "الدفعة الأولى:" : i === payment.installments.length - 1 ? "الدفعة النهائية:" : `الدفعة ${i + 1}:`}</strong><br />{inst.label}{inst.deadline_days ? ` (خلال ${inst.deadline_days} يوم)` : ""}</p>
+              ))}
             </div>
             {(payment.bank || payment.account || payment.iban || payment.note) && (
               <div className="quote-bank-box">
@@ -802,6 +817,19 @@ function QuoteForm({
   );
   const [saving, setSaving] = useState(false);
 
+  // Payment fields
+  const [paymentMethod, setPaymentMethod] = useState(initial?.payment_method || defaultPayment.method);
+  const [paymentBank, setPaymentBank] = useState(initial?.payment_bank || defaultPayment.bank);
+  const [paymentAccount, setPaymentAccount] = useState(initial?.payment_account || defaultPayment.account);
+  const [paymentIban, setPaymentIban] = useState(initial?.payment_iban || defaultPayment.iban);
+  const [paymentNote, setPaymentNote] = useState(initial?.payment_note || defaultPayment.note);
+  const [installments, setInstallments] = useState<api.QuoteInstallment[]>(
+    initial?.installments?.length ? initial.installments : [...defaultPayment.installments],
+  );
+
+  const installmentsTotal = installments.reduce((s, i) => s + i.percent, 0);
+  const canAddInstallment = installments.length < 6 && installmentsTotal < 100;
+
   const selectedCustomer = customers.data?.data.find((item) => item.id === customerId);
 
   useEffect(() => {
@@ -863,6 +891,12 @@ function QuoteForm({
         items: normalizedItems.filter((item) => item.description.trim()),
         notes: notes.trim(),
         terms: terms.trim(),
+        payment_method: paymentMethod,
+        payment_bank: paymentBank,
+        payment_account: paymentAccount,
+        payment_iban: paymentIban,
+        payment_note: paymentNote,
+        installments,
       });
     } finally {
       setSaving(false);
@@ -1033,6 +1067,91 @@ function QuoteForm({
         <span>الشروط التي تظهر في العرض</span>
         <textarea className="input textarea" value={terms} onChange={(event) => setTerms(event.target.value)} />
       </label>
+
+      <fieldset className="quote-payment-form">
+        <legend>طريقة الدفع</legend>
+
+        <div className="form-grid">
+          <label className="field">
+            <span>طريقة الدفع</span>
+            <select className="input" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
+              <option value="تحويل بنكي">تحويل بنكي</option>
+              <option value="نقدي">نقدي</option>
+              <option value="بطاقة ائتمان">بطاقة ائتمان</option>
+              <option value="مدى">مدى</option>
+              <option value="شيك">شيك</option>
+              <option value="أخرى">أخرى</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="quote-installments-section">
+          <div className="quote-installments-head">
+            <strong>جدول الدفعات</strong>
+            <span className="muted">المجموع: {installmentsTotal}% {installmentsTotal !== 100 ? <b className="warn">(يجب أن يساوي 100%)</b> : <b className="ok">✓</b>}</span>
+          </div>
+
+          {installments.map((inst, i) => (
+            <div className="quote-installment-row" key={i}>
+              <span className="inst-num">الدفعة {i + 1}</span>
+              <label className="inst-pct">
+                <span>%</span>
+                <input className="input" type="number" min={1} max={100} value={inst.percent}
+                  onChange={(e) => {
+                    const v = Math.max(1, Math.min(100, Number(e.target.value) || 1));
+                    setInstallments((prev) => prev.map((x, j) => j === i ? { ...x, percent: v } : x));
+                  }} />
+              </label>
+              <label className="inst-label">
+                <span>وصف / شرط الدفعة</span>
+                <input className="input" value={inst.label}
+                  onChange={(e) => setInstallments((prev) => prev.map((x, j) => j === i ? { ...x, label: e.target.value } : x))}
+                  placeholder="مثال: عند التوقيع" />
+              </label>
+              <label className="inst-deadline">
+                <span>مهلة (أيام)</span>
+                <input className="input" type="number" min={0} value={inst.deadline_days ?? ""}
+                  onChange={(e) => setInstallments((prev) => prev.map((x, j) => j === i ? { ...x, deadline_days: e.target.value ? Number(e.target.value) : undefined } : x))}
+                  placeholder="اختياري" />
+              </label>
+              <button className="icon-btn danger" type="button" title="حذف الدفعة"
+                onClick={() => setInstallments((prev) => prev.filter((_, j) => j !== i))}
+                disabled={installments.length <= 1}>
+                <X size={15} />
+              </button>
+            </div>
+          ))}
+
+          <div className="quote-installments-actions">
+            <button className="btn muted" type="button" disabled={!canAddInstallment}
+              onClick={() => setInstallments((prev) => [...prev, { percent: 0, label: "" }])}>
+              <Plus size={14} /> إضافة دفعة
+            </button>
+          </div>
+        </div>
+
+        <div className="form-grid">
+          <label className="field">
+            <span>البنك</span>
+            <input className="input" value={paymentBank} onChange={(e) => setPaymentBank(e.target.value)} placeholder="اسم البنك" />
+          </label>
+          <label className="field">
+            <span>اسم الحساب</span>
+            <input className="input" value={paymentAccount} onChange={(e) => setPaymentAccount(e.target.value)} placeholder="صاحب الحساب" />
+          </label>
+        </div>
+
+        <div className="form-grid">
+          <label className="field">
+            <span>IBAN</span>
+            <input className="input" value={paymentIban} onChange={(e) => setPaymentIban(e.target.value)} placeholder="رقم الآيبان" />
+          </label>
+          <label className="field">
+            <span>ملاحظة الدفع</span>
+            <input className="input" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} placeholder="تظهر في أسفل العرض" />
+          </label>
+        </div>
+      </fieldset>
 
       <div className="form-actions">
         <button className="btn primary" type="submit" disabled={saving}>

@@ -1643,6 +1643,85 @@ main {
   font-size: 12px;
 }
 
+/* ── Installment editor ───────────────────────── */
+.quote-installments-section {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(214, 168, 79, 0.25);
+  border-radius: 8px;
+  background: rgba(214, 168, 79, 0.04);
+}
+
+.quote-installments-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.quote-installments-head strong {
+  color: var(--gold);
+  font-size: 13px;
+}
+
+.quote-installments-head .ok { color: var(--teal); }
+.quote-installments-head .warn { color: var(--orange); }
+
+.quote-installment-row {
+  display: grid;
+  grid-template-columns: 60px 70px 1fr 90px 36px;
+  gap: 8px;
+  align-items: end;
+  padding: 8px;
+  border: 1px solid rgba(154, 167, 182, 0.12);
+  border-radius: 8px;
+  background: rgba(12, 17, 24, 0.6);
+}
+
+.inst-num {
+  display: grid;
+  align-items: center;
+  min-height: 34px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.inst-pct,
+.inst-label,
+.inst-deadline {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.inst-pct span,
+.inst-label span,
+.inst-deadline span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.inst-pct .input { text-align: center; }
+
+.quote-installments-actions {
+  display: flex;
+  justify-content: flex-start;
+  padding-top: 4px;
+}
+
+@media (max-width: 820px) {
+  .quote-installment-row {
+    grid-template-columns: 1fr 70px 36px;
+    gap: 6px;
+  }
+  .inst-num { grid-column: 1 / -1; }
+}
+
 .textarea.compact {
   min-height: 72px;
 }

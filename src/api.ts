@@ -1327,6 +1327,14 @@ function quoteTotals(items: QuoteItem[], discount = 0, tax = 0) {
 }
 
 function quotePaymentFields(data: QuoteInput, existing?: Quote) {
+  const installments = data.installments?.length
+    ? data.installments
+    : existing?.installments?.length
+      ? existing.installments
+      : [
+          { percent: Number(data.payment_down_percent ?? 70), label: String(data.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim() },
+          { percent: Number(data.payment_final_percent ?? 30), label: String(data.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim() },
+        ];
   return {
     payment_method: String(data.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
     payment_down_percent: Number(data.payment_down_percent ?? existing?.payment_down_percent ?? 70),
@@ -1337,6 +1345,7 @@ function quotePaymentFields(data: QuoteInput, existing?: Quote) {
     payment_account: String(data.payment_account || existing?.payment_account || "BreeXe Pro").trim(),
     payment_iban: String(data.payment_iban || existing?.payment_iban || "").trim(),
     payment_note: String(data.payment_note || existing?.payment_note || "يرجى إرسال إيصال التحويل بعد الدفع لتأكيد الطلب.").trim(),
+    installments,
   };
 }
 
@@ -3368,4 +3377,34 @@ export type GatewayStatus = {
 };
 
 export const getGatewayStatus = () => apiFetch<GatewayStatus>("/api/gateway/status");
+
+// ── Tap Payment Gateway ──
+
+export interface PaymentResponse {
+  id: string;
+  invoice_id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  redirect_url?: string;
+  created_at: string;
+}
+
+export const createPayment = async (invoiceId: string) => {
+  const user = getUserOrThrow();
+  const uid = user.uid;
+  if (user.local) {
+    return apiFetch<PaymentResponse>("/api/payments/create", {
+      method: "POST",
+      body: JSON.stringify({ invoice_id: invoiceId }),
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const token = await user.getIdToken();
+  return apiFetch<PaymentResponse>("/api/payments/create", {
+    method: "POST",
+    body: JSON.stringify({ invoice_id: invoiceId }),
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+  });
+};
 

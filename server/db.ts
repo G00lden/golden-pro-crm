@@ -620,6 +620,24 @@ db.exec(`
     sent_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
+
+  -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
+  CREATE TABLE IF NOT EXISTS payments (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    invoice_id TEXT,
+    tap_charge_id TEXT,
+    amount NUMERIC NOT NULL,
+    currency TEXT DEFAULT 'SAR',
+    status TEXT DEFAULT 'pending',
+    redirect_url TEXT,
+    tap_response TEXT,
+    webhook_data TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
+  CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(tap_charge_id);
 `);
 
 // Post-schema column migrations. These run AFTER the main schema block above,

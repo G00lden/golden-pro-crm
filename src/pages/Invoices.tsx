@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Clock3,
   Copy,
+  CreditCard,
   Download,
   Edit3,
   Eye,
@@ -518,6 +519,24 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     }
   };
 
+  const handlePayInvoice = async (invoice: api.Invoice) => {
+    if (invoice.status === "paid") {
+      notify("الفاتورة مدفوعة مسبقاً");
+      return;
+    }
+    try {
+      const result = await api.createPayment(invoice.id);
+      if (result.redirect_url) {
+        window.open(result.redirect_url, "_blank");
+        notify("جاري توجيهك لبوابة الدفع...");
+      } else {
+        notify("تعذر إنشاء جلسة دفع. تأكد من إعداد بوابة الدفع.", false);
+      }
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "فشل الاتصال ببوابة الدفع", false);
+    }
+  };
+
   return (
     <div className="quotes-workspace cloud-design">
       <section className="cloud-hero quotes-hero">
@@ -642,6 +661,16 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                     onClick={() => sendInvoiceWhatsApp(invoice)}
                   >
                     <MessageCircle size={15} />
+                  </button>
+                )}
+                {invoice.status !== "paid" && invoice.status !== "cancelled" && (
+                  <button
+                    className="icon-btn accent"
+                    type="button"
+                    title="ادفع الآن"
+                    onClick={() => handlePayInvoice(invoice)}
+                  >
+                    <CreditCard size={15} />
                   </button>
                 )}
                 <button className="icon-btn danger" type="button" title="إلغاء" onClick={() => setInvoiceStatus(invoice, "cancelled")} disabled={invoice.status === "cancelled"}>

@@ -34,6 +34,7 @@ import {
   registerGatewayRoutes,
   registerGatewayWebhookRoutes,
 } from "./server/routes-gateway";
+import { registerPaymentRoutes, registerPaymentWebhookRoute } from "./server/routes-payment";
 import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
@@ -210,6 +211,7 @@ async function startServer() {
       "/public/invoices",
       "/webhooks/whatsapp",
       "/webhooks/telephony",
+      "/api/payments/webhook",
     ],
     webhookRateLimit,
   );
@@ -238,6 +240,9 @@ async function startServer() {
   // Self-hosted phone gateway (Android automation app, token-auth). Registered
   // BEFORE the /api Firebase guard so the phone can post without a Firebase user.
   registerGatewayWebhookRoutes(app, { webhookRateLimit, gatewayOwnerUid: __whatsappOwnerUid });
+
+  // Tap payment webhook (authenticated via HMAC signature, not Firebase)
+  registerPaymentWebhookRoute(app);
 
   // Auto-reply on unanswered WhatsApp calls + route inbound WhatsApp replies.
   initWhatsAppAutoReply(__whatsappOwnerUid);
@@ -294,6 +299,8 @@ async function startServer() {
   registerOdooCrmRoutes(app);
 
   registerSallaRoutes(app);
+
+  registerPaymentRoutes(app);
 
   registerMaintenanceRoutes(app);
 
