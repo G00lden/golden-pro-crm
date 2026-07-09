@@ -138,6 +138,8 @@ export type EnsureUserInput = {
   email?: string | null;
   name?: string | null;
   provider?: string;
+  /** Whether the identity provider verified the email (Firebase email_verified). */
+  emailVerified?: boolean;
 };
 
 export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
@@ -151,7 +153,15 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
     return { ...existing, last_login_at: nowIso() };
   }
 
-  const byEmail = input.email ? getUserByEmail(input.email) : null;
+  const provider = input.provider || "firebase";
+  const isLocalDev = provider === "local-dev";
+  // An email is only trustworthy for linking/seeding when the provider verified
+  // it (local-dev is trusted by its shared secret, not an email).
+  const emailTrusted = isLocalDev || input.emailVerified === true;
+
+  // Link to a pre-provisioned (invited) row by email — ONLY for a verified
+  // email, so an unverified email matching an invite can't inherit its role.
+  const byEmail = emailTrusted && input.email ? getUserByEmail(input.email) : null;
   if (byEmail && !byEmail.uid) {
     db.prepare(
       "UPDATE users SET uid = ?, last_login_at = ?, updated_at = ?, provider = COALESCE(provider, ?) WHERE id = ?",
@@ -159,16 +169,16 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
     return { ...byEmail, uid: input.uid, last_login_at: nowIso() };
   }
 
-  const provider = input.provider || "firebase";
-  const isLocalDev = provider === "local-dev";
   const localOwnerUid = process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
   // Seed-admin rule:
   //   * The configured local-dev owner remains admin for single-tenant demos.
   //   * Arbitrary local-dev:<uid> identities join as users.
-  //   * The FIRST real Firebase/Google sign-in becomes admin if no Firebase admin exists yet.
+  //   * The FIRST real Firebase/Google sign-in becomes admin if no Firebase admin
+  //     exists yet — but only when its email is VERIFIED (never an unverified one).
   //   * Everyone afterwards joins as "user" and must be promoted by an admin.
   const role: UserRole =
-    (isLocalDev && input.uid === localOwnerUid) || (!isLocalDev && countFirebaseAdmins() === 0)
+    (isLocalDev && input.uid === localOwnerUid) ||
+    (!isLocalDev && input.emailVerified === true && countFirebaseAdmins() === 0)
       ? "admin"
       : "user";
   const id = newId();
