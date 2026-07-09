@@ -54,43 +54,28 @@ function sqlOp(op: FilterOp): string {
   }
 }
 
-function isValidColumn(field: string): boolean {
-  // Only allow known columns to prevent SQL injection
-  const knownFields = [
-    "owner_uid", "created_by", "created_at", "updated_at",
-    "name", "phone", "city", "source", "notes",
-    "email", "status", "date", "scheduled_time",
-    "quote_number", "title", "issue_date", "valid_until", "follow_up_date",
-    "subtotal", "discount", "tax", "total", "currency", "confirmed_at",
-    "invoice_number", "quote_id", "customer_vat", "due_date", "paid_at",
-    "payment_method", "vat", "vat_percent", "vat_amount",
-    "total_without_vat", "total_with_vat", "seller_name", "seller_vat",
-    "seller_vat_number", "seller_address", "qr_code",
-    "stage", "amount", "probability", "expected_close", "assigned_to",
-    "related_type", "related_id", "priority", "completed_at", "actor_uid",
-    "action", "entity_type", "entity_id", "summary", "before_data", "after_data",
-    "payment_method", "payment_down_percent", "payment_final_percent",
-    "payment_down_text", "payment_final_text", "payment_bank",
-    "payment_account", "payment_iban", "payment_note",
-    "id", "customer_id", "customer_name", "customer_phone",
-    "customer_city",
-    "product_id", "product_name", "product_sku",
-    "technician_id", "technician_name",
-    "installation_id", "installation_label",
-    "next_maintenance", "install_date", "completed_date",
-    "remind_count", "next_remind_type", "last_remind_at",
-    "label", "interval_months", "category", "sku",
-    "remind_text", "product_type", "store_provider", "store_product_id",
-    "price", "sale_price", "currency", "image_url", "stock_quantity",
-    "store_status", "last_synced_at", "max_daily", "specialty",
-    "booking_type", "booking_id", "store_order_id",
-    "order_status", "installation_status",
-    "event_type", "event_id", "raw_body", "processed", "error",
-    "notification_type", "channel", "sent_at",
-    "message", "techs", "jobs_per_tech", "response_rate", "maxDaily",
-    "days_until",
-  ];
-  return knownFields.includes(field);
+// Validate a column against the REAL schema of the table it will be used on.
+// This both prevents SQL injection (only actual columns pass) and — unlike the
+// old hand-maintained allow-list — never rejects a legitimate column that the
+// list simply forgot (e.g. invoice_id, technician_phone, order_item_type). The
+// column set is read once per table via PRAGMA and cached.
+const tableColumnsCache = new Map<string, Set<string>>();
+
+function tableColumns(table: string): Set<string> {
+  let cols = tableColumnsCache.get(table);
+  if (!cols) {
+    // Table names come from server-side collection() calls, never user input,
+    // but guard the identifier before it reaches PRAGMA regardless.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) return new Set();
+    const info = db.prepare("SELECT name FROM pragma_table_info(?)").all(table) as Array<{ name: string }>;
+    cols = new Set(info.map((c) => c.name));
+    tableColumnsCache.set(table, cols);
+  }
+  return cols;
+}
+
+function isValidColumn(table: string, field: string): boolean {
+  return tableColumns(table).has(field);
 }
 
 // ==========================================
@@ -413,12 +398,10 @@ class SqliteCollectionRef {
     if (this.filters.length > 0) {
       const conditions = this.filters
         .map((f) => {
-          // Map Firestore field names to SQL columns
-          const col = f.field === "createdBy" ? "owner_uid"
-            : f.field === "createdAt" ? "created_at"
-            : f.field === "updatedAt" ? "updated_at"
-            : f.field;
-          if (!isValidColumn(col)) {
+          // Map Firestore field names to SQL columns via the full alias map (not
+          // just the 3 hard-coded aliases) so any camelCase field resolves.
+          const col = mapToColumn(f.field);
+          if (!isValidColumn(this.table, col)) {
             throw new Error(`Invalid column: ${col}`);
           }
           if (f.op === "==") {
@@ -434,13 +417,10 @@ class SqliteCollectionRef {
 
     if (this.sorts.length > 0) {
       const orderClauses = this.sorts.map((s) => {
-        // Mirror the WHERE-clause alias mapping — otherwise orderBy("createdAt")
-        // emits ORDER BY "createdAt" (no such column) and the query throws.
-        const col = s.field === "createdBy" ? "owner_uid"
-          : s.field === "createdAt" ? "created_at"
-          : s.field === "updatedAt" ? "updated_at"
-          : s.field;
-        if (!isValidColumn(col)) {
+        // Mirror the WHERE-clause alias mapping (full map) — otherwise
+        // orderBy("customerId") emits ORDER BY "customerId" (no such column).
+        const col = mapToColumn(s.field);
+        if (!isValidColumn(this.table, col)) {
           throw new Error(`Invalid column: ${col}`);
         }
         return `"${col}" ${s.direction === "desc" ? "DESC" : "ASC"}`;
