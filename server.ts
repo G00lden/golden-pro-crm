@@ -53,23 +53,51 @@ function httpError(status: number, message: string) {
   return err;
 }
 
+// Log the path WITHOUT the query string. Query params carry secrets (the static
+// gateway token, Salla OAuth codes) and the logger redacts by key/pattern, not
+// query-string values — so logging originalUrl would leak them in cleartext.
+function loggablePath(req: Request) {
+  const url = req.originalUrl || req.url || "";
+  const q = url.indexOf("?");
+  return q >= 0 ? url.slice(0, q) : url;
+}
+
+// Forwarded IP headers are only trustworthy when a proxy we control sets them.
+// Behind the Cloudflare Tunnel (the default deployment) cf-connecting-ip is the
+// real client IP, so this defaults to on. Set TRUST_PROXY_HEADERS=false when the
+// origin is reachable directly (no fronting proxy) — otherwise a caller can spoof
+// these headers to dodge the rate limit or forge a per-IP identity.
+const TRUST_PROXY_HEADERS = process.env.TRUST_PROXY_HEADERS !== "false";
+
 function clientIp(req: Request) {
-  return String(
-    req.get("cf-connecting-ip") ||
+  if (TRUST_PROXY_HEADERS) {
+    const forwarded =
+      req.get("cf-connecting-ip") ||
       req.get("x-real-ip") ||
-      req.get("x-forwarded-for")?.split(",")[0] ||
-      req.socket.remoteAddress ||
-      "unknown",
-  ).trim();
+      req.get("x-forwarded-for")?.split(",")[0];
+    if (forwarded) return String(forwarded).trim();
+  }
+  return String(req.socket.remoteAddress || "unknown").trim();
 }
 
 function createRateLimiter(options: { windowMs: number; max: number; name: string }) {
   const hits = new Map<string, { count: number; resetAt: number }>();
+  // Hard ceiling on distinct buckets. Even with a spoofable/rotating key, the map
+  // can never grow past this — expired buckets are dropped first, then the oldest
+  // entries are evicted to stay under the cap (Map preserves insertion order).
+  const HARD_CAP = 20000;
 
   function prune(now: number) {
     if (hits.size < 5000) return;
     for (const [key, bucket] of hits) {
       if (bucket.resetAt <= now) hits.delete(key);
+    }
+    if (hits.size > HARD_CAP) {
+      let excess = hits.size - HARD_CAP;
+      for (const key of hits.keys()) {
+        hits.delete(key);
+        if (--excess <= 0) break;
+      }
     }
   }
 
@@ -419,7 +447,7 @@ async function startServer() {
       logError("server.unhandled_error", err, {
         requestId,
         method: req.method,
-        path: req.originalUrl,
+        path: loggablePath(req),
         status,
       });
       res.status(status).json({ error: "حدث خطأ غير متوقع في السيرفر." });
