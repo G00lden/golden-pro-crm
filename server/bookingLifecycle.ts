@@ -15,6 +15,11 @@ function addMonths(date: string, months: number) {
   const [year, month, day] = date.split("-").map(Number);
   const d = new Date(Date.UTC(year, month - 1, day));
   d.setUTCMonth(d.getUTCMonth() + months);
+  // setUTCMonth overflows month-end dates (Jan 31 + 1 month => Mar 3, not Feb 28).
+  // Clamp back to the intended month's last day when the day rolled over.
+  if (d.getUTCDate() !== day) {
+    d.setUTCDate(0);
+  }
   return d.toISOString().slice(0, 10);
 }
 
@@ -88,7 +93,8 @@ export async function completeBooking(bookingId: string, uid: string) {
       const order = orderDoc.data() || {};
       const items = Array.isArray(order.items)
         ? order.items.map((item: any) =>
-            item.booking_id === bookingId || item.installation_id === booking.installation_id
+            item.booking_id === bookingId ||
+            (booking.installation_id != null && item.installation_id === booking.installation_id)
               ? { ...item, status: "completed", completed_at: now }
               : item,
           )

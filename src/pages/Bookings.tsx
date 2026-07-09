@@ -71,8 +71,28 @@ export default function BookingsPage({
           onSave={async (payload) => {
             let bookingId: string;
             try {
-              bookingId = booking ? booking.id : await api.createBooking(payload);
-              if (booking) await api.updateBooking(booking.id, payload);
+              if (booking) {
+                bookingId = booking.id;
+                // Setting the status to "completed" from the edit form must run
+                // the completion lifecycle (advance the linked installation's
+                // next_maintenance, reset its reminders) — a plain updateBooking
+                // would flip the status but leave the installation firing overdue
+                // reminders forever. Persist the other field edits first (keeping
+                // the current status), then complete.
+                const becomingCompleted = payload.status === "completed" && booking.status !== "completed";
+                if (becomingCompleted) {
+                  await api.updateBooking(booking.id, { ...payload, status: booking.status });
+                  await api.completeBooking(booking.id);
+                } else {
+                  await api.updateBooking(booking.id, payload);
+                }
+              } else {
+                bookingId = await api.createBooking(payload);
+                // Creating a booking already marked completed runs the lifecycle too.
+                if (payload.status === "completed") {
+                  await api.completeBooking(bookingId);
+                }
+              }
             } catch (error) {
               notify(error instanceof Error ? error.message : "تعذر حفظ الحجز", false);
               return;

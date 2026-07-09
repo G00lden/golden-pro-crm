@@ -621,7 +621,14 @@ const addDays = (date: string, days: number) => {
 };
 const addMonths = (date: string, months: number) => {
   const d = new Date(`${date}T00:00:00`);
+  const targetDay = d.getDate();
   d.setMonth(d.getMonth() + Number(months || 1));
+  // setMonth overflows month-end dates (Jan 31 + 1 month => Mar 3, not Feb 28).
+  // If the day rolled into the following month, clamp to the intended month's
+  // last day.
+  if (d.getDate() !== targetDay) {
+    d.setDate(0);
+  }
   return d.toLocaleDateString("en-CA");
 };
 
