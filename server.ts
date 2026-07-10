@@ -514,8 +514,26 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, "dist");
-    app.use(express.static(distPath));
+    // Cache policy so a new build is picked up WITHOUT a manual hard-refresh:
+    //  - Vite emits content-hashed assets under /assets (index-<hash>.js) — these
+    //    are immutable, so cache them for a year.
+    //  - Everything else, above all index.html, must revalidate every load
+    //    ("no-cache" = store but re-check via ETag → 304 when unchanged). Otherwise
+    //    the browser keeps an old index.html that points at the old JS bundle, and
+    //    the UI (and generated invoice PDFs) render stale after a deploy.
+    app.use(
+      express.static(distPath, {
+        setHeaders(res, filePath) {
+          if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          } else {
+            res.setHeader("Cache-Control", "no-cache");
+          }
+        },
+      }),
+    );
     app.get("*", (_req, res) => {
+      res.setHeader("Cache-Control", "no-cache");
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
