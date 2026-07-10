@@ -418,6 +418,13 @@ export default function App() {
             {lightMode ? "🌙" : "☀️"} {lightMode ? "ليلي" : "نهاري"}
           </button>
         </div>
+        <div
+          className="app-version"
+          title={`إصدار الكود ${__APP_VERSION__} — بُني ${__BUILD_TIME__}`}
+          style={{ marginTop: "auto", padding: "8px 4px 2px", fontSize: 10, opacity: 0.55, textAlign: "center", direction: "ltr", lineHeight: 1.5 }}
+        >
+          v{__APP_VERSION__} · {new Date(__BUILD_TIME__).toLocaleDateString("en-CA")}
+        </div>
       </aside>
 
       <main>{pages[page]}</main>
