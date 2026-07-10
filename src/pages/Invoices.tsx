@@ -181,6 +181,7 @@ const invoiceStandaloneCss = `
   .invoice-doc-table,
   .invoice-bottom-grid { margin-bottom: 8px !important; }
   .invoice-doc-head { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .invoice-brand-block img { height: 40px !important; width: 40px !important; object-fit: contain !important; flex-shrink: 0 !important; }
 `;
 
 async function replaceInvoiceQrInClone(clone: HTMLElement, invoice: api.Invoice) {
