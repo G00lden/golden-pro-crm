@@ -20,6 +20,7 @@ import {
   type TextareaHTMLAttributes,
 } from "react";
 import * as api from "./api";
+import { addCalendarMonths } from "../shared/date";
 
 /* ── Types ───────────────────────────────────────────────── */
 
@@ -46,11 +47,7 @@ export type Toast = { message: string; ok: boolean } | null;
 /* ── Utilities ───────────────────────────────────────────── */
 
 export const today = () => new Date().toLocaleDateString("en-CA");
-export const addMonths = (date: string, months: number) => {
-  const d = new Date(`${date}T00:00:00`);
-  d.setMonth(d.getMonth() + Number(months || 0));
-  return d.toLocaleDateString("en-CA");
-};
+export const addMonths = addCalendarMonths;
 
 export const fmtDate = (value?: string | null) =>
   value ? new Date(`${value.length === 10 ? `${value}T00:00:00` : value}`).toLocaleDateString("ar-SA") : "-";

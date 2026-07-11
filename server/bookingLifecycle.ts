@@ -1,4 +1,5 @@
 import { adminDb } from "./firebaseAdmin";
+import { addCalendarMonthsOr } from "../shared/date";
 
 function httpError(status: number, message: string) {
   const err = new Error(message) as Error & { status?: number };
@@ -7,20 +8,7 @@ function httpError(status: number, message: string) {
 }
 
 function addMonths(date: string, months: number) {
-  // Security (L4): reject malformed dates before arithmetic so an invalid
-  // webhook/user value cannot produce an Invalid Date and a leaked 500.
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
-    date = new Date().toISOString().slice(0, 10);
-  }
-  const [year, month, day] = date.split("-").map(Number);
-  const d = new Date(Date.UTC(year, month - 1, day));
-  d.setUTCMonth(d.getUTCMonth() + months);
-  // setUTCMonth overflows month-end dates (Jan 31 + 1 month => Mar 3, not Feb 28).
-  // Clamp back to the intended month's last day when the day rolled over.
-  if (d.getUTCDate() !== day) {
-    d.setUTCDate(0);
-  }
-  return d.toISOString().slice(0, 10);
+  return addCalendarMonthsOr(date, months, new Date().toISOString().slice(0, 10));
 }
 
 async function productIntervalMonths(productId: string | undefined, uid: string) {

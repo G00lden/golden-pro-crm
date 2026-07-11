@@ -25,6 +25,7 @@ import {
 } from "../shared/financial";
 
 export type { DiscountMode } from "../shared/financial";
+import { addCalendarMonths } from "../shared/date";
 
 export type Customer = {
   id: string;
@@ -628,18 +629,6 @@ const localDayWindow = () => ({
 const addDays = (date: string, days: number) => {
   const d = new Date(`${date}T00:00:00`);
   d.setDate(d.getDate() + days);
-  return d.toLocaleDateString("en-CA");
-};
-const addMonths = (date: string, months: number) => {
-  const d = new Date(`${date}T00:00:00`);
-  const targetDay = d.getDate();
-  d.setMonth(d.getMonth() + Number(months || 1));
-  // setMonth overflows month-end dates (Jan 31 + 1 month => Mar 3, not Feb 28).
-  // If the day rolled into the following month, clamp to the intended month's
-  // last day.
-  if (d.getDate() !== targetDay) {
-    d.setDate(0);
-  }
   return d.toLocaleDateString("en-CA");
 };
 
@@ -2542,7 +2531,7 @@ export const completeBooking = async (id: string) => {
         booking.booking_type === "installation" || booking.booking_type === "external_maintenance"
           ? booking.date
           : installation.install_date || booking.date;
-      installation.next_maintenance = addMonths(booking.date, months);
+      installation.next_maintenance = addCalendarMonths(booking.date, months);
       installation.remind_count = 0;
       installation.next_remind_type = "first";
       installation.completed_date = null;

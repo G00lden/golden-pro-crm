@@ -46,13 +46,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function addMonths(date: string, months: number) {
-  const [year, month, day] = date.split("-").map(Number);
-  const d = new Date(Date.UTC(year, month - 1, day));
-  d.setUTCMonth(d.getUTCMonth() + months);
-  return d.toISOString().slice(0, 10);
-}
-
 function daysUntil(value?: string) {
   if (!value) return undefined;
   const todayMs = Date.parse(`${todayInTimeZone()}T00:00:00`);

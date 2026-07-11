@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import type { Request } from "express";
 import { adminDb } from "./firebaseAdmin";
+import { addCalendarMonths } from "../shared/date";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
 
@@ -327,13 +328,6 @@ function dateOnly(value: unknown, fallback = new Date()) {
         : fallback;
   const safeDate = Number.isNaN(parsed.getTime()) ? fallback : parsed;
   return safeDate.toLocaleDateString("en-CA", { timeZone });
-}
-
-function addMonths(date: string, months: number) {
-  const [year, month, day] = date.split("-").map(Number);
-  const d = new Date(Date.UTC(year, month - 1, day));
-  d.setUTCMonth(d.getUTCMonth() + months);
-  return d.toISOString().slice(0, 10);
 }
 
 // Canonical phone form used across the CRM: digits only, KSA-normalized to a
@@ -932,7 +926,7 @@ async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<
       const existingInstallation = await installationRef.get();
       const existing = existingInstallation.exists ? existingInstallation.data() || {} : {};
       const serviceDate = order.scheduledDate || order.orderDate;
-      const nextMaintenance = addMonths(serviceDate, item.maintenanceMonths);
+      const nextMaintenance = addCalendarMonths(serviceDate, item.maintenanceMonths);
 
       await installationRef.set({
         customer_id: customerId,
@@ -1032,7 +1026,7 @@ async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<
     const existingInstallation = await installationRef.get();
     const existing = existingInstallation.exists ? existingInstallation.data() || {} : {};
     const installDate = order.scheduledDate || order.orderDate;
-    const nextMaintenance = addMonths(installDate, item.maintenanceMonths);
+    const nextMaintenance = addCalendarMonths(installDate, item.maintenanceMonths);
 
     await installationRef.set({
       customer_id: customerId,
@@ -1381,7 +1375,7 @@ function localImportStoreOrder(data: LocalStoreDb, uid: string, order: StoreWebh
     );
     const existing = data.installations[installationId] || {};
     const startDate = order.scheduledDate || order.orderDate;
-    const nextMaintenance = addMonths(startDate, item.maintenanceMonths);
+    const nextMaintenance = addCalendarMonths(startDate, item.maintenanceMonths);
     data.installations[installationId] = {
       ...existing,
       customer_id: customerId,
@@ -1604,7 +1598,7 @@ async function ensureManualInstallationForOrderItem(params: {
     product_name: item.name,
     product_sku: item.sku,
     install_date: installDate,
-    next_maintenance: addMonths(installDate, intervalMonths),
+    next_maintenance: addCalendarMonths(installDate, intervalMonths),
     remind_count: 0,
     next_remind_type: "first",
     label: truncate(`Store order ${order.order_number || order.order_id} x ${item.quantity}`, 120),
