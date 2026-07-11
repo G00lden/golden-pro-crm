@@ -77,7 +77,7 @@ export async function requireFirebaseUser(
     try {
       const record = ensureUserRecord({
         uid,
-        email: "local@golden-pro-crm.dev",
+        email: null,
         name: "Local user",
         provider: "local-dev",
       });
@@ -86,7 +86,7 @@ export async function requireFirebaseUser(
       }
       attachUser(req, {
         uid,
-        email: record.email || "local@golden-pro-crm.dev",
+        email: record.email || undefined,
         name: record.name || "Local user",
         role: record.role,
         permissions: record.permissions,

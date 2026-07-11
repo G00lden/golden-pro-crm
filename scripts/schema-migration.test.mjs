@@ -25,11 +25,11 @@ function runCase(scenario, production = false) {
   return { directory, result };
 }
 
-test("a fresh database receives the complete 1.0.4 schema", () => {
+test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10004/);
+    assert.match(result.stdout, /"userVersion":10007/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -51,7 +51,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10004/);
+    assert.match(backups[0], /pre-schema-10007/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -107,6 +107,22 @@ try {
     assert.equal(r.status, 200, `expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
   });
 
+  await step("local identities remain distinct and least-privileged", async () => {
+    const owner = await request("/api/me");
+    assert.equal(owner.status, 200);
+    assert.equal(owner.body?.role, "admin");
+    assert.equal(owner.body?.email, null);
+
+    const secondToken = await getLocalTestToken(baseUrl, "golden-path-secondary");
+    const secondary = await fetch(new URL("/api/me", baseUrl), {
+      headers: { Authorization: `Bearer ${secondToken}`, ...closeHeader },
+    });
+    assert.equal(secondary.status, 200);
+    const body = await secondary.json();
+    assert.equal(body.role, "user");
+    assert.equal(body.email, null);
+  });
+
   await step("validation rejects malformed CRM payloads", async () => {
     const customer = await request("/api/customers", {
       method: "POST",

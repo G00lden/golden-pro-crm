@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10004;
+const TARGET_SCHEMA_VERSION = 10007;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -829,7 +829,10 @@ db.exec(`
     release TEXT NOT NULL,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
-  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (${TARGET_SCHEMA_VERSION}, '1.0.4');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10004, '1.0.4');
+  UPDATE users SET email = NULL
+    WHERE provider = 'local-dev' AND LOWER(IFNULL(email, '')) = 'local@golden-pro-crm.dev';
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10007, '1.0.7');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

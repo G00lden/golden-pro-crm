@@ -8,6 +8,14 @@ if (scenario === "legacy") {
   const legacy = new Database(dbPath);
   legacy.exec(`
     PRAGMA user_version = 10003;
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+      email TEXT UNIQUE, password_hash TEXT NOT NULL, role TEXT DEFAULT 'admin',
+      created_at TEXT, updated_at TEXT, uid TEXT, permissions TEXT DEFAULT '{}',
+      active INTEGER DEFAULT 1, last_login_at TEXT, provider TEXT DEFAULT 'firebase'
+    );
+    INSERT INTO users (id, name, email, password_hash, role, uid, provider)
+    VALUES ('legacy_local', 'Legacy local', 'local@golden-pro-crm.dev', '', 'admin', 'local-dev-owner', 'local-dev');
     CREATE TABLE quotes (
       id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, quote_number TEXT NOT NULL,
       customer_id TEXT, customer_name TEXT NOT NULL DEFAULT '', customer_phone TEXT DEFAULT '',
@@ -53,13 +61,15 @@ for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10004) throw new Error(`Expected schema 10004, got ${userVersion}`);
+if (userVersion !== 10007) throw new Error(`Expected schema 10007, got ${userVersion}`);
 
 if (scenario === "legacy") {
   const legacy = db.prepare("SELECT discount, total FROM quotes WHERE id = 'legacy_quote'").get() as { discount: number; total: number };
   if (!legacy || Number(legacy.discount) !== 10 || Number(legacy.total) !== 90) {
     throw new Error("Legacy quote values changed during migration.");
   }
+  const legacyLocal = db.prepare("SELECT email FROM users WHERE id = 'legacy_local'").get() as { email: string | null };
+  if (legacyLocal.email !== null) throw new Error("Legacy local synthetic email was not cleared.");
 }
 
 db.prepare(`
@@ -71,6 +81,8 @@ db.prepare(`
 
 const migration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10004").get() as { release?: string };
 if (migration?.release !== "1.0.4") throw new Error("Schema migration ledger was not updated.");
+const identityMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10007").get() as { release?: string };
+if (identityMigration?.release !== "1.0.7") throw new Error("Identity migration ledger was not updated.");
 
 db.close();
 console.log(JSON.stringify({ scenario, userVersion, quotes: [...quoteColumns].length }));
