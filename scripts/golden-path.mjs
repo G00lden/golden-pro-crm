@@ -6,7 +6,7 @@
  *
  * Assumes:
  *   - dev server is running on http://localhost:3000 (or APP_URL)
- *   - ALLOW_LOCAL_AUTH=true (uses Bearer local-dev:<uid>)
+ *   - loopback test server with explicit, signed local auth enabled
  *
  * Exit codes:
  *   0 = all assertions passed
@@ -17,10 +17,11 @@
  */
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
+import { getLocalTestToken } from "./local-test-auth.mjs";
 
 const baseUrl = process.env.APP_URL || "http://localhost:3000";
 const uid = process.env.GOLDEN_PATH_UID || "golden-path-test";
-const authHeader = { Authorization: `Bearer local-dev:${uid}` };
+let authHeader = {};
 const json = { "Content-Type": "application/json" };
 const closeHeader = { Connection: "close" };
 
@@ -88,6 +89,7 @@ try {
   const health = await ensureHealthy();
   console.log(`Health ok. Timezone=${health.timeZone}. Outbound mode=${health.outbound?.mode}.`);
   console.log("");
+  authHeader = { Authorization: `Bearer ${await getLocalTestToken(baseUrl, uid)}` };
 
   // -- 1. Auth: anonymous is rejected on protected route
   await step("auth rejects anonymous on /api/customers", async () => {

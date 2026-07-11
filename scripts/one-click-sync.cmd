@@ -11,7 +11,10 @@ set "BASE_URL=%CRM_BASE_URL%"
 if "%BASE_URL%"=="" set "BASE_URL=http://localhost:3000"
 
 set "TOKEN=%CRM_BEARER_TOKEN%"
-if "%TOKEN%"=="" set "TOKEN=local-dev:local-dev-owner"
+if "%TOKEN%"=="" (
+  echo CRM_BEARER_TOKEN is required. Refusing to use an insecure default token.
+  exit /b 2
+)
 
 echo === Golden Pro CRM: Salla sync ===
 echo Base URL: %BASE_URL%

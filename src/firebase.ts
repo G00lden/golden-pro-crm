@@ -63,14 +63,21 @@ const LOCAL_SESSION_KEY = "golden-pro-crm-local-session";
 const LOCAL_AUTH_EVENT = "golden-pro-crm-local-auth";
 const isBrowser = typeof window !== "undefined";
 const isLocalHost = isBrowser && ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
-export const localAuthEnabled = isBrowser && (import.meta.env.VITE_LOCAL_AUTH === "true" || (import.meta.env.DEV && isLocalHost));
+export const localAuthEnabled = isBrowser && import.meta.env.DEV && isLocalHost && import.meta.env.VITE_LOCAL_AUTH === "true";
 
-// Build the `local-dev:` bearer token. When VITE_LOCAL_AUTH_TOKEN is configured
-// (build-time), the shared secret is appended so the server can verify it and
-// reject forged tokens; otherwise the legacy `local-dev:<uid>` form is used.
-export function buildLocalToken(uid: string): string {
-  const secret = (import.meta.env.VITE_LOCAL_AUTH_TOKEN as string | undefined) || "";
-  return secret ? `local-dev:${uid}:${secret}` : `local-dev:${uid}`;
+// Local auth is development-only. The browser never receives the server secret;
+// it asks the loopback-only endpoint for a short-lived signed token instead.
+export async function buildLocalToken(uid: string): Promise<string> {
+  if (!localAuthEnabled) throw authError("auth/operation-not-allowed", "Local auth is disabled.");
+  const response = await fetch("/api/dev/local-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid }),
+  });
+  if (!response.ok) throw authError("auth/operation-not-allowed", "Local auth is disabled.");
+  const payload = await response.json() as { token?: string };
+  if (!payload.token) throw authError("auth/invalid-credential", "Local token was not issued.");
+  return payload.token;
 }
 const serverDataEnabled =
   import.meta.env.VITE_DATA_PROVIDER === "supabase" ||

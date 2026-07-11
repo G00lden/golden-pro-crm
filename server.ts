@@ -5,7 +5,7 @@ import cron from "node-cron";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
-import { requireFirebaseUser } from "./server/auth";
+import { registerLocalDevAuthRoute, requireFirebaseUser } from "./server/auth";
 import { registerCrmApiRoutes } from "./server/crmApi";
 import { registerUserAdminRoutes } from "./server/userManagement";
 import { adminDb } from "./server/firebaseAdmin";
@@ -40,6 +40,7 @@ import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
 import { logError } from "./server/logger";
+import { getLocalAuthPolicy } from "./server/localAuthPolicy";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
@@ -174,14 +175,9 @@ function adminUids(): string[] {
 }
 
 async function startServer() {
-  // Security (C3): the local-dev auth bypass forges identities with zero
-  // verification. It must NEVER be active in production — fail closed.
-  // Exception: SQLite mode requires local auth since Firebase is unavailable.
-  const dbProvider = process.env.DATA_PROVIDER || process.env.DB_PROVIDER || "firebase";
-  if (process.env.NODE_ENV === "production" && dbProvider !== "sqlite" && process.env.ALLOW_LOCAL_AUTH === "true") {
-    throw new Error(
-      "ALLOW_LOCAL_AUTH=true is forbidden in production. Unset it before deploying.",
-    );
+  const localAuthPolicy = getLocalAuthPolicy();
+  if (localAuthPolicy.requested && !localAuthPolicy.enabled) {
+    throw new Error(`Unsafe local authentication configuration: ${localAuthPolicy.reason}`);
   }
 
   const app = express();
@@ -237,6 +233,7 @@ async function startServer() {
       "/salla/webhook",
       "/api/health",
       "/api/version",
+      "/api/dev/local-token",
       "/public/invoices",
       "/webhooks/whatsapp",
       "/webhooks/telephony",
@@ -254,6 +251,7 @@ async function startServer() {
 
   // ── Route modules ──
   registerHealthRoutes(app);
+  registerLocalDevAuthRoute(app);
 
   registerStoreRoutes(app, { webhookRateLimit });
 

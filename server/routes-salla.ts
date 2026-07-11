@@ -129,6 +129,9 @@ export function registerSallaRoutes(app: Express) {
         res.json(await syncSallaStoreForUser(userReq.user.uid));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("not configured")) {
+          throw httpError(409, "Salla integration is not configured on the server.");
+        }
         if (message.includes("not linked") || message.includes("token")) {
           throw httpError(412, message);
         }

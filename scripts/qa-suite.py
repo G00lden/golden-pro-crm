@@ -9,9 +9,8 @@ Run with:
 or:
     python scripts/qa-suite.py --base-url http://localhost:3000
 
-The suite assumes the server runs in SQLite mode with ALLOW_LOCAL_AUTH=true
-(or DATA_PROVIDER=sqlite), which lets it authenticate via the
-"local-dev:local-dev-owner" bearer token shortcut.
+The suite requires a loopback test server with explicit signed local auth, or
+an authenticated CRM_BEARER_TOKEN supplied by the operator.
 """
 
 from __future__ import annotations
@@ -24,8 +23,10 @@ import sys
 import time
 import uuid
 from urllib import error, parse, request
+from local_test_auth import get_local_test_token
 
-ADMIN_TOKEN = "local-dev:local-dev-owner"
+ADMIN_TOKEN = ""
+_DEFAULT_TOKEN = object()
 UNAUTH_USER_NAME = "QA Probe — unauth"
 
 
@@ -38,7 +39,7 @@ def http(
     base: str,
     path: str,
     *,
-    token: str | None = ADMIN_TOKEN,
+    token: str | None | object = _DEFAULT_TOKEN,
     body: dict | list | None = None,
     extra_headers: dict | None = None,
     timeout: float = 30.0,
@@ -50,6 +51,8 @@ def http(
     """
     url = f"{base.rstrip('/')}{path}"
     data: bytes | None = None
+    if token is _DEFAULT_TOKEN:
+        token = ADMIN_TOKEN
     headers: dict[str, str] = {"Accept": "application/json"}
     if body is not None:
         data = json.dumps(body).encode("utf-8")
@@ -620,12 +623,14 @@ def test_concurrent_creates(base: str, report: Report) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    global ADMIN_TOKEN
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("CRM_BASE_URL", "http://localhost:3000"))
     parser.add_argument("--report", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qa-report.json"))
     args = parser.parse_args()
 
     base = args.base_url.rstrip("/")
+    ADMIN_TOKEN = get_local_test_token(base, os.environ.get("LOCAL_AUTH_SHARED_UID", "local-dev-owner"))
     report = Report()
 
     # Order matters: health → auth checks → /api/me → resource CRUD → integrations → stress

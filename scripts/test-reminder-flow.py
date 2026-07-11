@@ -31,14 +31,18 @@ import sys
 import time
 import uuid
 from urllib import error, request
+from local_test_auth import get_local_test_token
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(PROJECT_ROOT, "data", "golden-crm.db")
 REPORT_PATH = os.path.join(PROJECT_ROOT, "reminder-flow-results.json")
-ADMIN_TOKEN = "local-dev:local-dev-owner"
+ADMIN_TOKEN = ""
+_DEFAULT_TOKEN = object()
 
 
-def http(method: str, url: str, *, token: str | None = ADMIN_TOKEN, body: dict | None = None, timeout: float = 15.0):
+def http(method: str, url: str, *, token: str | None | object = _DEFAULT_TOKEN, body: dict | None = None, timeout: float = 15.0):
+    if token is _DEFAULT_TOKEN:
+        token = ADMIN_TOKEN
     headers = {"Accept": "application/json"}
     data = None
     if body is not None:
@@ -78,6 +82,7 @@ def query_db(sql: str, args: tuple = ()) -> list[dict]:
 
 
 def main() -> int:
+    global ADMIN_TOKEN
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("CRM_BASE_URL", "http://localhost:3000"))
     parser.add_argument("--phone", default="0599999777")
@@ -85,6 +90,7 @@ def main() -> int:
     args = parser.parse_args()
 
     base = args.base_url.rstrip("/")
+    ADMIN_TOKEN = get_local_test_token(base, os.environ.get("LOCAL_AUTH_SHARED_UID", "local-dev-owner"))
     suffix = uuid.uuid4().hex[:6]
     today = dt.date.today().isoformat()
     tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()

@@ -45,9 +45,8 @@ function safeEquals(a: string, b: string): boolean {
 
 function verifyGatewayToken(req: Request): { status: number; error: string } | null {
   const token = process.env.GATEWAY_TOKEN || "";
-  const isProd = process.env.NODE_ENV === "production";
   if (!token) {
-    return isProd ? { status: 503, error: "GATEWAY_TOKEN is not configured." } : null;
+    return { status: 503, error: "GATEWAY_TOKEN is not configured." };
   }
   const provided =
     req.get("x-gateway-token") ||
