@@ -23,6 +23,7 @@ import QRCode from "qrcode";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import * as api from "../api";
+import { calculateDocumentTotals, calculateLineAmounts } from "../../shared/financial";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -726,17 +727,15 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
 /* ── Preview ───────────────────────────────────────────── */
 
 function invoiceLineAmounts(item: api.InvoiceItem, vatPercent: number) {
-  const rate = Math.max(0, Number(vatPercent || 0)) / 100;
   const quantity = Math.max(0, Number(item.quantity || 0));
   const enteredTotal = Math.max(0, Number(item.total || quantity * Number(item.unit_price || 0)));
-  const net = item.vat_excluded === false && rate > 0 ? enteredTotal / (1 + rate) : enteredTotal;
-  const gross = item.vat_excluded === false ? enteredTotal : enteredTotal * (1 + rate);
+  const amounts = calculateLineAmounts({ total: enteredTotal, vat_excluded: item.vat_excluded }, vatPercent);
   return {
     quantity,
-    net: Math.round(net * 100) / 100,
-    unitNet: quantity ? Math.round((net / quantity) * 100) / 100 : 0,
-    vat: Math.round((gross - net) * 100) / 100,
-    gross: Math.round(gross * 100) / 100,
+    net: amounts.net,
+    unitNet: quantity ? Math.round((amounts.net / quantity) * 100) / 100 : 0,
+    vat: amounts.vat,
+    gross: amounts.gross,
   };
 }
 
@@ -955,15 +954,13 @@ function InvoiceForm({
       })),
     [items],
   );
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const vatPct = Math.max(0, Number(vatPercent || 15));
-  const vatRate = vatPct / 100;
-  const subtotal = normalizedItems.reduce((sum, item) => (
-    sum + (item.vat_excluded === false && vatRate > 0 ? item.total / (1 + vatRate) : item.total)
-  ), 0);
-  const withoutVat = Math.max(0, subtotal - cleanDiscount);
-  const vatAmount = withoutVat * (vatPct / 100);
-  const totalWithVat = withoutVat + vatAmount;
+  const financialTotals = useMemo(() => calculateDocumentTotals({
+    lines: normalizedItems,
+    discountValue: Number(discount || 0),
+    discountMode: "fixed",
+    vatPercent: Number(vatPercent || 0),
+  }), [normalizedItems, discount, vatPercent]);
+  const vatRate = financialTotals.vatPercent / 100;
 
   const updateItem = (index: number, patch: Partial<api.InvoiceItem>) => {
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
@@ -1203,15 +1200,15 @@ function InvoiceForm({
       <div className="quote-total-summary">
         <article className="vat-summary">
           <span>المجموع (بدون ضريبة)</span>
-          <strong>{money(Math.max(0, withoutVat))}</strong>
+          <strong>{money(financialTotals.totalWithoutVat)}</strong>
         </article>
         <article>
-          <span>ضريبة {vatPct}%</span>
-          <strong>{money(Math.max(0, vatAmount))}</strong>
+          <span>ضريبة {financialTotals.vatPercent}%</span>
+          <strong>{money(financialTotals.vatAmount)}</strong>
         </article>
         <article className="total">
           <span>الإجمالي شامل الضريبة</span>
-          <strong>{money(Math.max(0, totalWithVat))}</strong>
+          <strong>{money(financialTotals.total)}</strong>
         </article>
       </div>
 

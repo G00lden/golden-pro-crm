@@ -1,7 +1,7 @@
 {
   "name": "golden-pro-crm",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-server.mjs --dev",
@@ -13,6 +13,7 @@
     "test:version": "node --test scripts/version-policy.test.mjs",
     "test:auth-policy": "tsx --test server/localAuthPolicy.test.ts",
     "test:server-mode": "node --test scripts/server-mode.test.mjs",
+    "test:financial": "tsx --test shared/financial.test.ts",
     "preview": "vite preview",
     "test:smoke": "node scripts/smoke.mjs",
     "test:golden": "node scripts/golden-path.mjs",

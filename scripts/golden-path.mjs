@@ -26,7 +26,7 @@ const json = { "Content-Type": "application/json" };
 const closeHeader = { Connection: "close" };
 
 const results = [];
-const created = { customerId: null, quoteId: null };
+const created = { customerId: null, quoteId: null, invoiceId: null };
 
 async function request(path, init = {}) {
   const url = new URL(path, baseUrl);
@@ -74,6 +74,9 @@ async function ensureHealthy() {
 }
 
 async function cleanup() {
+  if (created.invoiceId) {
+    try { await request(`/api/invoices/${created.invoiceId}`, { method: "DELETE" }); } catch {}
+  }
   if (created.quoteId) {
     try { await request(`/api/quotes/${created.quoteId}`, { method: "DELETE" }); } catch {}
   }
@@ -132,6 +135,9 @@ try {
           { description: "Test item A", quantity: 1, unit_price: 100, total: 100 },
           { description: "Test item B", quantity: 2, unit_price: 50, total: 100 },
         ],
+        discount_mode: "percent",
+        discount_value: 10,
+        vat_percent: 15,
         currency: "SAR",
         notes: "Created by golden-path.mjs — safe to delete.",
       }),
@@ -139,7 +145,22 @@ try {
     assert.equal(r.status, 201, `expected 201, got ${r.status}: ${JSON.stringify(r.body)}`);
     assert.ok(r.body?.id, "response must include id");
     assert.ok(r.body?.quote, "response must include the quote object");
+    assert.equal(r.body.quote.discount, 20, "10% of 200 must persist as a 20 SAR discount");
+    assert.equal(r.body.quote.vat_amount, 27, "VAT must be calculated after discount");
+    assert.equal(r.body.quote.total, 207, "quote total must be 207 SAR");
     created.quoteId = r.body.id;
+  });
+
+  await step("POST /api/quotes/:id/convert-to-invoice preserves totals", async () => {
+    const r = await request(`/api/quotes/${created.quoteId}/convert-to-invoice`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    assert.equal(r.status, 201, `expected 201, got ${r.status}: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body?.invoice?.discount, 20);
+    assert.equal(r.body?.invoice?.vat_amount, 27);
+    assert.equal(r.body?.invoice?.total_with_vat, 207);
+    created.invoiceId = r.body?.id;
   });
 
   // -- 5. Mark quote as confirmed (the conversion event)
@@ -180,6 +201,7 @@ try {
   console.log("\n--- cleanup ---");
   await cleanup();
   if (created.quoteId) console.log(`deleted quote ${created.quoteId}`);
+  if (created.invoiceId) console.log(`deleted invoice ${created.invoiceId}`);
   if (created.customerId) console.log(`deleted customer ${created.customerId}`);
 }
 

@@ -6,6 +6,13 @@ import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
 import { publicInvoiceShareQuerySchema, validateQuery } from "./validation";
+import {
+  calculateDocumentTotals,
+  calculateLineAmounts,
+  normalizeVatPercent,
+  validateInstallments,
+  type DiscountMode,
+} from "../shared/financial";
 
 type DocSnapshot = {
   id: string;
@@ -240,15 +247,30 @@ function normalizeQuoteItems(items: unknown) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function quoteTotals(items: Array<{ total: number }>, discount = 0, tax = 0) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const cleanTax = Math.max(0, Number(tax || 0));
+function quoteTotals(
+  items: Array<{ total: number; vat_excluded?: boolean }>,
+  discountValue = 0,
+  tax = 0,
+  discountMode: DiscountMode = "fixed",
+  vatPercent = 15,
+) {
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue,
+    discountMode,
+    vatPercent,
+    additionalTax: tax,
+  });
   return {
-    subtotal,
-    discount: cleanDiscount,
-    tax: cleanTax,
-    total: Math.max(0, subtotal - cleanDiscount + cleanTax),
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
+    tax: totals.additionalTax,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_without_vat: totals.totalWithoutVat,
+    total: totals.total,
   };
 }
 
@@ -262,6 +284,10 @@ function quotePaymentFields(row: Record<string, any>, existing?: Record<string, 
       { percent: Number(row.payment_final_percent ?? existing?.payment_final_percent ?? 30), label: String(row.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim(), deadline_days: undefined },
     ];
   })();
+  const installmentValidation = validateInstallments(installments);
+  if (!installmentValidation.valid) {
+    throw Object.assign(new Error(installmentValidation.error || "Invalid installments."), { status: 400 });
+  }
   return {
     payment_method: String(row.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
     payment_down_percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70),
@@ -278,7 +304,14 @@ function quotePaymentFields(row: Record<string, any>, existing?: Record<string, 
 
 function normalizeQuote(row: Record<string, any>): Record<string, any> {
   const items = normalizeQuoteItems(row.items);
-  const totals = quoteTotals(items, row.discount, row.tax);
+  const discountMode: DiscountMode = row.discount_mode === "percent" ? "percent" : "fixed";
+  const totals = quoteTotals(
+    items,
+    row.discount_value ?? row.discount,
+    row.tax,
+    discountMode,
+    row.vat_percent,
+  );
   let installments = row.installments;
   if (typeof installments === "string") {
     try { installments = JSON.parse(installments); } catch { installments = undefined; }
@@ -300,7 +333,12 @@ function normalizeQuote(row: Record<string, any>): Record<string, any> {
     installments: installments || undefined,
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
+    discount_mode: discountMode,
+    discount_value: Number(row.discount_value ?? row.discount ?? totals.discount_value),
     tax: Number(row.tax ?? totals.tax),
+    vat_percent: Number(row.vat_percent ?? totals.vat_percent),
+    vat_amount: Number(row.vat_amount ?? totals.vat_amount),
+    total_without_vat: Number(row.total_without_vat ?? totals.total_without_vat),
     total: Number(row.total ?? totals.total),
   };
 }
@@ -375,7 +413,14 @@ async function ensureQuoteCustomer(uid: string, body: Record<string, any>) {
 
 function quotePayload(body: Record<string, any>, customer: Record<string, any>, existing?: Record<string, any>) {
   const items = normalizeQuoteItems(body.items);
-  const totals = quoteTotals(items, body.discount, body.tax);
+  const discountMode: DiscountMode = body.discount_mode === "percent" ? "percent" : "fixed";
+  const totals = quoteTotals(
+    items,
+    body.discount_value ?? body.discount,
+    body.tax,
+    discountMode,
+    body.vat_percent,
+  );
   const status = quoteStatuses.has(body.status) ? body.status as QuoteStatus : (existing?.status || "issued") as QuoteStatus;
   const now = nowIso();
   return clean({
@@ -954,30 +999,21 @@ function normalizeInvoiceItems(items: unknown) {
 // Resolve a VAT percentage while treating an explicit 0 (zero-rated) as valid.
 // Only an unset value (undefined / null / "") or a non-numeric value falls back
 // to the default — `0 || 15` would otherwise turn a 0% invoice into 15%.
-function resolveVatPercent(value: unknown, fallback = 15): number {
-  if (value === undefined || value === null || value === "") return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
 function invoiceTotals(items: Array<{ total: number; vat_excluded?: boolean }>, discount = 0, vatPercent = 15) {
-  const cleanVatPercent = resolveVatPercent(vatPercent);
-  const vatRate = cleanVatPercent / 100;
-  const subtotal = items.reduce((sum, item) => {
-    const total = Number(item.total || 0);
-    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
-  }, 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const afterDiscount = Math.max(0, subtotal - cleanDiscount);
-  const vatAmount = Math.round(afterDiscount * (cleanVatPercent / 100) * 100) / 100;
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue: discount,
+    discountMode: "fixed",
+    vatPercent,
+  });
   return {
-    subtotal: Math.round(subtotal * 100) / 100,
-    discount: cleanDiscount,
-    vat: vatAmount,
-    vat_percent: cleanVatPercent,
-    vat_amount: vatAmount,
-    total_without_vat: Math.round(afterDiscount * 100) / 100,
-    total_with_vat: Math.round((afterDiscount + vatAmount) * 100) / 100,
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    vat: totals.vatAmount,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_without_vat: totals.totalWithoutVat,
+    total_with_vat: totals.total,
   };
 }
 
@@ -1005,17 +1041,15 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
 }
 
 function invoiceLineAmounts(item: Record<string, any>, vatPercent: number) {
-  const rate = Math.max(0, Number(vatPercent || 0)) / 100;
   const quantity = Math.max(0, Number(item.quantity || 0));
   const enteredTotal = Math.max(0, Number(item.total || quantity * Number(item.unit_price || 0)));
-  const net = item.vat_excluded === false && rate > 0 ? enteredTotal / (1 + rate) : enteredTotal;
-  const gross = item.vat_excluded === false ? enteredTotal : enteredTotal * (1 + rate);
+  const amounts = calculateLineAmounts({ total: enteredTotal, vat_excluded: item.vat_excluded }, vatPercent);
   return {
     quantity,
-    net: Math.round(net * 100) / 100,
-    unitNet: quantity ? Math.round((net / quantity) * 100) / 100 : 0,
-    vat: Math.round((gross - net) * 100) / 100,
-    gross: Math.round(gross * 100) / 100,
+    net: amounts.net,
+    unitNet: quantity ? Math.round((amounts.net / quantity) * 100) / 100 : 0,
+    vat: amounts.vat,
+    gross: amounts.gross,
   };
 }
 
@@ -1044,7 +1078,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
   });
   const currency = String(invoice.currency || "SAR");
   const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
-    const line = invoiceLineAmounts(item, resolveVatPercent(invoice.vat_percent));
+    const line = invoiceLineAmounts(item, normalizeVatPercent(invoice.vat_percent));
     const sku = item.product_sku ? `<small style="display:block;opacity:.6;font-size:.85em;direction:ltr">${escapeHtml(item.product_sku)}</small>` : "";
     return `<tr>
       <td>${index + 1}</td>
@@ -1140,7 +1174,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     <section class="totals">
       <p><span>الإجمالي غير شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
       <p><span>الخصم</span><strong>${escapeHtml(formatMoney(invoice.discount, currency))}</strong></p>
-      <p><span>ضريبة القيمة المضافة (${escapeHtml(resolveVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
+      <p><span>ضريبة القيمة المضافة (${escapeHtml(normalizeVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
       <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
     </section>
     ${invoice.terms ? `<section class="terms">${escapeHtml(invoice.terms)}</section>` : ""}
@@ -1431,7 +1465,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const all = await listOwned("invoices", uid, undefined, 10000);
     const settings = await getSettings(uid);
     const items = normalizeInvoiceItems(quote.items || []);
-    const totals = invoiceTotals(items, quote.discount);
+    const totals = invoiceTotals(items, quote.discount, quote.vat_percent);
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),

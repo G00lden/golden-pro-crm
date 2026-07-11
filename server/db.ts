@@ -390,7 +390,12 @@ db.exec(`
     follow_up_date TEXT,
     subtotal NUMERIC DEFAULT 0,
     discount NUMERIC DEFAULT 0,
+    discount_mode TEXT DEFAULT 'fixed',
+    discount_value NUMERIC DEFAULT 0,
     tax NUMERIC DEFAULT 0,
+    vat_percent NUMERIC DEFAULT 15,
+    vat_amount NUMERIC DEFAULT 0,
+    total_without_vat NUMERIC DEFAULT 0,
     total NUMERIC DEFAULT 0,
     currency TEXT DEFAULT 'SAR',
     payment_method TEXT DEFAULT 'تحويل بنكي',
@@ -402,6 +407,7 @@ db.exec(`
     payment_account TEXT DEFAULT '',
     payment_iban TEXT DEFAULT '',
     payment_note TEXT DEFAULT '',
+    installments TEXT DEFAULT '[]',
     items TEXT DEFAULT '[]',
     notes TEXT DEFAULT '',
     terms TEXT DEFAULT '',
@@ -712,6 +718,11 @@ for (const col of [
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
 
 for (const col of [
+  ["discount_mode", "TEXT DEFAULT 'fixed'"],
+  ["discount_value", "NUMERIC DEFAULT 0"],
+  ["vat_percent", "NUMERIC DEFAULT 15"],
+  ["vat_amount", "NUMERIC DEFAULT 0"],
+  ["total_without_vat", "NUMERIC DEFAULT 0"],
   ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],
   ["payment_down_percent", "NUMERIC DEFAULT 70"],
   ["payment_final_percent", "NUMERIC DEFAULT 30"],
@@ -721,6 +732,7 @@ for (const col of [
   ["payment_account", "TEXT DEFAULT ''"],
   ["payment_iban", "TEXT DEFAULT ''"],
   ["payment_note", "TEXT DEFAULT ''"],
+  ["installments", "TEXT DEFAULT '[]'"],
 ] as const) {
   if (!hasColumn("quotes", col[0])) {
     db.exec(`ALTER TABLE quotes ADD COLUMN ${col[0]} ${col[1]}`);

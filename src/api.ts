@@ -19,6 +19,12 @@ import {
   getCurrentAppUser,
   buildLocalToken,
 } from "./firebase";
+import {
+  calculateDocumentTotals,
+  type DiscountMode,
+} from "../shared/financial";
+
+export type { DiscountMode } from "../shared/financial";
 
 export type Customer = {
   id: string;
@@ -489,7 +495,12 @@ export type Quote = {
   follow_up_date?: string | null;
   subtotal: number;
   discount: number;
+  discount_mode?: DiscountMode;
+  discount_value?: number;
   tax: number;
+  vat_percent?: number;
+  vat_amount?: number;
+  total_without_vat?: number;
   total: number;
   currency: string;
   payment_method?: string;
@@ -1328,15 +1339,30 @@ function normalizeQuoteItems(items: QuoteItem[] = []) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function quoteTotals(items: QuoteItem[], discount = 0, tax = 0) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const cleanTax = Math.max(0, Number(tax || 0));
+function quoteTotals(
+  items: QuoteItem[],
+  discountValue = 0,
+  tax = 0,
+  discountMode: DiscountMode = "fixed",
+  vatPercent = 15,
+) {
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue,
+    discountMode,
+    vatPercent,
+    additionalTax: tax,
+  });
   return {
-    subtotal,
-    discount: cleanDiscount,
-    tax: cleanTax,
-    total: Math.max(0, subtotal - cleanDiscount + cleanTax),
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
+    tax: totals.additionalTax,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_without_vat: totals.totalWithoutVat,
+    total: totals.total,
   };
 }
 
@@ -1390,7 +1416,13 @@ function filterQuotes(quotes: Quote[], filter: { search?: string; status?: strin
 
 function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quote {
   const items = normalizeQuoteItems(data.items);
-  const totals = quoteTotals(items, data.discount, data.tax);
+  const totals = quoteTotals(
+    items,
+    data.discount_value ?? data.discount,
+    data.tax,
+    data.discount_mode,
+    data.vat_percent,
+  );
   const now = nowIso();
   return {
     id: existing?.id || localId("quote"),
@@ -1526,7 +1558,13 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
       items,
       notes: String(data.notes || "").trim(),
       terms: String(data.terms || "").trim(),
-      ...quoteTotals(items, data.discount, data.tax),
+      ...quoteTotals(
+        items,
+        data.discount_value ?? data.discount,
+        data.tax,
+        data.discount_mode,
+        data.vat_percent,
+      ),
       updatedAt: nowIso(),
     }),
     OperationType.UPDATE,
@@ -1647,29 +1685,20 @@ function normalizeInvoiceItems(items: InvoiceItem[] = []) {
 // Treat an explicit 0 (zero-rated) as a valid VAT rate. Only an unset value
 // (undefined / null / "") or a non-numeric value falls back to the default —
 // `0 || 15` would otherwise turn a 0% invoice into 15%.
-function resolveVatPercent(value: unknown, fallback = 15): number {
-  if (value === undefined || value === null || value === "") return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
 function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15) {
-  const cleanVatPercent = resolveVatPercent(vat_percent);
-  const vatRate = cleanVatPercent / 100;
-  const subtotal = items.reduce((sum, item) => {
-    const total = Number(item.total || 0);
-    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
-  }, 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const withoutVat = Math.max(0, subtotal - cleanDiscount);
-  const vatAmount = withoutVat * vatRate;
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue: discount,
+    discountMode: "fixed",
+    vatPercent: vat_percent,
+  });
   return {
-    subtotal: Math.round(subtotal * 100) / 100,
-    discount: cleanDiscount,
-    vat_percent: cleanVatPercent,
-    vat_amount: Math.round(vatAmount * 100) / 100,
-    total_with_vat: Math.round((withoutVat + vatAmount) * 100) / 100,
-    total_without_vat: Math.round(withoutVat * 100) / 100,
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_with_vat: totals.total,
+    total_without_vat: totals.totalWithoutVat,
   };
 }
 
