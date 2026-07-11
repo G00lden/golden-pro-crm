@@ -4,6 +4,7 @@ import { outboundSafetyStatus } from "./outboundSafety";
 import { getReminderSchedulerState } from "./reminderEngine";
 import { getStoreWebhookPublicState } from "./storeWebhook";
 import { buildCommit, releaseInfo } from "./releaseInfo";
+import { requireFirebaseUser } from "./auth";
 
 const timeZone = process.env.APP_TIMEZONE || "Asia/Riyadh";
 
@@ -12,10 +13,19 @@ export function registerHealthRoutes(app: Express) {
     res.json({
       ...releaseInfo,
       commit: buildCommit,
+      runtime: process.env.ENABLE_VITE_DEV_SERVER === "true" ? "development" : "production",
     });
   });
 
   app.get("/api/health", (_req: Request, res: Response) => {
+    res.json({
+      status: "ok",
+      release: releaseInfo,
+      commit: buildCommit,
+    });
+  });
+
+  app.get("/api/health/details", requireFirebaseUser, (_req: Request, res: Response) => {
     res.json({
       status: "ok",
       release: releaseInfo,

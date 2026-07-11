@@ -3,6 +3,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
     restart: unless-stopped
     env_file:
       - ../.env.production
@@ -15,6 +17,7 @@ services:
       retries: 3
       start_period: 30s
     volumes:
+      - crm_data:/app/data
       - crm_runtime:/app/.runtime
       - crm_wa_session:/app/.wa-session
 
@@ -34,6 +37,7 @@ services:
       - caddy_config:/config
 
 volumes:
+  crm_data:
   crm_runtime:
   crm_wa_session:
   caddy_data:

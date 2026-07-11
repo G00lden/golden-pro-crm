@@ -175,6 +175,10 @@ function adminUids(): string[] {
 }
 
 async function startServer() {
+  const developmentServer = process.env.ENABLE_VITE_DEV_SERVER === "true";
+  if (developmentServer && process.env.NODE_ENV === "production") {
+    throw new Error("Vite development middleware cannot run in production.");
+  }
   const localAuthPolicy = getLocalAuthPolicy();
   if (localAuthPolicy.requested && !localAuthPolicy.enabled) {
     throw new Error(`Unsafe local authentication configuration: ${localAuthPolicy.reason}`);
@@ -182,6 +186,7 @@ async function startServer() {
 
   const app = express();
   const port = Number(process.env.PORT || 3000);
+  const listenHost = process.env.HOST || (developmentServer ? "127.0.0.1" : "0.0.0.0");
   const apiRateLimit = createRateLimiter({
     windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 60_000),
     max: Number(process.env.API_RATE_LIMIT_MAX || 240),
@@ -195,6 +200,16 @@ async function startServer() {
 
   app.disable("x-powered-by");
   app.use(securityHeaders);
+  if (developmentServer) {
+    app.use((req, res, next) => {
+      const hostname = req.hostname.toLowerCase();
+      if (hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1") {
+        res.status(421).json({ error: "Development server is available on loopback only." });
+        return;
+      }
+      next();
+    });
+  }
   app.use((req, res, next) => {
     const requestId = req.get("x-request-id") || randomUUID();
     (req as Request & { requestId?: string }).requestId = requestId;
@@ -505,14 +520,30 @@ async function startServer() {
     console.log(`Technician pre-alert cron enabled: ${techSchedule} (${timeZone})`);
   }
 
-  if (process.env.NODE_ENV !== "production") {
+  if (developmentServer) {
     const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: true },
+      server: { middlewareMode: true, allowedHosts: ["localhost", "127.0.0.1"] },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, "dist");
+    app.use((req, res, next) => {
+      const blockedSourcePath =
+        req.path === "/package.json" ||
+        req.path === "/package-lock.json" ||
+        req.path === "/vite.config.ts" ||
+        req.path === "/server.ts" ||
+        req.path.startsWith("/src/") ||
+        req.path.startsWith("/@vite/") ||
+        req.path.startsWith("/@react-refresh") ||
+        req.path.startsWith("/node_modules/");
+      if (blockedSourcePath) {
+        res.status(404).json({ error: "Not found." });
+        return;
+      }
+      next();
+    });
     // Cache policy so a new build is picked up WITHOUT a manual hard-refresh:
     //  - Vite emits content-hashed assets under /assets (index-<hash>.js) — these
     //    are immutable, so cache them for a year.
@@ -537,8 +568,8 @@ async function startServer() {
     });
   }
 
-  app.listen(port, "0.0.0.0", () => {
-    console.log(`Golden Pro CRM running on http://localhost:${port}`);
+  app.listen(port, listenHost, () => {
+    console.log(`Golden Pro CRM (${developmentServer ? "development" : "production"}) running on http://${listenHost}:${port}`);
   });
 }
 

@@ -1,4 +1,9 @@
-Set-Location 'C:\Users\owner\Documents\Codex\2026-04-25\files-mentioned-by-the-user-golden-2'
+$appDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $appDir
+$env:ENV_FILE = if ($env:ENV_FILE) { $env:ENV_FILE } else { ".env.production" }
+$env:NODE_ENV = "production"
+$env:ENABLE_VITE_DEV_SERVER = "false"
+$env:PORT = "3000"
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 $process = Start-Process -FilePath $npm -ArgumentList 'run','start' -PassThru -WindowStyle Hidden
 Write-Host "Server PID: $($process.Id)"

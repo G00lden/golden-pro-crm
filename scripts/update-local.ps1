@@ -14,9 +14,13 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $AppDir
 
+if (git status --porcelain) {
+  throw "Working tree has local changes. Back them up or commit them before updating production."
+}
+
 Write-Host "== سحب آخر كود من main ==" -ForegroundColor Cyan
 $before = (git rev-parse HEAD).Trim()
-git pull origin main
+git pull --ff-only origin main
 $after = (git rev-parse HEAD).Trim()
 
 $changed = ($before -ne $after) -or $Force
@@ -29,7 +33,7 @@ if (-not $changed) {
 }
 
 Write-Host "== تثبيت الحزم (لو فيه جديد) ==" -ForegroundColor Cyan
-npm install
+npm ci
 
 Write-Host "== بناء الواجهة ==" -ForegroundColor Cyan
 npm run build

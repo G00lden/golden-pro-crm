@@ -39,7 +39,7 @@ export default defineConfig(() => {
       },
     },
     server: {
-      allowedHosts: true as const,
+      allowedHosts: ['localhost', '127.0.0.1'],
       hmr: process.env.DISABLE_HMR !== 'true',
     },
     build: {

@@ -19,6 +19,16 @@
 - الأثر الجانبي: الاختبارات المحلية تحتاج `ALLOW_LOCAL_AUTH=true` و`LOCAL_AUTH_TOKEN` قويًا؛ النطاق العام لا يقبل هذا المسار مطلقًا.
 - التحقق: 5/5 اختبارات سياسة auth، واختبار تكاملي (`signed=200`, `legacy=401`, `public-host=404`)، وsmoke 15/15، وlint/build ناجحة.
 
+## تحديث 2026-07-12 — الإصدار 1.0.2 «النشر الثابت» [Codex]
+
+- أصبح `npm start` إنتاجيًا دائمًا ويشترط `dist/index.html`، بينما يتطلب Vite الأمر الصريح `npm run dev` ويستمع على loopback فقط.
+- حُجبت مسارات المصدر (`/src/*`, `/@vite/*`, `package.json`, `server.ts`) في الإنتاج، وأصبحت أصول Vite المجزأة immutable و`index.html` يعاد التحقق منه.
+- اختُصر `/api/health` العام إلى الحالة والإصدار، ونقلت تفاصيل المجدول وoutbound وwebhook إلى `/api/health/details` المحمي.
+- أصبحت سكربتات Windows تضبط production صراحة، وترفض ربط Cloudflare بخدمة dev أو غير متحقق منها.
+- مرر Docker رقم commit إلى البناء، وأضيف volume دائم لـ`/app/data` مع صلاحية مستخدم `node` حتى لا تضيع SQLite الداخلية عند إعادة النشر.
+- الأثر الجانبي: لا HMR على النطاق العام، وكل تحديث يحتاج `npm run build` ثم restart؛ كما يرفض updater العمل فوق تغييرات Git محلية غير محفوظة.
+- التحقق: اختبارات server mode (3/3)، وsmoke 15/15، وlint/build، واختبار سطح إنتاج فعلي (`root=200`, source/vite/package=404, details=401) ناجحة.
+
 
 ## سياق المحادثة
 

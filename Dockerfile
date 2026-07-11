@@ -1,14 +1,17 @@
 FROM node:22-slim
 
+ARG BUILD_COMMIT=unknown
+
 WORKDIR /app
 
 COPY package*.json ./
 RUN npm ci
 
 COPY --chown=node:node . .
-RUN npm run build && mkdir -p .runtime .wa-session && chown -R node:node /app/.runtime /app/.wa-session
+RUN npm run build && mkdir -p data .runtime .wa-session && chown -R node:node /app/data /app/.runtime /app/.wa-session
 
 ENV NODE_ENV=production
+ENV BUILD_COMMIT=$BUILD_COMMIT
 ENV PORT=8080
 
 EXPOSE 8080

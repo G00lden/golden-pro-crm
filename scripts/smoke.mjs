@@ -110,10 +110,16 @@ try {
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.status, "ok");
-    assert.equal(body.timeZone, "Asia/Riyadh");
-    assert.ok(body.reminders && typeof body.reminders.enabled === "boolean");
-    assert.ok(body.reminders.schedule, "health response must expose reminder schedule");
-    assert.ok(body.storeWebhook && body.storeWebhook.endpoint === "/api/store/webhook");
+    assert.ok(body.release?.version, "public health must expose the release version");
+    assert.equal(body.reminders, undefined, "public health must not expose scheduler diagnostics");
+
+    const detailsResponse = await timedFetch("/api/health/details", { headers: localAuthHeaders });
+    assert.equal(detailsResponse.status, 200);
+    const details = await detailsResponse.json();
+    assert.equal(details.timeZone, "Asia/Riyadh");
+    assert.ok(details.reminders && typeof details.reminders.enabled === "boolean");
+    assert.ok(details.reminders.schedule, "authenticated health details must expose reminder schedule");
+    assert.ok(details.storeWebhook && details.storeWebhook.endpoint === "/api/store/webhook");
   });
 
   await check("protected API rejects anonymous requests", async () => {

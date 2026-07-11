@@ -50,6 +50,8 @@ crm.YOURDOMAIN.com {
 
 ## بدون Docker (تشغيل مباشر على VPS/جهاز)
 
+> `npm start` يخدم `dist` فقط. لا تستخدم `npm run dev` خلف Cloudflare أو أي نطاق عام.
+
 ```bash
 npm ci
 npm run build
