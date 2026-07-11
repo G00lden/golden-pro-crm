@@ -55,6 +55,8 @@ npm run db:verify     # يتحقق أن الجداول والسياسات موج
 ```
 
 لو الجداول ناقصة، طبّق الـ migrations من `supabase/migrations/` عبر Supabase SQL editor أو CLI:
+
+تأكد خصوصًا من تطبيق `20260712010400_quotes_invoices_financial.sql` قبل تفعيل `DATA_PROVIDER=supabase`؛ فهي تنشئ جداول العروض والفواتير وحقول الخصم والضريبة والأقساط مع RLS.
 `20260429181500_initial_crm_schema.sql` ثم `20260429183500_harden_crm_schema.sql`.
 
 ---

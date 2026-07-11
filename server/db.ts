@@ -7,6 +7,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
+const TARGET_SCHEMA_VERSION = 10004;
+const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
 const dataDir = path.dirname(DB_PATH);
@@ -19,6 +21,24 @@ const db = new Database(DB_PATH);
 // Enable WAL mode for better concurrent performance
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+
+const schemaVersionBeforeMigration = Number(db.pragma("user_version", { simple: true }) || 0);
+if (
+  process.env.NODE_ENV === "production" &&
+  databaseExistedBeforeStartup &&
+  schemaVersionBeforeMigration < TARGET_SCHEMA_VERSION
+) {
+  const backupDirectory = process.env.DB_MIGRATION_BACKUP_DIR || path.join(dataDir, "backups");
+  fs.mkdirSync(backupDirectory, { recursive: true });
+  db.pragma("wal_checkpoint(FULL)");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = path.join(
+    backupDirectory,
+    `${path.basename(DB_PATH)}.pre-schema-${TARGET_SCHEMA_VERSION}-${stamp}.bak`,
+  );
+  fs.copyFileSync(DB_PATH, backupPath, fs.constants.COPYFILE_EXCL);
+  console.log(`SQLite pre-migration backup created: ${backupPath}`);
+}
 
 // ==========================================
 // SCHEMA
@@ -802,5 +822,15 @@ for (const col of [
     db.exec(`ALTER TABLE settings ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    release TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (${TARGET_SCHEMA_VERSION}, '1.0.4');
+`);
+db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 
 export default db;
