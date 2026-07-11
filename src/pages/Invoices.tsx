@@ -282,25 +282,25 @@ async function saveInvoicePdfFile(invoice: api.Invoice) {
     const canvas = await html2canvas(invoiceNode, {
       backgroundColor: "#ffffff",
       logging: false,
-      scale: Math.min(3, Math.max(2, window.devicePixelRatio || 2)),
+      scale: 2,
       useCORS: true,
       windowWidth: invoiceNode.scrollWidth,
       windowHeight: invoiceNode.scrollHeight,
     });
     const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-    const imageData = canvas.toDataURL("image/png");
+    const imageData = canvas.toDataURL("image/jpeg", 0.85);
     const pageWidth = 210;
     const pageHeight = 297;
     const imageHeight = (canvas.height * pageWidth) / canvas.width;
     if (imageHeight <= pageHeight + 2) {
-      pdf.addImage(imageData, "PNG", 0, 0, pageWidth, pageHeight);
+      pdf.addImage(imageData, "JPEG", 0, 0, pageWidth, pageHeight);
     } else {
       let offset = 0;
-      pdf.addImage(imageData, "PNG", 0, offset, pageWidth, imageHeight);
+      pdf.addImage(imageData, "JPEG", 0, offset, pageWidth, imageHeight);
       while (imageHeight + offset > pageHeight) {
         offset -= pageHeight;
         pdf.addPage();
-        pdf.addImage(imageData, "PNG", 0, offset, pageWidth, imageHeight);
+        pdf.addImage(imageData, "JPEG", 0, offset, pageWidth, imageHeight);
       }
     }
     pdf.save(`${safeFilePart(invoice.invoice_number)}-${safeFilePart(invoice.customer_name)}.pdf`);

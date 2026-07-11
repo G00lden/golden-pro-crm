@@ -285,13 +285,13 @@ async function saveQuotePdfFile(quote: api.Quote) {
       const canvas = await html2canvas(page, {
         backgroundColor: "#ffffff",
         logging: false,
-        scale: Math.min(3, Math.max(2, window.devicePixelRatio || 2)),
+        scale: 2,
         useCORS: true,
         windowWidth: page.scrollWidth,
         windowHeight: page.scrollHeight,
       });
       if (index > 0) pdf.addPage();
-      pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, 210, 297);
+      pdf.addImage(canvas.toDataURL("image/jpeg", 0.85), "JPEG", 0, 0, 210, 297);
     }
     pdf.save(`${safeFilePart(quote.quote_number)}-${safeFilePart(quote.customer_name)}.pdf`);
   } finally {
@@ -367,6 +367,9 @@ function quoteSummaryRows(stats: api.QuoteStats) {
 function quoteShareText(quote: api.Quote) {
   const lines = quote.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, quote.currency)}`);
   const payment = paymentForQuote(quote);
+  const instLines = payment.installments.map(
+    (inst, i) => `${i === 0 ? "الدفعة الأولى" : i === payment.installments.length - 1 ? "الدفعة النهائية" : `الدفعة ${i + 1}`} ${inst.percent}%: ${money((quote.total || 0) * inst.percent / 100, quote.currency)}`,
+  );
   return [
     "عرض سعر من BreeXe Pro",
     `رقم العرض: ${quote.quote_number}`,
@@ -378,8 +381,7 @@ function quoteShareText(quote: api.Quote) {
     "",
     `الإجمالي: ${money(quote.total, quote.currency)}`,
     `طريقة الدفع: ${payment.method}`,
-    `الدفعة الأولى ${payment.downPercent}%: ${money((quote.total || 0) * payment.downPercent / 100, quote.currency)}`,
-    `الدفعة النهائية ${payment.finalPercent}%: ${money((quote.total || 0) * payment.finalPercent / 100, quote.currency)}`,
+    ...instLines,
     quote.terms ? `الشروط: ${quote.terms}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -409,16 +411,21 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
   };
 
   const saveQuote = async (payload: api.QuoteInput) => {
-    if (editing) {
-      await api.updateQuote(editing.id, payload);
-      notify("تم حفظ عرض السعر");
-    } else {
-      await api.createQuote(payload);
-      notify("تم إصدار عرض السعر");
+    try {
+      if (editing) {
+        await api.updateQuote(editing.id, payload);
+        notify("تم حفظ عرض السعر");
+      } else {
+        await api.createQuote(payload);
+        notify("تم إصدار عرض السعر");
+      }
+      setCreating(false);
+      setEditing(null);
+      await refreshAll();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "فشل حفظ العرض", false);
+      throw err;
     }
-    setCreating(false);
-    setEditing(null);
-    await refreshAll();
   };
 
   const setQuoteStatus = async (quote: api.Quote, nextStatus: api.QuoteStatus) => {
@@ -733,10 +740,24 @@ function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: ()
           </tbody>
           <tfoot>
             <tr>
-              <td colSpan={2}>الإجمالي</td>
-              <td>{money(quote.subtotal, quote.currency)}</td>
-              <td>{money(quote.discount, quote.currency)}</td>
-              <td>{money(quote.total, quote.currency)}</td>
+              <td colSpan={2}>الإجمالي قبل الضريبة</td>
+              <td colSpan={3}>{money(quote.total_without_vat ?? (quote.subtotal - quote.discount), quote.currency)}</td>
+            </tr>
+            {quote.discount > 0 && (
+              <tr>
+                <td colSpan={2}>الخصم {quote.discount_mode === "percent" ? `(${quote.discount}%)` : ""}</td>
+                <td colSpan={3}>{money(quote.discount, quote.currency)}</td>
+              </tr>
+            )}
+            {quote.vat_amount ? (
+              <tr>
+                <td colSpan={2}>ضريبة القيمة المضافة ({quote.vat_percent ?? 15}%)</td>
+                <td colSpan={3}>{money(quote.vat_amount, quote.currency)}</td>
+              </tr>
+            ) : null}
+            <tr>
+              <td colSpan={2}>الإجمالي النهائي</td>
+              <td colSpan={3}>{money(quote.total, quote.currency)}</td>
             </tr>
           </tfoot>
           </table>
@@ -807,6 +828,8 @@ function QuoteForm({
   const [validUntil, setValidUntil] = useState(initial?.valid_until || addDays(today(), 7));
   const [followUpDate, setFollowUpDate] = useState(initial?.follow_up_date || addDays(today(), 2));
   const [discount, setDiscount] = useState(String(initial?.discount || 0));
+  const [discountMode, setDiscountMode] = useState<api.DiscountMode>(initial?.discount_mode || "fixed");
+  const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent ?? 15));
   const [tax, setTax] = useState(String(initial?.tax || 0));
   const [notes, setNotes] = useState(initial?.notes || "");
   const [terms, setTerms] = useState(initial?.terms || "العرض صالح حسب التاريخ الموضح، والأسعار بالريال السعودي.");
@@ -828,7 +851,8 @@ function QuoteForm({
   );
 
   const installmentsTotal = installments.reduce((s, i) => s + i.percent, 0);
-  const canAddInstallment = installments.length < 6 && installmentsTotal < 100;
+  const canAddInstallment = installments.length < 6;
+  const installmentsValid = installmentsTotal === 100;
 
   const selectedCustomer = customers.data?.data.find((item) => item.id === customerId);
 
@@ -851,7 +875,21 @@ function QuoteForm({
     [items],
   );
   const subtotal = normalizedItems.reduce((sum, item) => sum + item.total, 0);
-  const total = Math.max(0, subtotal - Number(discount || 0) + Number(tax || 0));
+  const vatRate = Math.max(0, Number(vatPercent || 0)) / 100;
+  // Calculate base (VAT-exclusive) subtotal
+  const baseSubtotal = normalizedItems.reduce((sum, item) => {
+    if (item.vat_excluded === false && vatRate > 0) {
+      // Price includes VAT — extract base
+      return sum + item.total / (1 + vatRate);
+    }
+    return sum + item.total;
+  }, 0);
+  const discountAmount = discountMode === "percent"
+    ? baseSubtotal * Math.min(100, Math.max(0, Number(discount || 0))) / 100
+    : Math.max(0, Number(discount || 0));
+  const afterDiscount = Math.max(0, baseSubtotal - discountAmount);
+  const vatAmount = afterDiscount * vatRate;
+  const total = Math.round((afterDiscount + vatAmount + Math.max(0, Number(tax || 0))) * 100) / 100;
 
   const updateItem = (index: number, patch: Partial<api.QuoteItem>) => {
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
@@ -886,7 +924,9 @@ function QuoteForm({
         valid_until: validUntil || null,
         follow_up_date: followUpDate || null,
         discount: Number(discount || 0),
+        discount_mode: discountMode,
         tax: Number(tax || 0),
+        vat_percent: Number(vatPercent || 15),
         currency: "SAR",
         items: normalizedItems.filter((item) => item.description.trim()),
         notes: notes.trim(),
@@ -898,6 +938,7 @@ function QuoteForm({
         payment_note: paymentNote,
         installments,
       });
+    } catch (err) { // error already notified by parent onSave
     } finally {
       setSaving(false);
     }
@@ -1044,14 +1085,30 @@ function QuoteForm({
       </div>
 
       <div className="quote-total-summary">
+        <div className="quote-price-mode">
+          <span>الخصم</span>
+          <button type="button" className={discountMode === "fixed" ? "active" : ""} onClick={() => setDiscountMode("fixed")}>مبلغ</button>
+          <button type="button" className={discountMode === "percent" ? "active" : ""} onClick={() => setDiscountMode("percent")}>نسبة %</button>
+        </div>
         <label className="field">
-          <span>خصم</span>
-          <input className="input" type="number" min={0} step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} />
+          <span>{discountMode === "percent" ? "نسبة الخصم (%)" : "الخصم"}</span>
+          <input className="input" type="number" min={0} step={discountMode === "percent" ? "1" : "0.01"} max={discountMode === "percent" ? 100 : undefined}
+            value={discount} onChange={(event) => setDiscount(event.target.value)} />
         </label>
         <label className="field">
-          <span>ضريبة / رسوم</span>
+          <span>نسبة الضريبة (%)</span>
+          <input className="input" type="number" min={0} max={100} step="1" value={vatPercent} onChange={(event) => setVatPercent(event.target.value)} />
+        </label>
+        <label className="field">
+          <span>ضريبة / رسوم إضافية</span>
           <input className="input" type="number" min={0} step="0.01" value={tax} onChange={(event) => setTax(event.target.value)} />
         </label>
+        {vatRate > 0 && (
+          <article>
+            <span>الضريبة ({vatPercent}%)</span>
+            <strong>{money(vatAmount)}</strong>
+          </article>
+        )}
         <article>
           <span>الإجمالي</span>
           <strong>{money(total)}</strong>
@@ -1154,8 +1211,8 @@ function QuoteForm({
       </fieldset>
 
       <div className="form-actions">
-        <button className="btn primary" type="submit" disabled={saving}>
-          <FileText size={16} /> {saving ? "جاري الحفظ..." : "حفظ العرض"}
+        <button className="btn primary" type="submit" disabled={saving || !installmentsValid}>
+          <FileText size={16} /> {saving ? "جاري الحفظ..." : !installmentsValid ? "مجموع الدفعات ≠ 100%" : "حفظ العرض"}
         </button>
         <button className="btn muted" type="button" onClick={onCancel}>إلغاء</button>
       </div>

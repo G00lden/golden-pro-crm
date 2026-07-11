@@ -204,28 +204,41 @@ function normalizeQuoteItems(items: unknown) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function quoteTotals(items: Array<{ total: number }>, discount = 0, tax = 0) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+function quoteTotals(items: Array<{ total: number; vat_excluded?: boolean }>, discount = 0, tax = 0, vat_percent = 15) {
+  const vatRate = Math.max(0, Number(vat_percent || 0)) / 100;
+  const subtotal = items.reduce((sum, item) => {
+    const total = Number(item.total || 0);
+    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
+  }, 0);
   const cleanDiscount = Math.max(0, Number(discount || 0));
   const cleanTax = Math.max(0, Number(tax || 0));
+  const withoutVat = Math.max(0, subtotal - cleanDiscount);
+  const vatAmount = withoutVat * vatRate;
   return {
-    subtotal,
+    subtotal: Math.round(subtotal * 100) / 100,
     discount: cleanDiscount,
     tax: cleanTax,
-    total: Math.max(0, subtotal - cleanDiscount + cleanTax),
+    vat_percent: Math.max(0, Number(vat_percent || 0)),
+    vat_amount: Math.round(vatAmount * 100) / 100,
+    total_without_vat: Math.round(withoutVat * 100) / 100,
+    total: Math.round((withoutVat + vatAmount + cleanTax) * 100) / 100,
   };
 }
 
 function quotePaymentFields(row: Record<string, any>, existing?: Record<string, any>) {
-  const installments = (() => {
+  const installments = ((() => {
     const raw = row.installments ?? existing?.installments;
     if (Array.isArray(raw) && raw.length) return raw;
     // fallback: build from legacy flat fields
     return [
-      { percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70), label: String(row.payment_down_text || existing?.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim(), deadline_days: undefined },
-      { percent: Number(row.payment_final_percent ?? existing?.payment_final_percent ?? 30), label: String(row.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim(), deadline_days: undefined },
+      { percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70), label: String(row.payment_down_text || existing?.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim() },
+      { percent: Number(row.payment_final_percent ?? existing?.payment_final_percent ?? 30), label: String(row.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim() },
     ];
-  })();
+  })()).map((inst: any) => ({
+    percent: inst.percent,
+    label: inst.label || "",
+    ...(inst.deadline_days != null ? { deadline_days: inst.deadline_days } : {}),
+  }));
   return {
     payment_method: String(row.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
     payment_down_percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70),
@@ -242,10 +255,17 @@ function quotePaymentFields(row: Record<string, any>, existing?: Record<string, 
 
 function normalizeQuote(row: Record<string, any>): Record<string, any> {
   const items = normalizeQuoteItems(row.items);
-  const totals = quoteTotals(items, row.discount, row.tax);
+  const totals = quoteTotals(items, row.discount, row.tax, row.vat_percent ?? 15);
   let installments = row.installments;
   if (typeof installments === "string") {
     try { installments = JSON.parse(installments); } catch { installments = undefined; }
+  }
+  if (!Array.isArray(installments) || !installments.length) {
+    // fallback from legacy flat fields
+    installments = [
+      { percent: Number(row.payment_down_percent ?? 70), label: String(row.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim() },
+      { percent: Number(row.payment_final_percent ?? 30), label: String(row.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim() },
+    ];
   }
   return {
     ...row,
@@ -262,10 +282,7 @@ function normalizeQuote(row: Record<string, any>): Record<string, any> {
     items,
     ...quotePaymentFields(row),
     installments: installments || undefined,
-    subtotal: Number(row.subtotal ?? totals.subtotal),
-    discount: Number(row.discount ?? totals.discount),
-    tax: Number(row.tax ?? totals.tax),
-    total: Number(row.total ?? totals.total),
+    ...totals,
   };
 }
 
@@ -339,7 +356,7 @@ async function ensureQuoteCustomer(uid: string, body: Record<string, any>) {
 
 function quotePayload(body: Record<string, any>, customer: Record<string, any>, existing?: Record<string, any>) {
   const items = normalizeQuoteItems(body.items);
-  const totals = quoteTotals(items, body.discount, body.tax);
+  const totals = quoteTotals(items, body.discount, body.tax, body.vat_percent ?? existing?.vat_percent ?? 15);
   const status = quoteStatuses.has(body.status) ? body.status as QuoteStatus : (existing?.status || "issued") as QuoteStatus;
   const now = nowIso();
   return clean({
@@ -354,6 +371,7 @@ function quotePayload(body: Record<string, any>, customer: Record<string, any>, 
     valid_until: body.valid_until || null,
     follow_up_date: body.follow_up_date || null,
     currency: body.currency || existing?.currency || "SAR",
+    discount_mode: body.discount_mode || existing?.discount_mode || "fixed",
     items,
     notes: String(body.notes || "").trim(),
     terms: String(body.terms || "").trim(),

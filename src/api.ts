@@ -468,6 +468,14 @@ export type QuoteItem = {
   vat_excluded?: boolean;
 };
 
+export type QuoteInstallment = {
+  percent: number;
+  label: string;
+  deadline_days?: number;
+};
+
+export type DiscountMode = "fixed" | "percent";
+
 export type Quote = {
   id: string;
   quote_number: string;
@@ -483,9 +491,13 @@ export type Quote = {
   follow_up_date?: string | null;
   subtotal: number;
   discount: number;
+  discount_mode?: DiscountMode;
   tax: number;
   total: number;
   currency: string;
+  vat_percent?: number;
+  vat_amount?: number;
+  total_without_vat?: number;
   payment_method?: string;
   payment_down_percent?: number;
   payment_final_percent?: number;
@@ -495,6 +507,7 @@ export type Quote = {
   payment_account?: string;
   payment_iban?: string;
   payment_note?: string;
+  installments?: QuoteInstallment[];
   items: QuoteItem[];
   notes?: string;
   terms?: string;
@@ -1314,27 +1327,41 @@ function normalizeQuoteItems(items: QuoteItem[] = []) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function quoteTotals(items: QuoteItem[], discount = 0, tax = 0) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+function quoteTotals(items: QuoteItem[], discount = 0, tax = 0, vat_percent = 15) {
+  const vatRate = Math.max(0, Number(vat_percent || 0)) / 100;
+  const subtotal = items.reduce((sum, item) => {
+    const total = Number(item.total || 0);
+    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
+  }, 0);
   const cleanDiscount = Math.max(0, Number(discount || 0));
   const cleanTax = Math.max(0, Number(tax || 0));
+  const withoutVat = Math.max(0, subtotal - cleanDiscount);
+  const vatAmount = withoutVat * vatRate;
   return {
-    subtotal,
+    subtotal: Math.round(subtotal * 100) / 100,
     discount: cleanDiscount,
     tax: cleanTax,
-    total: Math.max(0, subtotal - cleanDiscount + cleanTax),
+    vat_percent: Math.max(0, Number(vat_percent || 0)),
+    vat_amount: Math.round(vatAmount * 100) / 100,
+    total_without_vat: Math.round(withoutVat * 100) / 100,
+    total: Math.round((withoutVat + vatAmount + cleanTax) * 100) / 100,
   };
 }
 
 function quotePaymentFields(data: QuoteInput, existing?: Quote) {
-  const installments = data.installments?.length
+  const installments = (data.installments?.length
     ? data.installments
     : existing?.installments?.length
       ? existing.installments
       : [
           { percent: Number(data.payment_down_percent ?? 70), label: String(data.payment_down_text || "عند اعتماد العرض وبدء تنفيذ الطلب.").trim() },
           { percent: Number(data.payment_final_percent ?? 30), label: String(data.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim() },
-        ];
+        ]
+  ).map((inst) => ({
+    percent: inst.percent,
+    label: inst.label || "",
+    ...(inst.deadline_days != null ? { deadline_days: inst.deadline_days } : {}),
+  }));
   return {
     payment_method: String(data.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
     payment_down_percent: Number(data.payment_down_percent ?? existing?.payment_down_percent ?? 70),
@@ -1376,7 +1403,7 @@ function filterQuotes(quotes: Quote[], filter: { search?: string; status?: strin
 
 function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quote {
   const items = normalizeQuoteItems(data.items);
-  const totals = quoteTotals(items, data.discount, data.tax);
+  const totals = quoteTotals(items, data.discount, data.tax, data.vat_percent ?? 15);
   const now = nowIso();
   return {
     id: existing?.id || localId("quote"),
@@ -1392,6 +1419,7 @@ function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quo
     valid_until: data.valid_until || existing?.valid_until || null,
     follow_up_date: data.follow_up_date || existing?.follow_up_date || null,
     currency: data.currency || existing?.currency || "SAR",
+    discount_mode: data.discount_mode || existing?.discount_mode || "fixed",
     items,
     notes: String(data.notes || existing?.notes || "").trim(),
     terms: String(data.terms || existing?.terms || "").trim(),
@@ -1512,7 +1540,7 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
       items,
       notes: String(data.notes || "").trim(),
       terms: String(data.terms || "").trim(),
-      ...quoteTotals(items, data.discount, data.tax),
+      ...quoteTotals(items, data.discount, data.tax, data.vat_percent ?? 15),
       updatedAt: nowIso(),
     }),
     OperationType.UPDATE,

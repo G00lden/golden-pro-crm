@@ -721,6 +721,11 @@ for (const col of [
   ["payment_account", "TEXT DEFAULT ''"],
   ["payment_iban", "TEXT DEFAULT ''"],
   ["payment_note", "TEXT DEFAULT ''"],
+  ["installments", "TEXT DEFAULT '[]'"],
+  ["vat_percent", "NUMERIC DEFAULT 15"],
+  ["discount_mode", "TEXT DEFAULT 'fixed'"],
+  ["vat_amount", "NUMERIC DEFAULT 0"],
+  ["total_without_vat", "NUMERIC DEFAULT 0"],
 ] as const) {
   if (!hasColumn("quotes", col[0])) {
     db.exec(`ALTER TABLE quotes ADD COLUMN ${col[0]} ${col[1]}`);
