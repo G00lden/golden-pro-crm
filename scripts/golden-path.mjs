@@ -107,6 +107,24 @@ try {
     assert.equal(r.status, 200, `expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
   });
 
+  await step("validation rejects malformed CRM payloads", async () => {
+    const customer = await request("/api/customers", {
+      method: "POST",
+      body: JSON.stringify({ name: "", phone: "0500000000" }),
+    });
+    assert.equal(customer.status, 400);
+    const quote = await request("/api/quotes", {
+      method: "POST",
+      body: JSON.stringify({
+        customer_name: "Invalid",
+        discount_mode: "percent",
+        discount_value: 101,
+        items: [{ description: "X", quantity: 1, unit_price: 10 }],
+      }),
+    });
+    assert.equal(quote.status, 400);
+  });
+
   // -- 3. Create a customer
   await step("POST /api/customers creates a customer", async () => {
     const r = await request("/api/customers", {
@@ -115,12 +133,16 @@ try {
         name: `Golden Path ${Date.now()}`,
         phone: "+966500000000",
         city: "Riyadh",
-        source: "golden-path-test",
+        source: "manual",
+        role: "admin",
       }),
     });
     assert.equal(r.status, 201, `expected 201, got ${r.status}: ${JSON.stringify(r.body)}`);
     assert.ok(r.body?.id, "response must include id");
     created.customerId = r.body.id;
+    const list = await request("/api/customers");
+    const stored = (list.body?.data || []).find((item) => item.id === created.customerId);
+    assert.equal(stored?.role, undefined, "unknown privilege fields must be stripped");
   });
 
   // -- 4. Create a quote for that customer

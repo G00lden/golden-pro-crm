@@ -5,7 +5,31 @@ import { adminDb } from "./firebaseAdmin";
 import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
-import { publicInvoiceShareQuerySchema, validateQuery } from "./validation";
+import { publicInvoiceShareQuerySchema, validate, validateParams, validateQuery } from "./validation";
+import {
+  bookingCreateSchema,
+  bookingUpdateSchema,
+  crmIdParamsSchema,
+  customerCreateSchema,
+  customerUpdateSchema,
+  demoDataSchema,
+  documentSendSchema,
+  installationCompleteSchema,
+  installationCreateSchema,
+  installationUpdateSchema,
+  invoiceCreateSchema,
+  invoiceStatusSchema,
+  invoiceUpdateSchema,
+  productCreateSchema,
+  productUpdateSchema,
+  quoteConvertSchema,
+  quoteCreateSchema,
+  quoteStatusSchema,
+  quoteUpdateSchema,
+  settingsUpdateSchema,
+  technicianCreateSchema,
+  technicianUpdateSchema,
+} from "./crmValidation";
 import {
   calculateDocumentTotals,
   calculateLineAmounts,
@@ -472,7 +496,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ data, total: data.length });
   }));
 
-  app.post("/api/customers", asyncRoute(async (req, res) => {
+  app.post("/api/customers", validate(customerCreateSchema), asyncRoute(async (req, res) => {
     const name = String(req.body?.name || "").trim();
     const phone = String(req.body?.phone || "").trim();
     if (!name || !phone) {
@@ -489,12 +513,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/customers/:id", asyncRoute(async (req, res) => {
+  app.put("/api/customers/:id", validateParams(crmIdParamsSchema), validate(customerUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("customers", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Customer was not found." });
     res.json({ success: true });
   }));
 
-  app.delete("/api/customers/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/customers/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const id = req.params.id;
     const blocking = await findBlockingReferences(uid, [
@@ -523,7 +547,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ data, total: data.length, stats: quoteStats(all) });
   }));
 
-  app.post("/api/quotes", asyncRoute(async (req, res) => {
+  app.post("/api/quotes", validate(quoteCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const items = normalizeQuoteItems(req.body?.items);
     const customerName = String(req.body?.customer_name || "").trim();
@@ -546,7 +570,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id, quote: quote ? normalizeQuote(quote) : null });
   }));
 
-  app.put("/api/quotes/:id", asyncRoute(async (req, res) => {
+  app.put("/api/quotes/:id", validateParams(crmIdParamsSchema), validate(quoteUpdateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("quotes", req.params.id, uid);
     if (!existing) {
@@ -560,7 +584,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ quote: quote ? normalizeQuote(quote) : null });
   }));
 
-  app.post("/api/quotes/:id/status", asyncRoute(async (req, res) => {
+  app.post("/api/quotes/:id/status", validateParams(crmIdParamsSchema), validate(quoteStatusSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const status = String(req.body?.status || "").trim() as QuoteStatus;
     if (!quoteStatuses.has(status)) {
@@ -586,12 +610,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ quote: quote ? normalizeQuote(quote) : null });
   }));
 
-  app.delete("/api/quotes/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/quotes/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("quotes", req.params.id, userId(req)))) return res.status(404).json({ error: "Quote was not found." });
     res.json({ success: true });
   }));
 
-  app.post("/api/quotes/:id/send-whatsapp", asyncRoute(async (req, res) => {
+  app.post("/api/quotes/:id/send-whatsapp", validateParams(crmIdParamsSchema), validate(documentSendSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("quotes", req.params.id, uid);
     if (!existing) {
@@ -639,7 +663,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(await listOwned("products", userId(req), "name", 250));
   }));
 
-  app.post("/api/products", asyncRoute(async (req, res) => {
+  app.post("/api/products", validate(productCreateSchema), asyncRoute(async (req, res) => {
     const id = await createOwned("products", userId(req), {
       ...req.body,
       interval_months: Number(req.body?.interval_months || 1),
@@ -652,7 +676,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/products/:id", asyncRoute(async (req, res) => {
+  app.put("/api/products/:id", validateParams(crmIdParamsSchema), validate(productUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("products", req.params.id, userId(req), {
       ...req.body,
       interval_months: req.body?.interval_months ? Number(req.body.interval_months) : undefined,
@@ -660,7 +684,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.delete("/api/products/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/products/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const id = req.params.id;
     const blocking = await findBlockingReferences(uid, [
@@ -679,7 +703,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(data.map((item) => ({ ...item, days_until: daysUntil(String(item.next_maintenance || "")) })));
   }));
 
-  app.post("/api/installations", asyncRoute(async (req, res) => {
+  app.post("/api/installations", validate(installationCreateSchema), asyncRoute(async (req, res) => {
     const id = await createOwned("installations", userId(req), {
       ...req.body,
       label: req.body?.label || "",
@@ -694,12 +718,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/installations/:id", asyncRoute(async (req, res) => {
+  app.put("/api/installations/:id", validateParams(crmIdParamsSchema), validate(installationUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("installations", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Installation was not found." });
     res.json({ success: true });
   }));
 
-  app.post("/api/installations/:id/complete", asyncRoute(async (req, res) => {
+  app.post("/api/installations/:id/complete", validateParams(crmIdParamsSchema), validate(installationCompleteSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("installations", req.params.id, userId(req), {
       status: "completed",
       completed_date: req.body?.completedDate || todayInTimeZone(),
@@ -708,7 +732,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.delete("/api/installations/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/installations/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("installations", req.params.id, userId(req)))) return res.status(404).json({ error: "Installation was not found." });
     res.json({ success: true });
   }));
@@ -717,7 +741,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(await listOwned("technicians", userId(req), "name", 250));
   }));
 
-  app.post("/api/technicians", asyncRoute(async (req, res) => {
+  app.post("/api/technicians", validate(technicianCreateSchema), asyncRoute(async (req, res) => {
     const id = await createOwned("technicians", userId(req), {
       ...req.body,
       specialty: req.body?.specialty || "",
@@ -726,7 +750,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/technicians/:id", asyncRoute(async (req, res) => {
+  app.put("/api/technicians/:id", validateParams(crmIdParamsSchema), validate(technicianUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("technicians", req.params.id, userId(req), {
       ...req.body,
       max_daily: req.body?.max_daily ? Number(req.body.max_daily) : undefined,
@@ -734,7 +758,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.delete("/api/technicians/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/technicians/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const id = req.params.id;
     // installations carry no technician_id — only bookings reference technicians.
@@ -756,7 +780,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(snap.docs.map((doc: DocSnapshot) => docData(doc)));
   }));
 
-  app.post("/api/bookings", asyncRoute(async (req, res) => {
+  app.post("/api/bookings", validate(bookingCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const technicianId = String(req.body?.technician_id || "").trim();
     if (technicianId && !(await getOwned("technicians", technicianId, uid))) {
@@ -773,12 +797,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/bookings/:id", asyncRoute(async (req, res) => {
+  app.put("/api/bookings/:id", validateParams(crmIdParamsSchema), validate(bookingUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("bookings", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Booking was not found." });
     res.json({ success: true });
   }));
 
-  app.delete("/api/bookings/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/bookings/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("bookings", req.params.id, userId(req)))) return res.status(404).json({ error: "Booking was not found." });
     res.json({ success: true });
   }));
@@ -791,7 +815,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(await getSettings(userId(req)));
   }));
 
-  app.put("/api/settings", asyncRoute(async (req, res) => {
+  app.put("/api/settings", validate(settingsUpdateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     await adminDb.collection("settings").doc(uid).set({
       ...defaultSettings,
@@ -802,7 +826,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.post("/api/demo-data", asyncRoute(async (req, res) => {
+  app.post("/api/demo-data", validate(demoDataSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const count = Math.max(1, Math.min(50, Number(req.body?.count || 10)));
     const stamp = new Date().toISOString().replace(/\D/g, "").slice(8, 14);
@@ -1217,7 +1241,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ data, total: data.length, stats });
   }));
 
-  app.post("/api/invoices", asyncRoute(async (req, res) => {
+  app.post("/api/invoices", validate(invoiceCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const items = normalizeInvoiceItems(req.body?.items);
     const customerName = String(req.body?.customer_name || "").trim();
@@ -1281,7 +1305,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ url: invoiceShareUrl(req, invoice) });
   }));
 
-  app.put("/api/invoices/:id", asyncRoute(async (req, res) => {
+  app.put("/api/invoices/:id", validateParams(crmIdParamsSchema), validate(invoiceUpdateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("invoices", req.params.id, uid);
     if (!existing) {
@@ -1318,7 +1342,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
   }));
 
-  app.post("/api/invoices/:id/status", asyncRoute(async (req, res) => {
+  app.post("/api/invoices/:id/status", validateParams(crmIdParamsSchema), validate(invoiceStatusSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const status = String(req.body?.status || "").trim() as InvoiceStatus;
     if (!invoiceStatuses.has(status)) {
@@ -1343,7 +1367,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
   }));
 
-  app.delete("/api/invoices/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/invoices/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("invoices", req.params.id, userId(req)))) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
       return;
@@ -1351,7 +1375,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ success: true });
   }));
 
-  app.post("/api/invoices/:id/send-whatsapp", asyncRoute(async (req, res) => {
+  app.post("/api/invoices/:id/send-whatsapp", validateParams(crmIdParamsSchema), validate(documentSendSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("invoices", req.params.id, uid);
     if (!existing) {
@@ -1447,7 +1471,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     });
   }));
 
-  app.post("/api/quotes/:id/convert-to-invoice", asyncRoute(async (req, res) => {
+  app.post("/api/quotes/:id/convert-to-invoice", validateParams(crmIdParamsSchema), validate(quoteConvertSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("quotes", req.params.id, uid);
     if (!existing) {

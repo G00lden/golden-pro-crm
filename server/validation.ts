@@ -32,6 +32,18 @@ export function validateQuery(schema: z.ZodSchema) {
   };
 }
 
+export function validateParams(schema: z.ZodSchema) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const result = schema.safeParse(req.params);
+    if (!result.success) {
+      validationError(res, result.error);
+      return;
+    }
+    req.params = result.data as Request['params'];
+    next();
+  };
+}
+
 // Auth schemas
 
 export const loginSchema = z.object({
