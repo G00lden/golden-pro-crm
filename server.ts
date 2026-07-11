@@ -236,6 +236,7 @@ async function startServer() {
       "/salla/callback",
       "/salla/webhook",
       "/api/health",
+      "/api/version",
       "/public/invoices",
       "/webhooks/whatsapp",
       "/webhooks/telephony",

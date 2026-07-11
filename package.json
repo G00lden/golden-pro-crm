@@ -1,13 +1,16 @@
 {
   "name": "golden-pro-crm",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
     "start:prod:win": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:ENV_FILE='.env.production'; $env:NODE_ENV='production'; $env:PORT='3000'; npm run start\"",
+    "prebuild": "npm run release:validate",
     "build": "vite build",
+    "release:validate": "node scripts/validate-release.mjs",
+    "test:version": "node --test scripts/version-policy.test.mjs",
     "preview": "vite preview",
     "test:smoke": "node scripts/smoke.mjs",
     "test:golden": "node scripts/golden-path.mjs",

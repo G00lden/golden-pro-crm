@@ -169,6 +169,13 @@ function EmailAuthPage({ notify }: { notify: (message: string, ok?: boolean) => 
         <div className="brand-mark large">BP</div>
         <h1>BreeXe Pro CRM</h1>
         <p>نظام إدارة العملاء والصيانة ورسائل واتساب</p>
+        <small
+          className="app-version"
+          title={`بناء ${__BUILD_COMMIT__} في ${__BUILD_TIME__}`}
+          style={{ direction: "rtl", opacity: 0.65 }}
+        >
+          الإصدار {__APP_VERSION__} — {__APP_RELEASE_NAME__}
+        </small>
 
         <div className="auth-tabs" role="tablist" aria-label="اختيار طريقة الدخول">
           <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>
@@ -420,10 +427,11 @@ export default function App() {
         </div>
         <div
           className="app-version"
-          title={`إصدار الكود ${__APP_VERSION__} — بُني ${__BUILD_TIME__}`}
-          style={{ marginTop: "auto", padding: "8px 4px 2px", fontSize: 10, opacity: 0.55, textAlign: "center", direction: "ltr", lineHeight: 1.5 }}
+          title={`بناء ${__BUILD_COMMIT__} — بُني ${__BUILD_TIME__}`}
+          style={{ marginTop: "auto", padding: "8px 4px 2px", fontSize: 10, opacity: 0.55, textAlign: "center", lineHeight: 1.5 }}
         >
-          v{__APP_VERSION__} · {new Date(__BUILD_TIME__).toLocaleDateString("en-CA")}
+          <span dir="rtl">{__APP_RELEASE_NAME__}</span><br />
+          <span dir="ltr">v{__APP_VERSION__} · {__BUILD_COMMIT__} · {new Date(__BUILD_TIME__).toLocaleDateString("en-CA")}</span>
         </div>
       </aside>
 
