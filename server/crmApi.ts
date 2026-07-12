@@ -46,12 +46,20 @@ import {
 } from "../shared/zatca";
 import {
   createOwnedRepository,
+  MAX_OWNED_SCAN_LIMIT,
   type FirestoreLikeStore,
 } from "./repositories/ownedRepository";
+import {
+  filterCustomerRecords,
+  paginateCustomerRecords,
+  parseCustomerListQuery,
+} from "./customerPagination";
 
 const ownedRepository = createOwnedRepository(adminDb as unknown as FirestoreLikeStore);
 const {
   list: listOwned,
+  count: countOwned,
+  listPage: listOwnedPage,
   get: getOwned,
   create: createOwned,
   update: updateOwned,
@@ -112,13 +120,27 @@ function docData(doc: DocSnapshot): Record<string, any> & { id: string } {
 }
 
 async function stats(uid: string) {
-  const [customers, products, technicians, installations, reminders, quotes, settings] = await Promise.all([
-    listOwned("customers", uid, undefined, 1000),
-    listOwned("products", uid, undefined, 1000),
-    listOwned("technicians", uid, undefined, 1000),
-    listOwned("installations", uid, undefined, 1000),
-    listOwned("reminders", uid, undefined, 1000),
-    listOwned("quotes", uid, undefined, 1000),
+  const [
+    customerCount,
+    productCount,
+    technicianCount,
+    installationCount,
+    quoteCount,
+    customers,
+    installations,
+    reminders,
+    quotes,
+    settings,
+  ] = await Promise.all([
+    countOwned("customers", uid),
+    countOwned("products", uid),
+    countOwned("technicians", uid),
+    countOwned("installations", uid),
+    countOwned("quotes", uid),
+    listOwned("customers", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+    listOwned("installations", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+    listOwned("reminders", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+    listOwned("quotes", uid, undefined, MAX_OWNED_SCAN_LIMIT),
     getSettings(uid),
   ]);
 
@@ -130,13 +152,31 @@ async function stats(uid: string) {
   const tomorrow = new Date(`${today}T00:00:00`);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStart = tomorrow.toISOString();
+  const values = (records: Array<Record<string, any>>, field: string) => new Set(
+    records
+      .map((record) => String(record[field] ?? "").trim())
+      .filter(Boolean),
+  );
+  const installationCustomerIds = values(installations, "customer_id");
+  const installationCustomerPhones = values(installations, "customer_phone");
+  const reminderCustomerIds = values(reminders, "customer_id");
+  const reminderCustomerPhones = values(reminders, "customer_phone");
+  const care = customers.reduce((count, customer) => {
+    const customerId = String(customer.id ?? "").trim();
+    const customerPhone = String(customer.phone ?? "").trim();
+    const hasInstallation = installationCustomerIds.has(customerId)
+      || (customerPhone !== "" && installationCustomerPhones.has(customerPhone));
+    const hasReminder = reminderCustomerIds.has(customerId)
+      || (customerPhone !== "" && reminderCustomerPhones.has(customerPhone));
+    return count + (!hasInstallation || !hasReminder ? 1 : 0);
+  }, 0);
 
   return {
-    customers: customers.length,
-    products: products.length,
-    technicians: technicians.length,
-    installations: installations.length,
-    quotes: quotes.length,
+    customers: customerCount.total,
+    products: productCount.total,
+    technicians: technicianCount.total,
+    installations: installationCount.total,
+    quotes: quoteCount.total,
     confirmedQuotes: quotes.filter((item) => item.status === "confirmed").length,
     quoteFollowUps: quotes.filter((item) => item.status === "follow_up").length,
     overdue: installations.filter((item) => item.status === "active" && String(item.next_maintenance) < today).length,
@@ -148,11 +188,7 @@ async function stats(uid: string) {
     ).length,
     completed: installations.filter((item) => item.status === "completed").length,
     maxDaily: settings.maxDaily,
-    care: customers.filter((customer) => {
-      const hasInstallation = installations.some((item) => item.customer_id === customer.id || item.customer_phone === customer.phone);
-      const hasReminder = reminders.some((item) => item.customer_id === customer.id || item.customer_phone === customer.phone);
-      return !hasInstallation || !hasReminder;
-    }).length,
+    care,
   };
 }
 
@@ -432,10 +468,32 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.get("/api/customers", asyncRoute(async (req, res) => {
-    const search = String(req.query.search || "").trim();
-    let data = await listOwned("customers", userId(req), "name", 250);
-    if (search) data = data.filter((item) => `${item.name || ""} ${item.phone || ""} ${item.city || ""}`.includes(search));
-    res.json({ data, total: data.length });
+    const uid = userId(req);
+    const query = parseCustomerListQuery(req.query as Record<string, unknown>);
+
+    // Search must run against the complete bounded owner set before slicing;
+    // filtering a single page is what previously hid matches after row 250.
+    if (query.search || query.all) {
+      const customers = await listOwned("customers", uid, "name", MAX_OWNED_SCAN_LIMIT);
+      // A short bounded scan proves the exact owner total without a second
+      // query. Only the ambiguous 10,000-row boundary needs an explicit count.
+      const ownerCount = customers.length < MAX_OWNED_SCAN_LIMIT
+        ? { total: customers.length, capped: false }
+        : await countOwned("customers", uid);
+      const filtered = filterCustomerRecords(customers, query.search);
+      res.json(paginateCustomerRecords(filtered, query, {
+        total: query.search ? filtered.length : ownerCount.total,
+        capped: ownerCount.capped,
+      }));
+      return;
+    }
+
+    res.json(await listOwnedPage("customers", uid, {
+      orderField: "name",
+      page: query.page,
+      pageSize: query.pageSize,
+      maxScan: MAX_OWNED_SCAN_LIMIT,
+    }));
   }));
 
   app.post("/api/customers", validate(customerCreateSchema), asyncRoute(async (req, res) => {

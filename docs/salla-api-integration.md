@@ -26,14 +26,19 @@
 SALLA_AUTH_MODE=easy
 SALLA_CLIENT_ID=
 SALLA_CLIENT_SECRET=
-SALLA_SCOPES=offline_access orders.read
+SALLA_SCOPES=offline_access orders.read products.read customers.read
 SALLA_SYNC_CRON_ENABLED=true
 SALLA_SYNC_CRON_SCHEDULE=*/15 * * * *
 SALLA_SYNC_MAX_PAGES=3
-SALLA_SYNC_PAGE_SIZE=50
+SALLA_SYNC_PAGE_SIZE=30
+SALLA_CUSTOMER_SYNC_MAX_PAGES=200
+SALLA_CUSTOMER_SYNC_PAGE_SIZE=60
+SALLA_CUSTOMER_SYNC_INTERVAL_MINUTES=360
 SALLA_APP_WEBHOOK_SECRET=
 SALLA_APP_OWNER_UID=
 ```
+
+إعدادا `SALLA_SYNC_MAX_PAGES` و`SALLA_SYNC_PAGE_SIZE` خاصان بالطلبات والمنتجات. مزامنة العملاء مستقلة بحجم 60 سجلًا وحتى 200 صفحة، أي سعة 12000 عميل في التشغيل الكامل. الزر اليدوي ينفذ التشغيل الكامل دائمًا، بينما يتجاوز المجدول مزامنة العملاء المكتملة حديثًا حتى تمر مدة `SALLA_CUSTOMER_SYNC_INTERVAL_MINUTES`؛ والمزامنة الناقصة يعاد تشغيلها في دورة المجدول التالية.
 
 يمكن استخدام:
 
@@ -105,6 +110,11 @@ flowchart TD
 - `salla_last_sync_status`
 - `salla_last_sync_count`
 - `salla_last_sync_error`
+- `salla_last_customer_sync_at`
+- `salla_last_customer_sync_status`
+- `salla_last_customer_sync_count`
+- `salla_last_customer_sync_error`
+- `salla_last_customer_sync_complete`
 - `salla_last_remote_update_at`
 
 ## كيف نتحقق من Webhook التطبيق

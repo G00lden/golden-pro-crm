@@ -43,6 +43,23 @@ export type Customer = {
   updatedAt?: string;
 };
 
+export type CustomerListOptions = {
+  page?: number;
+  pageSize?: number;
+  all?: boolean;
+};
+
+export type CustomerListResult = {
+  data: Customer[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  capped?: boolean;
+};
+
 export type Product = {
   id: string;
   name: string;
@@ -371,6 +388,7 @@ export type SallaIntegrationStatus = {
   scopes: string;
   sync_schedule: string;
   sync_enabled: boolean;
+  customer_sync_interval_minutes?: number;
   store_name?: string | null;
   store_url?: string | null;
   merchant_id?: string | number | null;
@@ -386,6 +404,11 @@ export type SallaIntegrationStatus = {
   last_product_sync_at?: string | null;
   last_product_sync_count?: number;
   last_product_sync_error?: string | null;
+  last_customer_sync_at?: string | null;
+  last_customer_sync_status?: "success" | "failed" | "error" | "idle" | null;
+  last_customer_sync_count?: number;
+  last_customer_sync_error?: string | null;
+  last_customer_sync_complete?: boolean;
 };
 
 export type SallaConnectResponse = {
@@ -422,6 +445,19 @@ export type SallaSyncResult = {
     fetched: number;
     last_sync_at: string;
     last_error?: string | null;
+  };
+  customers?: {
+    success: boolean;
+    imported: number;
+    updated: number;
+    failed: number;
+    pages: number;
+    fetched: number;
+    last_sync_at: string;
+    last_error?: string | null;
+    partial?: boolean;
+    cap_reached?: boolean;
+    skipped?: boolean;
   };
 };
 
@@ -1195,35 +1231,125 @@ export const getStats = async (): Promise<DashboardStats> => {
   };
 };
 
-export const getCustomers = async (search = "") => {
+const CUSTOMER_SCAN_LIMIT = 10_000;
+const DEFAULT_CUSTOMER_PAGE_SIZE = 50;
+const MAX_CUSTOMER_PAGE_SIZE = 100;
+
+function boundedCustomerInteger(value: unknown, fallback: number, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+}
+
+function customerListFromRecords(
+  records: Customer[],
+  options: Required<Pick<CustomerListOptions, "page" | "pageSize" | "all">>,
+  total = records.length,
+  capped = false,
+): CustomerListResult {
+  const accessible = records.slice(0, CUSTOMER_SCAN_LIMIT);
+  const isCapped = capped || records.length > CUSTOMER_SCAN_LIMIT;
+  if (options.all) {
+    return {
+      data: accessible,
+      total,
+      page: 1,
+      pageSize: Math.max(1, accessible.length),
+      totalPages: 1,
+      hasNext: false,
+      hasPrevious: false,
+      capped: isCapped,
+    };
+  }
+
+  const totalPages = Math.max(1, Math.ceil(accessible.length / options.pageSize));
+  const page = Math.min(options.page, totalPages);
+  const start = (page - 1) * options.pageSize;
+  return {
+    data: accessible.slice(start, start + options.pageSize),
+    total,
+    page,
+    pageSize: options.pageSize,
+    totalPages,
+    hasNext: page < totalPages,
+    hasPrevious: page > 1,
+    capped: isCapped,
+  };
+}
+
+export const getCustomers = async (
+  search = "",
+  requested: CustomerListOptions = {},
+): Promise<CustomerListResult> => {
   const user = getCurrentAppUser();
-  if (!user) return { data: [] as Customer[], total: 0 };
+  const all = requested.all ?? (requested.page === undefined && requested.pageSize === undefined);
+  const options = {
+    all,
+    page: boundedCustomerInteger(requested.page, 1, 1, CUSTOMER_SCAN_LIMIT),
+    pageSize: boundedCustomerInteger(
+      requested.pageSize,
+      DEFAULT_CUSTOMER_PAGE_SIZE,
+      1,
+      MAX_CUSTOMER_PAGE_SIZE,
+    ),
+  };
+  if (!user) return customerListFromRecords([], options, 0);
   const uid = user.uid;
   if (user.local) {
     const cleanSearch = search.trim();
-    let data = loadLocalDb(uid).customers.sort((a, b) => a.name.localeCompare(b.name));
+    let data = [...loadLocalDb(uid).customers].sort((a, b) => a.name.localeCompare(b.name));
     if (cleanSearch) data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
-    return { data, total: data.length };
+    return customerListFromRecords(data, options);
   }
   if (serverDataEnabled()) {
     const params = new URLSearchParams();
     if (search.trim()) params.set("search", search.trim());
-    return apiFetch<{ data: Customer[]; total: number }>(`/api/customers${params.toString() ? `?${params}` : ""}`);
+    if (options.all) {
+      params.set("all", "true");
+    } else {
+      params.set("page", String(options.page));
+      params.set("page_size", String(options.pageSize));
+    }
+    return apiFetch<CustomerListResult>(`/api/customers${params.toString() ? `?${params}` : ""}`);
   }
   const baseQ = query(collection(db, "customers"), where("createdBy", "==", uid));
-  const [snap, countSnap] = await Promise.all([
-    getDocs(query(baseQ, orderBy("name"), limit(100))),
-    getCountFromServer(baseQ),
-  ]);
-
-  let data = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+  const countSnap = await getCountFromServer(baseQ);
+  const ownerTotal = countSnap.data().count;
   const cleanSearch = search.trim();
-  if (cleanSearch) {
-    data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
+  if (cleanSearch || options.all) {
+    const snap = await getDocs(query(baseQ, orderBy("name"), limit(CUSTOMER_SCAN_LIMIT)));
+    let data = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+    if (cleanSearch) {
+      data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
+    }
+    return customerListFromRecords(
+      data,
+      options,
+      cleanSearch ? data.length : ownerTotal,
+      ownerTotal > CUSTOMER_SCAN_LIMIT,
+    );
   }
 
-  return { data, total: countSnap.data().count };
+  const accessibleTotal = Math.min(ownerTotal, CUSTOMER_SCAN_LIMIT);
+  const totalPages = Math.max(1, Math.ceil(accessibleTotal / options.pageSize));
+  const page = Math.min(options.page, totalPages);
+  const end = Math.min(page * options.pageSize, CUSTOMER_SCAN_LIMIT);
+  const snap = await getDocs(query(baseQ, orderBy("name"), limit(end)));
+  const leading = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+  const start = (page - 1) * options.pageSize;
+  return {
+    data: leading.slice(start, start + options.pageSize),
+    total: ownerTotal,
+    page,
+    pageSize: options.pageSize,
+    totalPages,
+    hasNext: page < totalPages,
+    hasPrevious: page > 1,
+    capped: ownerTotal > CUSTOMER_SCAN_LIMIT,
+  };
 };
+
+export const getAllCustomers = (search = "") => getCustomers(search, { all: true });
 
 export const createCustomer = (data: Omit<Customer, "id">) => {
   const user = getUserOrThrow();
@@ -2598,7 +2724,7 @@ export const getCustomerCareQueue = async () => {
   }
   if (serverDataEnabled()) {
     const [customers, installations, reminders, bookings] = await Promise.all([
-      getCustomers(""),
+      getAllCustomers(),
       getInstallations(),
       getReminders(),
       getBookings(),

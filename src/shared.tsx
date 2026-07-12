@@ -12,6 +12,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type FormEvent,
   type InputHTMLAttributes,
@@ -136,22 +137,30 @@ export function useData<T>(fetcher: () => Promise<T>, deps: unknown[] = [], enab
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState("");
+  const requestGeneration = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!enabled) return;
+    const generation = ++requestGeneration.current;
     setLoading(true);
     setError("");
     try {
-      setData(await fetcher());
+      const next = await fetcher();
+      if (generation === requestGeneration.current) setData(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (generation === requestGeneration.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
   }, [enabled, ...deps]);
 
   useEffect(() => {
     refresh();
+    return () => {
+      requestGeneration.current += 1;
+    };
   }, [refresh]);
 
   return { data, loading, error, refresh, setData };

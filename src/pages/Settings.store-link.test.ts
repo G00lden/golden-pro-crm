@@ -36,3 +36,11 @@ test("Salla store URL normalization only permits credential-free HTTPS links", (
   assert.equal(normalizeSallaStoreUrl("https://user:pass@store.example.com"), null);
   assert.equal(normalizeSallaStoreUrl(""), null);
 });
+
+test("Salla settings expose customer sync progress and include customers in the manual action", () => {
+  assert.match(settingsSource, /مزامنة العملاء/);
+  assert.match(settingsSource, /last_customer_sync_count/);
+  assert.match(settingsSource, /last_customer_sync_complete/);
+  assert.match(settingsSource, /last_customer_sync_error/);
+  assert.match(settingsSource, /مزامنة العملاء والمنتجات والطلبات/);
+});

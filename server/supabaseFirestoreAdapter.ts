@@ -11,6 +11,8 @@ type Sort = {
   direction?: "asc" | "desc";
 };
 
+const POSTGREST_PAGE_SIZE = 1_000;
+
 const collectionPrefixes: Record<string, string> = {
   customers: "cust",
   products: "prod",
@@ -267,20 +269,51 @@ class SupabaseCollectionRef {
   }
 
   async get() {
-    const params = new URLSearchParams({ select: "*" });
+    const baseParams = new URLSearchParams({ select: "*" });
     for (const filter of this.filters) {
-      params.append(columnName(filter.field), formatFilterValue(filter.op, filter.value));
+      baseParams.append(columnName(filter.field), formatFilterValue(filter.op, filter.value));
     }
     if (this.sorts.length) {
-      params.set(
+      baseParams.set(
         "order",
         this.sorts.map((sort) => `${columnName(sort.field)}.${sort.direction || "asc"}`).join(","),
       );
     }
-    if (this.maxRows) params.set("limit", String(this.maxRows));
 
-    const rows = await request<Record<string, unknown>[]>(this.table, params);
     const primaryKey = primaryKeyByTable[this.table] || "id";
+    const requestedRows = Number.isFinite(this.maxRows)
+      ? Math.max(0, Math.trunc(this.maxRows || 0))
+      : undefined;
+    let rows: Record<string, unknown>[];
+
+    if (requestedRows && requestedRows > POSTGREST_PAGE_SIZE) {
+      rows = [];
+      // PostgREST commonly caps one response at 1,000 rows even if a larger
+      // limit is requested. Fetch bounded sequential pages so repository scans
+      // and fallback counts can safely reach their explicit 10,000-row guard.
+      // A primary-key order makes offsets deterministic when no caller order
+      // was supplied.
+      const order = baseParams.get("order");
+      if (!order) {
+        baseParams.set("order", `${primaryKey}.asc`);
+      } else if (!order.split(",").some((entry) => entry.startsWith(`${primaryKey}.`))) {
+        baseParams.set("order", `${order},${primaryKey}.asc`);
+      }
+      while (rows.length < requestedRows) {
+        const batchSize = Math.min(POSTGREST_PAGE_SIZE, requestedRows - rows.length);
+        const params = new URLSearchParams(baseParams);
+        params.set("limit", String(batchSize));
+        params.set("offset", String(rows.length));
+        const batch = await request<Record<string, unknown>[]>(this.table, params);
+        rows.push(...batch);
+        if (batch.length < batchSize) break;
+      }
+    } else {
+      const params = new URLSearchParams(baseParams);
+      if (requestedRows) params.set("limit", String(requestedRows));
+      rows = await request<Record<string, unknown>[]>(this.table, params);
+    }
+
     return new SupabaseQuerySnapshot(
       rows.map((row) => new SupabaseDocSnapshot(this.table, String(row[primaryKey]), row)),
     );

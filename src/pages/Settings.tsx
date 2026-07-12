@@ -78,9 +78,17 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
     setSyncingSalla(true);
     try {
       const result = await api.syncSallaOrders();
+      const orders = result.orders || result;
       const products = result.products;
+      const customers = result.customers;
       const productSummary = products ? `، المنتجات: ${products.imported} جديد و${products.updated} محدث` : "";
-      notify(`مزامنة سلة انتهت: الطلبات ${result.imported} جديد، ${result.updated} محدث، ${result.failed} فشل${productSummary}`, result.failed === 0 && (!products || products.failed === 0));
+      const customerSummary = customers
+        ? `، العملاء: ${customers.imported} جديد و${customers.updated} محدث من ${customers.fetched}`
+        : "";
+      notify(
+        `مزامنة سلة انتهت: الطلبات ${orders.imported} جديد، ${orders.updated} محدث، ${orders.failed} فشل${productSummary}${customerSummary}`,
+        result.success,
+      );
       await Promise.all([salla.refresh(), webhook.refresh()]);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذرت مزامنة سلة", false);
@@ -289,9 +297,18 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
                 <p>{salla.data?.last_sync_status === "error" ? salla.data?.last_sync_error || "فشل غير محدد" : `الطلبات: ${salla.data?.last_sync_count || 0} · المنتجات: ${salla.data?.last_product_sync_count || 0}`}</p>
               </article>
               <article className="mini-card">
+                <strong>مزامنة العملاء</strong>
+                <span>{salla.data?.last_customer_sync_at ? fmtDate(salla.data.last_customer_sync_at) : "لم تبدأ"}</span>
+                <p>
+                  {salla.data?.last_customer_sync_status === "failed" || salla.data?.last_customer_sync_status === "error"
+                    ? salla.data?.last_customer_sync_error || "لم تكتمل مزامنة العملاء"
+                    : `${salla.data?.last_customer_sync_count || 0} عميل · ${salla.data?.last_customer_sync_complete ? "مكتملة" : "بانتظار المزامنة الكاملة"}`}
+                </p>
+              </article>
+              <article className="mini-card">
                 <strong>الجدولة</strong>
                 <span>{salla.data?.sync_enabled ? "مفعلة" : "غير مفعلة"}</span>
-                <p>{salla.data?.sync_schedule || "-"}</p>
+                <p>{salla.data?.sync_schedule || "-"} · العملاء كل {salla.data?.customer_sync_interval_minutes || 360} دقيقة</p>
               </article>
             </div>
             {salla.data?.auth_mode !== "custom" && (
@@ -309,7 +326,7 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
                 <article className="mini-card">
                   <strong>بعد الربط</strong>
                   <span>مزامنة الآن</span>
-                  <p>بعد وصول حدث app.store.authorize اضغط مزامنة الآن لسحب المنتجات والطلبات من Salla API إلى النظام.</p>
+                  <p>بعد وصول حدث app.store.authorize اضغط مزامنة الآن لسحب العملاء والمنتجات والطلبات من Salla API إلى النظام.</p>
                 </article>
               </div>
             )}
@@ -319,11 +336,12 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
               ) : (
                 <Button tone="muted" disabled><Smartphone size={16} /> الربط يتم من Webhook التطبيق</Button>
               )}
-              <Button tone="muted" loading={syncingSalla} disabled={!salla.data?.linked} onClick={runSallaSync}><RefreshCcw size={16} /> مزامنة المنتجات والطلبات</Button>
+              <Button tone="muted" loading={syncingSalla} disabled={!salla.data?.linked} onClick={runSallaSync}><RefreshCcw size={16} /> مزامنة العملاء والمنتجات والطلبات</Button>
               <Button tone="muted" onClick={salla.refresh}><RefreshCcw size={16} /> تحديث الحالة</Button>
             </div>
             {salla.data?.last_sync_error && <p className="note danger">{salla.data.last_sync_error}</p>}
             {salla.data?.last_product_sync_error && <p className="note danger">{salla.data.last_product_sync_error}</p>}
+            {salla.data?.last_customer_sync_error && <p className="note danger">{salla.data.last_customer_sync_error}</p>}
           </div>
         )}
       </section>

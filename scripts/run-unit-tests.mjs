@@ -23,6 +23,8 @@ const files = [
   "server/telephony/unifonicAdapter.test.ts",
   "server/userValidation.test.ts",
   "server/repositories/ownedRepository.test.ts",
+  "server/crmApi.customerPagination.test.ts",
+  "server/supabaseFirestoreAdapter.test.ts",
   "src/dataProvider.test.ts",
   "src/pages/Settings.store-link.test.ts",
 ];

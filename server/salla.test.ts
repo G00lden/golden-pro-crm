@@ -19,8 +19,22 @@ process.env.SALLA_FETCH_RETRY_BASE_DELAY_MS = "0";
 process.env.SALLA_FETCH_RETRY_MAX_DELAY_MS = "0";
 
 const sallaModule = await import("./salla");
-const { __sallaTestables: salla, handleSallaAppWebhook } = sallaModule;
+const {
+  __sallaTestables: salla,
+  getSallaStatus,
+  handleSallaAppWebhook,
+  syncSallaCustomersForUser,
+} = sallaModule;
+const { adminDb } = await import("./firebaseAdmin");
 const originalFetch = globalThis.fetch;
+const baselineSallaEnv = Object.fromEntries([
+  "SALLA_SCOPES",
+  "SALLA_SYNC_MAX_PAGES",
+  "SALLA_SYNC_PAGE_SIZE",
+  "SALLA_CUSTOMER_SYNC_MAX_PAGES",
+  "SALLA_CUSTOMER_SYNC_PAGE_SIZE",
+  "SALLA_CUSTOMER_SYNC_INTERVAL_MINUTES",
+].map((key) => [key, process.env[key]]));
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
@@ -42,10 +56,33 @@ async function captureRejection(task: () => Promise<unknown>) {
 
 beforeEach(async () => {
   process.env.NODE_ENV = "test";
+  for (const [key, value] of Object.entries(baselineSallaEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   globalThis.fetch = originalFetch;
   salla.resetLocks();
   await rm(storePath, { force: true });
 });
+
+async function linkSallaOwner(uid: string) {
+  await salla.writeIntegration(uid, {
+    status: "connected",
+    access_token: `access-${uid}`,
+    refresh_token: `refresh-${uid}`,
+    expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    scope: "offline_access orders.read products.read customers.read",
+  });
+}
+
+async function customersForOwner(uid: string) {
+  const snapshot = await adminDb
+    .collection("customers")
+    .where("createdBy", "==", uid)
+    .limit(10_000)
+    .get();
+  return snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) })) as Array<Record<string, any>>;
+}
 
 after(async () => {
   globalThis.fetch = originalFetch;
@@ -109,6 +146,308 @@ test("caps Salla pagination at 30 even when configuration requests 50", () => {
     if (previous === undefined) delete process.env.SALLA_SYNC_PAGE_SIZE;
     else process.env.SALLA_SYNC_PAGE_SIZE = previous;
   }
+});
+
+test("uses independent customer pagination and always requests customers.read", () => {
+  process.env.SALLA_SYNC_PAGE_SIZE = "10";
+  process.env.SALLA_SYNC_MAX_PAGES = "3";
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = "99";
+  process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES = "999";
+  process.env.SALLA_SCOPES = "offline_access orders.read products.read";
+
+  assert.equal(salla.pageSize(), 10);
+  assert.equal(salla.customerPageSize(), 60);
+  assert.equal(salla.customerMaxSyncPages(), 200);
+  assert.equal(salla.defaultScopes(), "offline_access orders.read products.read customers.read");
+});
+
+test("syncs 4,610 customers across all 77 advertised pages", async () => {
+  const uid = "owner-customer-4610";
+  const total = 4_610;
+  const perPage = 60;
+  const totalPages = Math.ceil(total / perPage);
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = String(perPage);
+  process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES = "200";
+  await linkSallaOwner(uid);
+
+  const requestedPages: number[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.pathname, "/admin/v2/customers");
+    assert.equal(url.searchParams.get("per_page"), "60");
+    const page = Number(url.searchParams.get("page"));
+    requestedPages.push(page);
+    const start = (page - 1) * perPage;
+    const count = Math.max(0, Math.min(perPage, total - start));
+    const data = Array.from({ length: count }, (_, offset) => {
+      const index = start + offset;
+      return {
+        id: `remote-${index}`,
+        name: `Customer ${index}`,
+        mobile: `05${String(index).padStart(8, "0")}`,
+        city: "Riyadh",
+      };
+    });
+    return jsonResponse({
+      data,
+      pagination: { currentPage: page, totalPages, perPage, total },
+    });
+  }) as typeof fetch;
+
+  const result = await syncSallaCustomersForUser(uid);
+  assert.equal(result.success, true);
+  assert.equal(result.partial, false);
+  assert.equal(result.imported, total);
+  assert.equal(result.updated, 0);
+  assert.equal(result.failed, 0);
+  assert.equal(result.fetched, total);
+  assert.equal(result.pages, totalPages);
+  assert.deepEqual(requestedPages, Array.from({ length: totalPages }, (_, index) => index + 1));
+  assert.equal((await customersForOwner(uid)).length, total);
+
+  const stored = (await salla.readLocalIntegrationStore())[uid];
+  assert.equal(stored.last_customer_sync_status, "success");
+  assert.equal(stored.last_customer_sync_complete, true);
+  assert.equal(stored.last_customer_sync_count, total);
+  assert.equal(stored.last_customer_sync_error, null);
+});
+
+test("keeps duplicate phones separate, follows a remote id through phone changes, and accepts no phone", async () => {
+  const uid = "owner-customer-identity";
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = "60";
+  await linkSallaOwner(uid);
+
+  let remoteCustomers = [
+    { id: "remote-a", name: "A", mobile: "0500000001", city: "Riyadh" },
+    { id: "remote-b", name: "B", mobile: "0500000001", city: "Jeddah" },
+    { id: "remote-no-phone", name: "No phone", city: "Dammam" },
+  ];
+  globalThis.fetch = (async () => jsonResponse({
+    data: remoteCustomers,
+    pagination: { currentPage: 1, totalPages: 1, perPage: 60, total: remoteCustomers.length },
+  })) as typeof fetch;
+
+  const first = await syncSallaCustomersForUser(uid);
+  assert.deepEqual(
+    { success: first.success, imported: first.imported, updated: first.updated, failed: first.failed },
+    { success: true, imported: 3, updated: 0, failed: 0 },
+  );
+  const initialRows = await customersForOwner(uid);
+  const initialA = initialRows.find((row) => row.store_customer_id === "remote-a");
+  const initialB = initialRows.find((row) => row.store_customer_id === "remote-b");
+  const initialNoPhone = initialRows.find((row) => row.store_customer_id === "remote-no-phone");
+  assert.ok(initialA && initialB && initialNoPhone);
+  assert.notEqual(initialA.id, initialB.id);
+  assert.equal(initialA.phone, initialB.phone);
+  assert.equal(initialNoPhone.phone, "");
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  remoteCustomers = [
+    { id: "remote-a", name: "A changed", mobile: "0500000099", city: "Riyadh" },
+    { id: "remote-b", name: "B", mobile: "0500000001", city: "Jeddah" },
+    { id: "remote-no-phone", name: "No phone", city: "Dammam" },
+  ];
+  const second = await syncSallaCustomersForUser(uid);
+  assert.deepEqual(
+    { success: second.success, imported: second.imported, updated: second.updated, failed: second.failed },
+    { success: true, imported: 0, updated: 3, failed: 0 },
+  );
+  const updatedRows = await customersForOwner(uid);
+  const updatedA = updatedRows.find((row) => row.store_customer_id === "remote-a");
+  assert.equal(updatedRows.length, 3);
+  assert.equal(updatedA?.id, initialA.id);
+  assert.notEqual(updatedA?.phone, initialA.phone);
+  assert.equal(updatedA?.createdAt, initialA.createdAt);
+  assert.notEqual(updatedA?.updatedAt, initialA.updatedAt);
+
+  const fallbackOne = salla.mapSallaCustomer(uid, { name: "Fallback", email: "USER@example.com" });
+  const fallbackTwo = salla.mapSallaCustomer(uid, { email: "user@example.com", name: "Fallback" });
+  assert.equal(fallbackOne.documentId, fallbackTwo.documentId);
+});
+
+test("reuses an unbound legacy Salla customer without colliding with another provider", async () => {
+  const uid = "owner-customer-legacy";
+  await linkSallaOwner(uid);
+  const collection = adminDb.collection("customers");
+  await collection.doc("other-provider-row").set({
+    createdBy: uid,
+    name: "Other provider",
+    phone: "966500000010",
+    source: "odoo",
+    store_provider: "odoo",
+    store_customer_id: "remote-cross-provider",
+    createdAt: "2020-01-01T00:00:00.000Z",
+    updatedAt: "2020-01-01T00:00:00.000Z",
+  });
+  await collection.doc("legacy-salla-row").set({
+    createdBy: uid,
+    name: "Legacy Salla",
+    phone: "0500000020",
+    source: "salla",
+    store_provider: "salla",
+    store_customer_id: null,
+    createdAt: "2021-01-01T00:00:00.000Z",
+    updatedAt: "2021-01-01T00:00:00.000Z",
+  });
+
+  globalThis.fetch = (async () => jsonResponse({
+    data: [
+      { id: "remote-cross-provider", name: "Salla cross", mobile: "0500000010" },
+      { id: "remote-legacy", name: "Bound legacy", mobile: "0500000020" },
+    ],
+    pagination: { currentPage: 1, totalPages: 1, perPage: 60, total: 2 },
+  })) as typeof fetch;
+
+  const result = await syncSallaCustomersForUser(uid);
+  assert.deepEqual(
+    { success: result.success, imported: result.imported, updated: result.updated },
+    { success: true, imported: 1, updated: 1 },
+  );
+  const rows = await customersForOwner(uid);
+  const otherProvider = rows.find((row) => row.id === "other-provider-row");
+  const crossProviderSalla = rows.find((row) => row.store_provider === "salla" && row.store_customer_id === "remote-cross-provider");
+  const boundLegacy = rows.find((row) => row.store_customer_id === "remote-legacy");
+  assert.equal(rows.length, 3);
+  assert.equal(otherProvider?.name, "Other provider");
+  assert.ok(crossProviderSalla);
+  assert.notEqual(crossProviderSalla?.id, otherProvider?.id);
+  assert.equal(boundLegacy?.id, "legacy-salla-row");
+  assert.equal(boundLegacy?.createdAt, "2021-01-01T00:00:00.000Z");
+});
+
+test("returns a clear partial failure when the customer page cap is below totalPages", async () => {
+  const uid = "owner-customer-cap";
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = "2";
+  process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES = "2";
+  await linkSallaOwner(uid);
+  const requestedPages: number[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    const page = Number(url.searchParams.get("page"));
+    requestedPages.push(page);
+    return jsonResponse({
+      data: [0, 1].map((offset) => ({
+        id: `cap-${page}-${offset}`,
+        name: `Cap ${page}-${offset}`,
+        mobile: `05010${page}${offset}000`,
+      })),
+      pagination: { currentPage: page, totalPages: 3, perPage: 2, total: 6 },
+    });
+  }) as typeof fetch;
+
+  const result = await syncSallaCustomersForUser(uid);
+  assert.equal(result.success, false);
+  assert.equal(result.partial, true);
+  assert.equal(result.cap_reached, true);
+  assert.equal(result.failed, 0);
+  assert.equal(result.imported, 4);
+  assert.equal(result.pages, 2);
+  assert.deepEqual(requestedPages, [1, 2]);
+  assert.match(result.last_error || "", /page limit \(2 of 3 pages\)/i);
+
+  const status = await getSallaStatus(uid, {
+    protocol: "https",
+    get: () => "crm.example.test",
+  } as never);
+  assert.equal(status.last_customer_sync_status, "failed");
+  assert.equal(status.last_customer_sync_count, 4);
+  assert.equal(status.last_customer_sync_complete, false);
+  assert.match(status.last_customer_sync_error || "", /page limit/i);
+});
+
+test("treats an empty page before advertised totals as an incomplete sync", async () => {
+  const uid = "owner-customer-empty-page";
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = "2";
+  process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES = "10";
+  await linkSallaOwner(uid);
+  const requestedPages: number[] = [];
+  globalThis.fetch = (async (input) => {
+    const page = Number(new URL(String(input)).searchParams.get("page"));
+    requestedPages.push(page);
+    return jsonResponse({
+      data: page === 1
+        ? [
+            { id: "empty-a", name: "A", mobile: "0501111111" },
+            { id: "empty-b", name: "B", mobile: "0502222222" },
+          ]
+        : [],
+      pagination: { currentPage: page, totalPages: 3, perPage: 2, total: 6 },
+    });
+  }) as typeof fetch;
+
+  const result = await syncSallaCustomersForUser(uid);
+  assert.equal(result.success, false);
+  assert.equal(result.partial, true);
+  assert.equal(result.cap_reached, false);
+  assert.equal(result.fetched, 2);
+  assert.deepEqual(requestedPages, [1, 2]);
+  assert.match(result.last_error || "", /empty customer page at page 2/i);
+  assert.equal((await salla.readLocalIntegrationStore())[uid].last_customer_sync_complete, false);
+});
+
+test("only delays complete scheduled customer syncs for the configured interval", () => {
+  const now = Date.now();
+  process.env.SALLA_CUSTOMER_SYNC_INTERVAL_MINUTES = "360";
+  const recentComplete = {
+    last_customer_sync_status: "success",
+    last_customer_sync_complete: true,
+    last_customer_sync_at: new Date(now - 30 * 60_000).toISOString(),
+  };
+  assert.equal(salla.customerSyncIntervalMinutes(), 360);
+  assert.equal(salla.customerSyncIsDue(recentComplete as never, now), false);
+  assert.equal(salla.customerSyncIsDue({ ...recentComplete, last_customer_sync_complete: undefined } as never, now), true);
+  assert.equal(salla.customerSyncIsDue({ ...recentComplete, last_customer_sync_complete: false } as never, now), true);
+  assert.equal(salla.customerSyncIsDue({ ...recentComplete, last_customer_sync_at: new Date(now - 361 * 60_000).toISOString() } as never, now), true);
+});
+
+test("coalesces overlapping customer syncs for one owner", async () => {
+  const uid = "owner-customer-lock";
+  await linkSallaOwner(uid);
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    return jsonResponse({
+      data: [{ id: "locked-customer", name: "Locked", mobile: "0503333333" }],
+      pagination: { currentPage: 1, totalPages: 1, perPage: 60, total: 1 },
+    });
+  }) as typeof fetch;
+
+  const results = await Promise.all([
+    syncSallaCustomersForUser(uid),
+    syncSallaCustomersForUser(uid),
+    syncSallaCustomersForUser(uid),
+  ]);
+
+  assert.equal(calls, 1);
+  assert.deepEqual(results.map((result) => result.imported), [1, 1, 1]);
+  assert.equal((await customersForOwner(uid)).length, 1);
+});
+
+test("preserves partial counters when a sync error is converted to a result", () => {
+  const error = new Error("page 40 timed out") as Error & { detail?: Record<string, unknown> };
+  error.detail = {
+    imported: 2_340,
+    updated: 120,
+    failed: 0,
+    fetched: 2_460,
+    pages: 39,
+    last_sync_at: "2026-07-12T20:00:00.000Z",
+    last_error: "Salla customer page 40 timed out.",
+  };
+
+  assert.deepEqual(salla.syncFailureResult(error), {
+    success: false,
+    imported: 2_340,
+    updated: 120,
+    failed: 1,
+    pages: 39,
+    fetched: 2_460,
+    last_sync_at: "2026-07-12T20:00:00.000Z",
+    last_error: "Salla customer page 40 timed out.",
+    partial: true,
+    cap_reached: false,
+  });
 });
 
 test("never retries a token POST after an explicit transient HTTP response", async () => {
