@@ -11,8 +11,8 @@ fi
 
 export BUILD_COMMIT="${BUILD_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
-docker compose -f deploy/docker-compose.yml up -d --build
-docker compose -f deploy/docker-compose.yml ps
+docker compose --env-file .env.production -f deploy/docker-compose.yml up -d --build
+docker compose --env-file .env.production -f deploy/docker-compose.yml ps
 
 echo "Golden Pro CRM containers are running."
 echo "Health check: curl -fsS http://127.0.0.1/api/health"

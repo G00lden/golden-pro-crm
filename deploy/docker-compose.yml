@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
       args:
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        VITE_DATA_PROVIDER: ${VITE_DATA_PROVIDER:-sqlite}
+        VITE_DB_PROVIDER: ${VITE_DB_PROVIDER:-sqlite}
+        VITE_LOCAL_AUTH: ${VITE_LOCAL_AUTH:-false}
     restart: unless-stopped
     env_file:
       - ../.env.production
