@@ -24,7 +24,7 @@
 2. نسخة على الخادم:
    - `/opt/golden-pro-crm/backups/pre-deploy-20260712T170452Z`
    - صلاحية المجلد `700` وملفا القاعدة والبيئة `600`.
-3. نسخة محلية مشفرة بصلاحيات مستخدم Windows فقط:
+3. نسخة محلية محمية بقائمة صلاحيات تتيح الوصول لمستخدم Windows الحالي فقط:
    - `C:\Users\owner\Documents\Codex\backups\golden-pro-crm\pre-deploy-20260712T170452Z`
 
 بصمات النسخ:
