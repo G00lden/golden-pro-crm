@@ -3,8 +3,6 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { randomUUID } from "crypto";
 import cron from "node-cron";
 import path from "path";
-import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
 import { registerLocalDevAuthRoute, requireFirebaseUser } from "./server/auth";
 import { registerCrmApiRoutes } from "./server/crmApi";
 import { registerUserAdminRoutes } from "./server/userManagement";
@@ -44,8 +42,7 @@ import { getLocalAuthPolicy } from "./server/localAuthPolicy";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const projectRoot = process.cwd();
 const timeZone = process.env.APP_TIMEZONE || "Asia/Riyadh";
 
 function httpError(status: number, message: string) {
@@ -259,7 +256,7 @@ async function startServer() {
 
   // ── Legal pages (served before API routes) ──
   // These static HTML pages are required by Meta / TikTok / Google ad policies.
-  const legalDir = path.join(__dirname, "public", "legal");
+  const legalDir = path.join(projectRoot, "public", "legal");
   app.get("/legal/terms", (_req, res) => res.sendFile(path.join(legalDir, "terms.html")));
   app.get("/legal/privacy", (_req, res) => res.sendFile(path.join(legalDir, "privacy.html")));
   app.get("/legal/refund", (_req, res) => res.sendFile(path.join(legalDir, "refund.html")));
@@ -521,13 +518,14 @@ async function startServer() {
   }
 
   if (developmentServer) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true, allowedHosts: ["localhost", "127.0.0.1"] },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, "dist");
+    const distPath = path.join(projectRoot, "dist");
     app.use((req, res, next) => {
       const blockedSourcePath =
         req.path === "/package.json" ||

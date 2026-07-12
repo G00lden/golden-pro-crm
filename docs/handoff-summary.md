@@ -75,6 +75,16 @@
 - الأثر الجانبي: البيئة الجديدة تحتاج ضبط `ADMIN_UIDS`/`BOOTSTRAP_ADMIN_EMAILS` قبل أول دخول؛ مستخدم غير مصرح لن يملك لوحة الإدارة تلقائيًا.
 - التحقق: identity 1/1، user validation 3/3، schema 3/3، Golden Path 10/10 متضمنًا هويتين محليتين منفصلتين، وlint ناجح.
 
+## تحديث 2026-07-12 — الإصدار 1.0.8 «بوابة الجودة» [Codex]
+
+- توسع CI من lint/build فقط إلى 36 اختبار وحدة ومخطط، lint، build، smoke 15/15، Golden Path 10/10، source security، وruntime dependency audit.
+- أصبح deploy workflow يبدأ بعد نجاح CI على main بدل سباق النشر مع الاختبارات؛ التشغيل اليدوي ما زال متاحًا.
+- بُني الخادم إلى `dist-server/server.mjs`، وأصبحت صورة Docker multi-stage لا تحتوي tsx أو TypeScript أو أدوات build.
+- رُقي `firebase-admin` إلى 14.1.0 و`tsx`/`esbuild` إلى نسخ مصححة، وأضيف Firestore كاعتماد مباشر؛ runtime يحذف optional Storage غير المستخدم.
+- `npm run security:source` يفحص الأسرار وإعداد Docker وVite ومنع سر local auth في bundle، و`security:dependencies` يطابق سطح runtime ويبلغ صفر ثغرات.
+- الأثر الجانبي: CI أطول ويفشل الدمج عند أي regression؛ Node 22 أصبح الحد الأدنى لـFirebase Admin 14.
+- التحقق: unit 36/36، integration smoke 15/15 + golden 10/10، source audit بلا تحذيرات، runtime audit صفر، bundle production يعمل. Docker daemon المحلي غير متاح، لذلك build الحاوية الفعلية ما زال gate قبل النشر.
+
 
 ## سياق المحادثة
 

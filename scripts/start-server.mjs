@@ -10,13 +10,17 @@ const mode = resolveServerMode(process.argv.slice(2));
 if (mode === "production") {
   try {
     accessSync(path.join(root, "dist", "index.html"), constants.R_OK);
+    accessSync(path.join(root, "dist-server", "server.mjs"), constants.R_OK);
   } catch {
     console.error("Production build is missing. Run `npm run build` before `npm start`.");
     process.exit(1);
   }
 }
 
-const child = spawn(process.execPath, ["--import", "tsx", "server.ts"], {
+const serverArgs = mode === "development"
+  ? ["--import", "tsx", "server.ts"]
+  : [path.join("dist-server", "server.mjs")];
+const child = spawn(process.execPath, serverArgs, {
   cwd: root,
   env: serverEnvironment(mode),
   stdio: "inherit",

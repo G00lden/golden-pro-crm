@@ -8,6 +8,7 @@ import { getLocalTestToken } from "./local-test-auth.mjs";
 const root = new URL("../", import.meta.url);
 const rootPath = fileURLToPath(root);
 const baseUrl = process.env.APP_URL || "http://localhost:3000";
+const smokeUid = process.env.SMOKE_TEST_UID || "smoke-test-owner";
 const results = [];
 let spawnedServer;
 let localAuthHeaders = {};
@@ -60,7 +61,7 @@ async function ensureServer() {
       DB_PROVIDER: process.env.DB_PROVIDER || "sqlite",
       ALLOW_LOCAL_AUTH: "true",
       LOCAL_AUTH_TOKEN: process.env.LOCAL_AUTH_TOKEN || "smoke-test-only-secret-with-at-least-32-characters",
-      LOCAL_AUTH_SHARED_UID: "smoke-test-owner",
+      LOCAL_AUTH_SHARED_UID: smokeUid,
       DISABLE_OUTBOUND: "true",
       DISABLE_HMR: "true",
     },
@@ -95,7 +96,7 @@ function assertIncludes(text, needles, label) {
 try {
   await ensureServer();
   localAuthHeaders = {
-    Authorization: `Bearer ${await getLocalTestToken(baseUrl, "smoke-test-owner")}`,
+    Authorization: `Bearer ${await getLocalTestToken(baseUrl, smokeUid)}`,
   };
 
   await check("package scripts and dependencies", async () => {
