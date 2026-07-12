@@ -6,7 +6,7 @@ process.env.DATA_PROVIDER = "sqlite";
 process.env.DB_PROVIDER = "sqlite";
 process.env.DB_PATH = ":memory:";
 
-const { processSallaOrderInbox, sallaOrderInboxIdentity } = await import("./sallaOrderInbox");
+const { processSallaOrderInbox, sallaOrderInboxIdentity, SALLA_ORDER_EVENTS } = await import("./sallaOrderInbox");
 const { adminDb } = await import("./firebaseAdmin");
 
 function input(raw = '{"event":"order.updated","created_at":"2026-07-13T00:00:00Z"}') {
@@ -29,6 +29,17 @@ test("a changed event payload receives a new inbox identity", () => {
     sallaOrderInboxIdentity(input()).id,
     sallaOrderInboxIdentity(input('{"event":"order.updated","created_at":"2026-07-13T00:01:00Z"}')).id,
   );
+});
+
+test("all order events enabled in Salla Partners are accepted", () => {
+  for (const event of [
+    "order.customer.updated",
+    "order.shipment.return.creating",
+    "order.shipment.return.created",
+    "order.shipment.return.cancelled",
+  ]) {
+    assert.equal(SALLA_ORDER_EVENTS.has(event), true, `${event} must be handled`);
+  }
 });
 
 test("a stale processing event is recovered and failure details stay private", async () => {

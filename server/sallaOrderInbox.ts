@@ -21,6 +21,9 @@ export const SALLA_ORDER_EVENTS = new Set([
   "order.shipment.updated",
   "order.shipment.cancelled",
   "order.shipment.return.created",
+  "order.shipment.return.creating",
+  "order.shipment.return.cancelled",
+  "order.customer.updated",
 ]);
 
 type InboxTask<T> = () => Promise<T>;
