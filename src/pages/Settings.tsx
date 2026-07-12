@@ -32,6 +32,21 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
       ? `${window.location.origin}${webhook.data?.endpoint || "/api/store/webhook"}`
       : webhook.data?.endpoint || "/api/store/webhook";
   const storeUrl = normalizeSallaStoreUrl(salla.data?.store_url);
+  const customerSyncAdvertisedCount =
+    typeof salla.data?.last_customer_sync_advertised_count === "number" &&
+    Number.isFinite(salla.data.last_customer_sync_advertised_count)
+      ? Math.max(0, Math.trunc(salla.data.last_customer_sync_advertised_count))
+      : null;
+  const customerSyncReceivedCount =
+    typeof salla.data?.last_customer_sync_count === "number" && Number.isFinite(salla.data.last_customer_sync_count)
+      ? Math.max(0, Math.trunc(salla.data.last_customer_sync_count))
+      : 0;
+  const customerSyncCountGap = customerSyncAdvertisedCount === null
+    ? null
+    : Math.abs(customerSyncAdvertisedCount - customerSyncReceivedCount);
+  const customerSyncHasWarning = Boolean(
+    salla.data?.last_customer_sync_warning && customerSyncCountGap && customerSyncCountGap > 0,
+  );
 
   useEffect(() => {
     if (settings.data) setValues(settings.data);
@@ -302,7 +317,9 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
                 <p>
                   {salla.data?.last_customer_sync_status === "failed" || salla.data?.last_customer_sync_status === "error"
                     ? salla.data?.last_customer_sync_error || "لم تكتمل مزامنة العملاء"
-                    : `${salla.data?.last_customer_sync_count || 0} عميل · ${salla.data?.last_customer_sync_complete ? "مكتملة" : "بانتظار المزامنة الكاملة"}`}
+                    : customerSyncAdvertisedCount === null
+                      ? `${customerSyncReceivedCount} عميل · ${salla.data?.last_customer_sync_complete ? "مكتملة" : "بانتظار المزامنة الكاملة"}`
+                      : `تم جلب ${customerSyncReceivedCount} من ${customerSyncAdvertisedCount} عميل · ${salla.data?.last_customer_sync_complete ? "مكتملة" : "بانتظار المزامنة الكاملة"}`}
                 </p>
               </article>
               <article className="mini-card">
@@ -342,6 +359,13 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
             {salla.data?.last_sync_error && <p className="note danger">{salla.data.last_sync_error}</p>}
             {salla.data?.last_product_sync_error && <p className="note danger">{salla.data.last_product_sync_error}</p>}
             {salla.data?.last_customer_sync_error && <p className="note danger">{salla.data.last_customer_sync_error}</p>}
+            {customerSyncHasWarning && customerSyncAdvertisedCount !== null && customerSyncCountGap !== null && (
+              <p className="note" role="status">
+                <Badge tone="warn">فرق في عدّ سلة</Badge>{" "}
+                أعلنت سلة عن {customerSyncAdvertisedCount} عميل، وأعادت جميع صفحاتها {customerSyncReceivedCount}
+                {` (فرق ${customerSyncCountGap}). اكتملت المزامنة وسيُعاد التحقق تلقائيًا.`}
+              </p>
+            )}
           </div>
         )}
       </section>

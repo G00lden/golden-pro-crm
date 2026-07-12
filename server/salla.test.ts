@@ -201,6 +201,9 @@ test("syncs 4,610 customers across all 77 advertised pages", async () => {
   assert.equal(result.updated, 0);
   assert.equal(result.failed, 0);
   assert.equal(result.fetched, total);
+  assert.equal(result.unique_fetched, total);
+  assert.equal(result.advertised_count, total);
+  assert.equal(result.warning, null);
   assert.equal(result.pages, totalPages);
   assert.deepEqual(requestedPages, Array.from({ length: totalPages }, (_, index) => index + 1));
   assert.equal((await customersForOwner(uid)).length, total);
@@ -210,6 +213,55 @@ test("syncs 4,610 customers across all 77 advertised pages", async () => {
   assert.equal(stored.last_customer_sync_complete, true);
   assert.equal(stored.last_customer_sync_count, total);
   assert.equal(stored.last_customer_sync_error, null);
+  assert.equal(stored.last_customer_sync_advertised_count, total);
+  assert.equal(stored.last_customer_sync_warning, null);
+});
+
+test("accepts all advertised pages when Salla total exceeds the unique rows returned", async () => {
+  const uid = "owner-customer-advertised-mismatch";
+  const advertisedTotal = 4_610;
+  const returnedTotal = 4_598;
+  const perPage = 60;
+  const totalPages = 77;
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = String(perPage);
+  process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES = "200";
+  await linkSallaOwner(uid);
+
+  const requestedPages: number[] = [];
+  globalThis.fetch = (async (input) => {
+    const page = Number(new URL(String(input)).searchParams.get("page"));
+    requestedPages.push(page);
+    const start = (page - 1) * perPage;
+    const count = Math.max(0, Math.min(perPage, returnedTotal - start));
+    return jsonResponse({
+      data: Array.from({ length: count }, (_, offset) => {
+        const index = start + offset;
+        return { id: `mismatch-${index}`, name: `Mismatch ${index}`, mobile: `05${String(index).padStart(8, "0")}` };
+      }),
+      pagination: { currentPage: page, totalPages, perPage, total: advertisedTotal },
+    });
+  }) as typeof fetch;
+
+  const result = await syncSallaCustomersForUser(uid);
+  assert.equal(result.success, true);
+  assert.equal(result.partial, false);
+  assert.equal(result.cap_reached, false);
+  assert.equal(result.pages, totalPages);
+  assert.equal(result.fetched, returnedTotal);
+  assert.equal(result.unique_fetched, returnedTotal);
+  assert.equal(result.imported, returnedTotal);
+  assert.equal(result.advertised_count, advertisedTotal);
+  assert.match(result.warning || "", /advertised 4610.*returned 4598 unique customers/i);
+  assert.deepEqual(requestedPages, Array.from({ length: totalPages }, (_, index) => index + 1));
+  assert.equal((await customersForOwner(uid)).length, returnedTotal);
+
+  const stored = (await salla.readLocalIntegrationStore())[uid];
+  assert.equal(stored.last_customer_sync_status, "success");
+  assert.equal(stored.last_customer_sync_complete, true);
+  assert.equal(stored.last_customer_sync_count, returnedTotal);
+  assert.equal(stored.last_customer_sync_advertised_count, advertisedTotal);
+  assert.equal(stored.last_customer_sync_error, null);
+  assert.match(stored.last_customer_sync_warning || "", /accepted as complete/i);
 });
 
 test("keeps duplicate phones separate, follows a remote id through phone changes, and accepts no phone", async () => {
@@ -380,9 +432,16 @@ test("treats an empty page before advertised totals as an incomplete sync", asyn
   assert.equal(result.partial, true);
   assert.equal(result.cap_reached, false);
   assert.equal(result.fetched, 2);
+  assert.equal(result.unique_fetched, 2);
+  assert.equal(result.advertised_count, 6);
+  assert.match(result.warning || "", /sync is incomplete/i);
   assert.deepEqual(requestedPages, [1, 2]);
   assert.match(result.last_error || "", /empty customer page at page 2/i);
-  assert.equal((await salla.readLocalIntegrationStore())[uid].last_customer_sync_complete, false);
+  const stored = (await salla.readLocalIntegrationStore())[uid];
+  assert.equal(stored.last_customer_sync_complete, false);
+  assert.equal(stored.last_customer_sync_count, 2);
+  assert.equal(stored.last_customer_sync_advertised_count, 6);
+  assert.match(stored.last_customer_sync_warning || "", /sync is incomplete/i);
 });
 
 test("only delays complete scheduled customer syncs for the configured interval", () => {

@@ -40,6 +40,8 @@ type SallaIntegrationRecord = {
   last_customer_sync_count?: number;
   last_customer_sync_error?: string | null;
   last_customer_sync_complete?: boolean;
+  last_customer_sync_advertised_count?: number | null;
+  last_customer_sync_warning?: string | null;
   last_remote_update_at?: string | null;
   updatedAt?: string;
   createdAt?: string;
@@ -82,6 +84,9 @@ type SyncResult = {
   partial?: boolean;
   cap_reached?: boolean;
   skipped?: boolean;
+  advertised_count?: number | null;
+  unique_fetched?: number;
+  warning?: string | null;
 };
 
 const SALLA_AUTHORIZE_URL = "https://accounts.salla.sa/oauth2/auth";
@@ -225,6 +230,13 @@ function fromSettingsShape(data: Record<string, any> | null | undefined): SallaI
   const status = firstText(data.salla_status);
   const token = firstText(data.salla_access_token);
   const refresh = firstText(data.salla_refresh_token);
+  const advertisedCountValue = data.salla_last_customer_sync_advertised_count;
+  const parsedAdvertisedCount = Number(advertisedCountValue);
+  const advertisedCount = advertisedCountValue === null || advertisedCountValue === undefined || advertisedCountValue === ""
+    ? null
+    : Number.isFinite(parsedAdvertisedCount) && parsedAdvertisedCount >= 0
+      ? Math.trunc(parsedAdvertisedCount)
+      : null;
   if (!status && !token && !refresh) return null;
 
   return {
@@ -255,6 +267,8 @@ function fromSettingsShape(data: Record<string, any> | null | undefined): SallaI
     last_customer_sync_count: Number(data.salla_last_customer_sync_count || 0),
     last_customer_sync_error: firstText(data.salla_last_customer_sync_error) || null,
     last_customer_sync_complete: data.salla_last_customer_sync_complete === true || String(data.salla_last_customer_sync_complete) === "true",
+    last_customer_sync_advertised_count: advertisedCount,
+    last_customer_sync_warning: firstText(data.salla_last_customer_sync_warning) || null,
     last_remote_update_at: firstText(data.salla_last_remote_update_at) || null,
     updatedAt: firstText(data.salla_updatedAt || data.updatedAt) || undefined,
     createdAt: firstText(data.salla_createdAt || data.createdAt) || undefined,
@@ -1200,6 +1214,8 @@ export async function getSallaStatus(currentUid: string, req: Request) {
     last_customer_sync_count: integration?.last_customer_sync_count || 0,
     last_customer_sync_error: integration?.last_customer_sync_error || null,
     last_customer_sync_complete: integration?.last_customer_sync_complete === true,
+    last_customer_sync_advertised_count: integration?.last_customer_sync_advertised_count ?? null,
+    last_customer_sync_warning: integration?.last_customer_sync_warning || null,
   };
 }
 
@@ -1854,6 +1870,26 @@ function updateSallaCustomerIndexes(
   if (target.claimedLegacyPhone) indexes.legacyByPhone.delete(target.claimedLegacyPhone);
 }
 
+function customerCountWarning(
+  advertisedCount: number | null,
+  uniqueFetched: number,
+  advertisedPages: number,
+  incomplete: boolean,
+) {
+  if (advertisedCount === null || advertisedCount === uniqueFetched) return null;
+  const difference = advertisedCount - uniqueFetched;
+  const comparison = difference > 0
+    ? `${difference} fewer`
+    : `${Math.abs(difference)} more`;
+  if (incomplete) {
+    return `Salla advertised ${advertisedCount} customers but ${uniqueFetched} unique customers were fetched (${comparison}). The sync is incomplete and must be retried.`;
+  }
+  const pageSummary = advertisedPages > 0
+    ? `All ${advertisedPages} advertised pages were fetched`
+    : "The paginated result set reached its final page";
+  return `Salla advertised ${advertisedCount} customers but returned ${uniqueFetched} unique customers (${comparison}). ${pageSummary}; the paginated rows were accepted as complete.`;
+}
+
 async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<SyncResult> {
   if (!configured()) throw new Error("Salla integration is not configured on the server.");
 
@@ -1876,6 +1912,7 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
   let expectedTotalPages = 0;
   let expectedTotalCustomers: number | null = null;
   let lastRequestedPage = 0;
+  const uniqueFetchedCustomerIds = new Set<string>();
 
   try {
     const token = await ensureFreshAccessToken(currentUid, integration);
@@ -1901,7 +1938,7 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       }
       const customers = asArray(payload.data || payload.customers || payload.items);
       if (!customers.length) {
-        if (expectedTotalPages > page || (expectedTotalCustomers !== null && fetched < expectedTotalCustomers)) {
+        if (expectedTotalPages > page) {
           partialMessage = `Salla returned an empty customer page at page ${page} before the advertised result set was complete (${fetched} of ${expectedTotalCustomers ?? "unknown"} customers, ${expectedTotalPages || "unknown"} pages).`;
         }
         break;
@@ -1912,6 +1949,8 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       for (const remoteCustomer of customers) {
         try {
           const mapped = mapSallaCustomer(currentUid, remoteCustomer);
+          if (uniqueFetchedCustomerIds.has(mapped.documentId)) continue;
+          uniqueFetchedCustomerIds.add(mapped.documentId);
           const target = resolveSallaCustomerTarget(customerIndexes, mapped);
           const customerData: Record<string, unknown> = {
             createdBy: currentUid,
@@ -1958,15 +1997,19 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
     if (!partialMessage && expectedTotalPages > 0 && lastRequestedPage < expectedTotalPages) {
       partialMessage = `Salla customer sync stopped after page ${lastRequestedPage} before all ${expectedTotalPages} advertised pages were fetched.`;
     }
-    if (!partialMessage && expectedTotalCustomers !== null && fetched < expectedTotalCustomers) {
-      partialMessage = `Salla customer sync fetched ${fetched} of ${expectedTotalCustomers} advertised customers.`;
-    }
 
     const failureMessage = failed
       ? `${failed} customers could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
       : null;
     const errorMessage = [failureMessage, partialMessage].filter(Boolean).join(" ") || null;
     const success = !errorMessage;
+    const uniqueFetched = uniqueFetchedCustomerIds.size;
+    const warningMessage = customerCountWarning(
+      expectedTotalCustomers,
+      uniqueFetched,
+      expectedTotalPages,
+      !success,
+    );
 
     await writeIntegration(currentUid, {
       status: "connected",
@@ -1975,6 +2018,8 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       last_customer_sync_count: imported + updated,
       last_customer_sync_error: errorMessage,
       last_customer_sync_complete: success,
+      last_customer_sync_advertised_count: expectedTotalCustomers,
+      last_customer_sync_warning: warningMessage,
     });
 
     return {
@@ -1988,9 +2033,19 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       last_error: errorMessage,
       partial: Boolean(partialMessage),
       cap_reached: capReached,
+      advertised_count: expectedTotalCustomers,
+      unique_fetched: uniqueFetched,
+      warning: warningMessage,
     };
   } catch (error) {
     const message = syncFailureMessage(error, "Salla customer sync failed.");
+    const uniqueFetched = uniqueFetchedCustomerIds.size;
+    const warningMessage = customerCountWarning(
+      expectedTotalCustomers,
+      uniqueFetched,
+      expectedTotalPages,
+      true,
+    );
     await writeIntegration(currentUid, {
       status: statusAfterSyncFailure(error),
       last_customer_sync_at: syncedAt,
@@ -1998,6 +2053,8 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       last_customer_sync_count: imported + updated,
       last_customer_sync_error: message,
       last_customer_sync_complete: false,
+      last_customer_sync_advertised_count: expectedTotalCustomers,
+      last_customer_sync_warning: warningMessage,
     });
     const syncError = new Error(`Salla customer sync failed: ${message}`);
     (syncError as any).detail = {
@@ -2009,6 +2066,9 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       pages,
       last_sync_at: syncedAt,
       last_error: message,
+      advertised_count: expectedTotalCustomers,
+      unique_fetched: uniqueFetched,
+      warning: warningMessage,
     };
     throw syncError;
   }
@@ -2040,7 +2100,14 @@ function syncFailureResult(error: unknown): SyncResult {
   const imported = count("imported");
   const updated = count("updated");
   const fetched = count("fetched");
-  return {
+  const advertisedValue = detail.advertised_count;
+  const advertisedNumber = Number(advertisedValue);
+  const advertisedCount = advertisedValue === null || advertisedValue === undefined || advertisedValue === ""
+    ? null
+    : Number.isFinite(advertisedNumber) && advertisedNumber >= 0
+      ? Math.trunc(advertisedNumber)
+      : null;
+  const result: SyncResult = {
     success: false,
     imported,
     updated,
@@ -2052,6 +2119,11 @@ function syncFailureResult(error: unknown): SyncResult {
     partial: Boolean(detail.partial) || fetched > 0 || imported + updated > 0,
     cap_reached: Boolean(detail.cap_reached),
   };
+  if (advertisedCount !== null) result.advertised_count = advertisedCount;
+  if (detail.unique_fetched !== undefined) result.unique_fetched = count("unique_fetched");
+  const warning = firstText(detail.warning);
+  if (warning) result.warning = warning;
+  return result;
 }
 
 export async function syncSallaStoreForUser(
@@ -2070,6 +2142,9 @@ export async function syncSallaStoreForUser(
         last_sync_at: integration?.last_customer_sync_at || nowIso(),
         last_error: null,
         skipped: true,
+        advertised_count: integration?.last_customer_sync_advertised_count ?? null,
+        unique_fetched: integration?.last_customer_sync_count || 0,
+        warning: integration?.last_customer_sync_warning || null,
       }
     : await syncSallaCustomersForUser(currentUid).catch(syncFailureResult);
   const products = await syncSallaProductsForUser(currentUid).catch(syncFailureResult);

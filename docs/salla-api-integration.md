@@ -115,6 +115,8 @@ flowchart TD
 - `salla_last_customer_sync_count`
 - `salla_last_customer_sync_error`
 - `salla_last_customer_sync_complete`
+- `salla_last_customer_sync_advertised_count`
+- `salla_last_customer_sync_warning`
 - `salla_last_remote_update_at`
 
 ## كيف نتحقق من Webhook التطبيق

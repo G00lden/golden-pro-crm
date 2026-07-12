@@ -409,6 +409,8 @@ export type SallaIntegrationStatus = {
   last_customer_sync_count?: number;
   last_customer_sync_error?: string | null;
   last_customer_sync_complete?: boolean;
+  last_customer_sync_advertised_count?: number | null;
+  last_customer_sync_warning?: string | null;
 };
 
 export type SallaConnectResponse = {
@@ -458,6 +460,9 @@ export type SallaSyncResult = {
     partial?: boolean;
     cap_reached?: boolean;
     skipped?: boolean;
+    advertised_count?: number | null;
+    unique_fetched?: number;
+    warning?: string | null;
   };
 };
 
