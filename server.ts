@@ -141,6 +141,7 @@ function securityHeaders(_req: Request, res: Response, next: NextFunction) {
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
 
   if (process.env.NODE_ENV === "production") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     res.setHeader(
       "Content-Security-Policy",
       [
