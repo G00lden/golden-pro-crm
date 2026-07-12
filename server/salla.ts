@@ -1890,6 +1890,22 @@ function customerCountWarning(
   return `Salla advertised ${advertisedCount} customers but returned ${uniqueFetched} unique customers (${comparison}). ${pageSummary}; the paginated rows were accepted as complete.`;
 }
 
+function customerCountToleranceError(
+  advertisedCount: number | null,
+  uniqueFetched: number,
+  requestedPageSize: number,
+) {
+  if (advertisedCount === null || advertisedCount <= 0) return null;
+  if (uniqueFetched === 0) {
+    return `Salla advertised ${advertisedCount} customers but returned no unique customers.`;
+  }
+  const tolerance = Math.max(5, Math.min(requestedPageSize, Math.ceil(advertisedCount * 0.01)));
+  const difference = Math.abs(advertisedCount - uniqueFetched);
+  return difference > tolerance
+    ? `Salla customer count differs by ${difference}, exceeding the allowed tolerance of ${tolerance} (${advertisedCount} advertised, ${uniqueFetched} unique).`
+    : null;
+}
+
 async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<SyncResult> {
   if (!configured()) throw new Error("Salla integration is not configured on the server.");
 
@@ -1913,6 +1929,8 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
   let expectedTotalCustomers: number | null = null;
   let lastRequestedPage = 0;
   const uniqueFetchedCustomerIds = new Set<string>();
+  const firstCustomerPageById = new Map<string, number>();
+  const duplicateCustomerIdsAcrossPages = new Set<string>();
 
   try {
     const token = await ensureFreshAccessToken(currentUid, integration);
@@ -1949,7 +1967,12 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       for (const remoteCustomer of customers) {
         try {
           const mapped = mapSallaCustomer(currentUid, remoteCustomer);
-          if (uniqueFetchedCustomerIds.has(mapped.documentId)) continue;
+          const firstPage = firstCustomerPageById.get(mapped.documentId);
+          if (firstPage !== undefined) {
+            if (firstPage !== page) duplicateCustomerIdsAcrossPages.add(mapped.documentId);
+            continue;
+          }
+          firstCustomerPageById.set(mapped.documentId, page);
           uniqueFetchedCustomerIds.add(mapped.documentId);
           const target = resolveSallaCustomerTarget(customerIndexes, mapped);
           const customerData: Record<string, unknown> = {
@@ -2001,9 +2024,17 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
     const failureMessage = failed
       ? `${failed} customers could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
       : null;
-    const errorMessage = [failureMessage, partialMessage].filter(Boolean).join(" ") || null;
-    const success = !errorMessage;
     const uniqueFetched = uniqueFetchedCustomerIds.size;
+    const duplicateMessage = duplicateCustomerIdsAcrossPages.size
+      ? `${duplicateCustomerIdsAcrossPages.size} duplicate Salla customer identities appeared across different pages; the sync is incomplete and must be retried.`
+      : null;
+    const toleranceMessage = customerCountToleranceError(
+      expectedTotalCustomers,
+      uniqueFetched,
+      requestedPageSize,
+    );
+    const errorMessage = [failureMessage, partialMessage, duplicateMessage, toleranceMessage].filter(Boolean).join(" ") || null;
+    const success = !errorMessage;
     const warningMessage = customerCountWarning(
       expectedTotalCustomers,
       uniqueFetched,
@@ -2031,7 +2062,7 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
       pages,
       last_sync_at: syncedAt,
       last_error: errorMessage,
-      partial: Boolean(partialMessage),
+      partial: Boolean(partialMessage || duplicateMessage || toleranceMessage),
       cap_reached: capReached,
       advertised_count: expectedTotalCustomers,
       unique_fetched: uniqueFetched,

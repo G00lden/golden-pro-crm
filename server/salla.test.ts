@@ -264,6 +264,76 @@ test("accepts all advertised pages when Salla total exceeds the unique rows retu
   assert.match(stored.last_customer_sync_warning || "", /accepted as complete/i);
 });
 
+test("fails after reading all pages when a mapped customer identity repeats across pages", async () => {
+  const uid = "owner-customer-cross-page-duplicate";
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = "2";
+  process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES = "10";
+  await linkSallaOwner(uid);
+  const requestedPages: number[] = [];
+  globalThis.fetch = (async (input) => {
+    const page = Number(new URL(String(input)).searchParams.get("page"));
+    requestedPages.push(page);
+    return jsonResponse({
+      data: page === 1
+        ? [
+            { id: "duplicate-a", name: "A", mobile: "0501000001" },
+            { id: "duplicate-b", name: "B", mobile: "0501000002" },
+          ]
+        : [
+            { id: "duplicate-b", name: "B again", mobile: "0501000002" },
+            { id: "duplicate-c", name: "C", mobile: "0501000003" },
+          ],
+      pagination: { currentPage: page, totalPages: 2, perPage: 2, total: 4 },
+    });
+  }) as typeof fetch;
+
+  const result = await syncSallaCustomersForUser(uid);
+  assert.equal(result.success, false);
+  assert.equal(result.partial, true);
+  assert.equal(result.pages, 2);
+  assert.equal(result.fetched, 4);
+  assert.equal(result.unique_fetched, 3);
+  assert.equal(result.imported, 3);
+  assert.deepEqual(requestedPages, [1, 2]);
+  assert.match(result.last_error || "", /1 duplicate Salla customer identities.*across different pages/i);
+  assert.equal((await customersForOwner(uid)).length, 3);
+  const stored = (await salla.readLocalIntegrationStore())[uid];
+  assert.equal(stored.last_customer_sync_complete, false);
+  assert.equal(stored.last_customer_sync_count, 3);
+});
+
+test("fails a large advertised-count difference even without duplicate identities", async () => {
+  const uid = "owner-customer-count-tolerance";
+  const advertisedTotal = 120;
+  const returnedTotal = 100;
+  const perPage = 60;
+  process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = String(perPage);
+  process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES = "10";
+  await linkSallaOwner(uid);
+  globalThis.fetch = (async (input) => {
+    const page = Number(new URL(String(input)).searchParams.get("page"));
+    const start = (page - 1) * perPage;
+    const count = Math.max(0, Math.min(perPage, returnedTotal - start));
+    return jsonResponse({
+      data: Array.from({ length: count }, (_, offset) => {
+        const index = start + offset;
+        return { id: `tolerance-${index}`, name: `Tolerance ${index}`, mobile: `05${String(index).padStart(8, "0")}` };
+      }),
+      pagination: { currentPage: page, totalPages: 2, perPage, total: advertisedTotal },
+    });
+  }) as typeof fetch;
+
+  const result = await syncSallaCustomersForUser(uid);
+  assert.equal(result.success, false);
+  assert.equal(result.partial, true);
+  assert.equal(result.cap_reached, false);
+  assert.equal(result.pages, 2);
+  assert.equal(result.unique_fetched, returnedTotal);
+  assert.equal(result.advertised_count, advertisedTotal);
+  assert.match(result.last_error || "", /differs by 20.*allowed tolerance of 5/i);
+  assert.equal((await salla.readLocalIntegrationStore())[uid].last_customer_sync_complete, false);
+});
+
 test("keeps duplicate phones separate, follows a remote id through phone changes, and accepts no phone", async () => {
   const uid = "owner-customer-identity";
   process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = "60";

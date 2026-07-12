@@ -45,7 +45,11 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
     ? null
     : Math.abs(customerSyncAdvertisedCount - customerSyncReceivedCount);
   const customerSyncHasWarning = Boolean(
-    salla.data?.last_customer_sync_warning && customerSyncCountGap && customerSyncCountGap > 0,
+    salla.data?.last_customer_sync_status === "success" &&
+    salla.data?.last_customer_sync_complete === true &&
+    salla.data?.last_customer_sync_warning &&
+    customerSyncCountGap &&
+    customerSyncCountGap > 0,
   );
 
   useEffect(() => {

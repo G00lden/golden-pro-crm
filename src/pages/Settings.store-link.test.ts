@@ -44,6 +44,8 @@ test("Salla settings expose customer sync progress and include customers in the 
   assert.match(settingsSource, /last_customer_sync_error/);
   assert.match(settingsSource, /last_customer_sync_advertised_count/);
   assert.match(settingsSource, /last_customer_sync_warning/);
+  assert.match(settingsSource, /last_customer_sync_status === "success"/);
+  assert.match(settingsSource, /last_customer_sync_complete === true/);
   assert.match(settingsSource, /role="status"/);
   assert.match(settingsSource, /tone="warn">فرق في عدّ سلة/);
   assert.match(settingsSource, /اكتملت المزامنة وسيُعاد التحقق تلقائيًا/);
