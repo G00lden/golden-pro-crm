@@ -1,4 +1,4 @@
-import { RefreshCcw, Save, Plus, LogOut, Smartphone, X } from "lucide-react";
+import { ExternalLink, RefreshCcw, Save, Plus, LogOut, Smartphone, X } from "lucide-react";
 import { useState, useEffect, type FormEvent } from "react";
 import * as api from "../api";
 import {
@@ -14,6 +14,7 @@ import {
   fmtDate,
   useData,
 } from "../shared";
+import { normalizeSallaStoreUrl } from "../sallaStoreUrl";
 
 export default function SettingsPage({ notify }: { notify: (message: string, ok?: boolean) => void }) {
   const settings = useData(api.getSettings);
@@ -30,6 +31,7 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
     typeof window !== "undefined"
       ? `${window.location.origin}${webhook.data?.endpoint || "/api/store/webhook"}`
       : webhook.data?.endpoint || "/api/store/webhook";
+  const storeUrl = normalizeSallaStoreUrl(salla.data?.store_url);
 
   useEffect(() => {
     if (settings.data) setValues(settings.data);
@@ -258,6 +260,23 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
                 <strong>المتجر</strong>
                 <span>{salla.data?.store_name || "غير مرتبط بعد"}</span>
                 <p>{salla.data?.merchant_id ? `Merchant ID: ${salla.data.merchant_id}` : "سيظهر بعد نجاح التفويض."}</p>
+                {storeUrl ? (
+                  <a
+                    className="btn muted store-link"
+                    href={storeUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <ExternalLink size={16} aria-hidden="true" focusable="false" />
+                    فتح صفحة المتجر
+                  </a>
+                ) : (
+                  <p className="store-link-empty">
+                    {salla.data?.linked
+                      ? "لم يصل رابط المتجر من سلة بعد. حدّث حالة الربط، وإن استمر غيابه فأعد تثبيت التطبيق من لوحة سلة."
+                      : "اربط متجر سلة أولاً، ثم حدّث الحالة ليظهر رابط فتح المتجر هنا."}
+                  </p>
+                )}
               </article>
               <article className="mini-card">
                 <strong>آخر تفويض</strong>

@@ -27,9 +27,35 @@ function Assert-NativeSuccess([string]$operation) {
 Require-Command "ssh"
 Require-Command "scp"
 Require-Command "tar"
+Require-Command "git"
+
+if ($HostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]*$') {
+  throw "HostName contains unsupported characters."
+}
+if ($User -notmatch '^[A-Za-z_][A-Za-z0-9._-]*$') {
+  throw "User contains unsupported characters."
+}
+if ($AppDir -notmatch '^/[A-Za-z0-9._/-]+$' -or ($AppDir -split '/') -contains '..') {
+  throw "AppDir must be a safe absolute POSIX path without '..'."
+}
+if ($Domain -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$' -or $Domain -notmatch '\.') {
+  throw "Domain contains unsupported characters or is not a fully qualified name."
+}
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $root
+
+$dirtyEntries = @(git status --porcelain=v1 --untracked-files=normal)
+Assert-NativeSuccess "Git worktree check"
+if ($dirtyEntries.Count -gt 0) {
+  throw "Refusing to deploy a dirty worktree. Commit or remove every tracked and untracked change first."
+}
+
+$buildCommit = (& git rev-parse --short=12 HEAD).Trim()
+Assert-NativeSuccess "Build commit detection"
+if ($buildCommit -notmatch '^[0-9a-f]{7,40}$') {
+  throw "Unable to determine a safe Git build commit."
+}
 
 Write-Host "Running local production checks..."
 npm run doctor:prod
@@ -38,6 +64,12 @@ npm run lint
 Assert-NativeSuccess "TypeScript lint"
 npm run build
 Assert-NativeSuccess "Production build"
+
+$postBuildDirtyEntries = @(git status --porcelain=v1 --untracked-files=normal)
+Assert-NativeSuccess "Post-build Git worktree check"
+if ($postBuildDirtyEntries.Count -gt 0) {
+  throw "The production checks changed the worktree. Refusing to package content that does not match BUILD_COMMIT."
+}
 
 $runtime = Join-Path $root ".runtime"
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
@@ -53,6 +85,15 @@ tar `
   --exclude=".runtime" `
   --exclude=".tools" `
   --exclude=".wa-session" `
+  --exclude="backups" `
+  --exclude="./backups" `
+  --exclude="data" `
+  --exclude="*.db" `
+  --exclude="*.db-shm" `
+  --exclude="*.db-wal" `
+  --exclude=".security-backup-*" `
+  --exclude="service-account*.json" `
+  --exclude="firebase-service-account*.json" `
   --exclude=".env" `
   --exclude=".env.*" `
   --exclude="*.log" `
@@ -90,7 +131,7 @@ ssh @sshOptions $sshTarget "chmod 600 '$AppDir/.env.production'"
 Assert-NativeSuccess "Production environment permissions"
 
 Write-Host "Starting Docker Compose on VPS..."
-ssh @sshOptions $sshTarget "cd '$AppDir' && CRM_DOMAIN='$Domain' bash deploy/remote-start.sh"
+ssh @sshOptions $sshTarget "cd '$AppDir' && BUILD_COMMIT='$buildCommit' CRM_DOMAIN='$Domain' bash deploy/remote-start.sh"
 Assert-NativeSuccess "Remote Docker deployment"
 
 if (-not $SkipDns) {

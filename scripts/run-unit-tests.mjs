@@ -5,11 +5,13 @@ const files = [
   "scripts/server-mode.test.mjs",
   "scripts/schema-migration.test.mjs",
   "scripts/user-identity.test.mjs",
+  "scripts/vps-backup-restore.test.mjs",
   "shared/date.test.ts",
   "shared/financial.test.ts",
   "shared/phone.test.ts",
   "shared/zatca.test.ts",
   "server/localAuthPolicy.test.ts",
+  "server/salla.test.ts",
   "server/crmValidation.test.ts",
   "server/communicationStatus.test.ts",
   "server/communicationJobs.test.ts",
@@ -22,6 +24,7 @@ const files = [
   "server/userValidation.test.ts",
   "server/repositories/ownedRepository.test.ts",
   "src/dataProvider.test.ts",
+  "src/pages/Settings.store-link.test.ts",
 ];
 
 const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...files], {

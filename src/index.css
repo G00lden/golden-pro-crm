@@ -955,6 +955,45 @@ main {
   padding: 14px;
 }
 
+.store-link {
+  width: fit-content;
+  max-width: 100%;
+  align-self: start;
+  text-decoration: none;
+  touch-action: manipulation;
+  transition: transform 160ms ease;
+}
+
+.store-link:hover {
+  border-color: var(--gold);
+  background: rgba(201, 164, 122, 0.14);
+  color: var(--gold-2);
+}
+
+.store-link:active {
+  transform: translateY(1px);
+}
+
+.store-link:focus-visible {
+  outline: 3px solid var(--gold-2);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.light-mode .store-link:focus-visible {
+  outline-color: #6f4a1f;
+}
+
+.store-link-empty {
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .store-link {
+    transition: none;
+  }
+}
+
 .chips {
   display: flex;
   flex-wrap: wrap;

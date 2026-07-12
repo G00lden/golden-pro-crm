@@ -52,6 +52,23 @@ type SallaTokenResponse = {
   token_type?: string;
 };
 
+type SallaAuthorizedSession = {
+  uid: string;
+  accessToken: string;
+};
+
+type SallaRequestOptions = {
+  timeoutMs?: number;
+  maxRetries?: number;
+  retryable?: boolean;
+};
+
+type SallaMerchantProfile = {
+  merchantId: string | null;
+  storeName: string | null;
+  storeUrl: string | null;
+};
+
 type SyncResult = {
   success: boolean;
   imported: number;
@@ -67,9 +84,34 @@ const SALLA_AUTHORIZE_URL = "https://accounts.salla.sa/oauth2/auth";
 const SALLA_TOKEN_URL = "https://accounts.salla.sa/oauth2/token";
 const SALLA_USERINFO_URL = "https://accounts.salla.sa/oauth2/user/info";
 const SALLA_API_BASE = "https://api.salla.dev/admin/v2";
+const SALLA_STOREINFO_URL = `${SALLA_API_BASE}/store/info`;
 const SALLA_CALLBACK_PATH = "/api/integrations/salla/callback";
 const SALLA_APP_WEBHOOK_PATH = "/api/integrations/salla/webhook";
-const LOCAL_SALLA_STORE_PATH = path.resolve(process.cwd(), ".runtime", "salla-integrations.json");
+const DEFAULT_LOCAL_SALLA_STORE_PATH = path.resolve(process.cwd(), ".runtime", "salla-integrations.json");
+const DEFAULT_SALLA_REQUEST_TIMEOUT_MS = 15_000;
+const TRANSIENT_SALLA_STATUSES = new Set([429, 500, 502, 503]);
+const REFRESH_OUTCOME_UNKNOWN_MESSAGE =
+  "Salla could not confirm token refresh. Reconnect the Salla app before syncing again.";
+
+class SallaRequestError extends Error {
+  readonly status?: number;
+  readonly transient: boolean;
+  readonly outcomeUnknown: boolean;
+
+  constructor(
+    message: string,
+    options: { status?: number; transient?: boolean; outcomeUnknown?: boolean } = {},
+  ) {
+    super(message);
+    this.name = "SallaRequestError";
+    this.status = options.status;
+    this.transient = Boolean(options.transient);
+    this.outcomeUnknown = Boolean(options.outcomeUnknown);
+  }
+}
+
+const refreshLocks = new Map<string, Promise<unknown>>();
+let localIntegrationWriteLock: Promise<unknown> = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -93,19 +135,84 @@ function usingSupabaseAdapter() {
   return provider === "supabase" || provider === "sqlite";
 }
 
+function localSallaStorePath() {
+  const override = process.env.SALLA_INTEGRATION_STORE_PATH;
+  if (!override) return DEFAULT_LOCAL_SALLA_STORE_PATH;
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("SALLA_INTEGRATION_STORE_PATH is test-only and cannot override the production token store path.");
+  }
+  return path.resolve(override);
+}
+
 async function readLocalIntegrationStore(): Promise<Record<string, SallaIntegrationRecord>> {
+  const storePath = localSallaStorePath();
+  let raw: string;
   try {
-    const raw = await fs.readFile(LOCAL_SALLA_STORE_PATH, "utf8");
+    raw = await fs.readFile(storePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw new Error(`Unable to read the Salla integration store at ${storePath}.`, { cause: error });
+  }
+
+  try {
     const parsed = JSON.parse(raw) as Record<string, SallaIntegrationRecord>;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Expected a JSON object keyed by CRM owner.");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(
+      `The Salla integration store at ${storePath} is corrupted and was not replaced. Restore it from backup before continuing.`,
+      { cause: error },
+    );
   }
 }
 
 async function writeLocalIntegrationStore(data: Record<string, SallaIntegrationRecord>) {
-  await fs.mkdir(path.dirname(LOCAL_SALLA_STORE_PATH), { recursive: true });
-  await fs.writeFile(LOCAL_SALLA_STORE_PATH, JSON.stringify(data, null, 2), "utf8");
+  const storePath = localSallaStorePath();
+  const directory = path.dirname(storePath);
+  const tempPath = path.join(
+    directory,
+    `.${path.basename(storePath)}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+  );
+  await fs.mkdir(directory, { recursive: true });
+
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(tempPath, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(tempPath, storePath);
+    await fs.chmod(storePath, 0o600).catch((error) => {
+      if (process.platform !== "win32") throw error;
+    });
+
+    // Persist the rename across a host crash where the filesystem supports
+    // directory fsync (Linux VPS). Windows does not expose this consistently.
+    let directoryHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      directoryHandle = await fs.open(directory, "r");
+      await directoryHandle.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (process.platform !== "win32" && code !== "EINVAL" && code !== "ENOTSUP") throw error;
+    } finally {
+      await directoryHandle?.close().catch(() => undefined);
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await fs.unlink(tempPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    });
+  }
+}
+
+async function withLocalIntegrationWriteLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = localIntegrationWriteLock.catch(() => undefined).then(task);
+  localIntegrationWriteLock = run;
+  return run;
 }
 
 function fromSettingsShape(data: Record<string, any> | null | undefined): SallaIntegrationRecord | null {
@@ -192,7 +299,10 @@ function maxSyncPages() {
 }
 
 function pageSize() {
-  return Math.max(10, Math.min(100, Number(process.env.SALLA_SYNC_PAGE_SIZE || 50)));
+  // The current List Orders contract caps reliable sequential pagination at
+  // 30 rows. Using a larger requested size can make Salla return 30 while our
+  // loop mistakes that short page for the end of the collection.
+  return Math.max(10, Math.min(30, Number(process.env.SALLA_SYNC_PAGE_SIZE || 30)));
 }
 
 function configured() {
@@ -386,22 +496,24 @@ async function readIntegration(uid: string): Promise<SallaIntegrationRecord | nu
 async function writeIntegration(uid: string, data: Partial<SallaIntegrationRecord>) {
   const now = nowIso();
   if (usingSupabaseAdapter()) {
-    const store = await readLocalIntegrationStore();
-    const previous = store[uid] || {
-      provider: "salla" as const,
-      createdBy: uid,
-      status: configured() ? "ready_to_connect" : "not_configured",
-      createdAt: now,
-    };
-    store[uid] = {
-      ...previous,
-      ...data,
-      provider: "salla",
-      createdBy: uid,
-      updatedAt: now,
-      createdAt: previous.createdAt || data.createdAt || now,
-    };
-    await writeLocalIntegrationStore(store);
+    await withLocalIntegrationWriteLock(async () => {
+      const store = await readLocalIntegrationStore();
+      const previous = store[uid] || {
+        provider: "salla" as const,
+        createdBy: uid,
+        status: configured() ? "ready_to_connect" : "not_configured",
+        createdAt: now,
+      };
+      store[uid] = {
+        ...previous,
+        ...data,
+        provider: "salla",
+        createdBy: uid,
+        updatedAt: now,
+        createdAt: previous.createdAt || data.createdAt || now,
+      };
+      await writeLocalIntegrationStore(store);
+    });
     return;
   }
   await adminDb.collection("settings").doc(uid).set({
@@ -443,96 +555,349 @@ function verifySallaAppWebhook(req: Request & { rawBody?: Buffer }) {
   throw err;
 }
 
+function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.max(minimum, Math.min(maximum, Math.trunc(parsed)))
+    : fallback;
+}
+
+function sallaRequestTimeoutMs() {
+  return boundedInteger(process.env.SALLA_FETCH_TIMEOUT_MS, DEFAULT_SALLA_REQUEST_TIMEOUT_MS, 1_000, 60_000);
+}
+
+function sallaGetMaxRetries() {
+  return boundedInteger(process.env.SALLA_FETCH_MAX_RETRIES, 2, 0, 4);
+}
+
+function sallaRetryBaseDelayMs() {
+  return boundedInteger(process.env.SALLA_FETCH_RETRY_BASE_DELAY_MS, 500, 0, 30_000);
+}
+
+function sallaRetryMaxDelayMs() {
+  return boundedInteger(process.env.SALLA_FETCH_RETRY_MAX_DELAY_MS, 30_000, 0, 60_000);
+}
+
+function parseRetryAfterMs(value: string | null) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : null;
+}
+
+function sallaResponseMessage(body: unknown, status: number) {
+  const record = asRecord(body);
+  const error = asRecord(record.error);
+  const message = firstText(record.error_description, error.message, record.message);
+  return message ? truncate(message, 500) : `Salla request failed (${status}).`;
+}
+
+function isTransientSallaError(error: unknown) {
+  return error instanceof SallaRequestError && error.transient;
+}
+
+function isUnknownRefreshOutcome(error: unknown) {
+  return error instanceof SallaRequestError && error.outcomeUnknown;
+}
+
+function isSallaAuthenticationRequired(error: unknown) {
+  if (isUnknownRefreshOutcome(error)) return true;
+  if (error instanceof SallaRequestError && error.status === 401) return true;
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    message.includes("invalid_grant") ||
+    message.includes("refresh token is missing") ||
+    message.includes("salla is not connected") ||
+    message.includes("salla is not linked")
+  );
+}
+
+function statusAfterSyncFailure(error: unknown): SallaIntegrationRecord["status"] {
+  // A failed sync is diagnostic state, not a permanent connection latch. Only
+  // explicit authentication failures require re-authorization.
+  return isSallaAuthenticationRequired(error) ? "error" : "connected";
+}
+
+function syncFailureMessage(error: unknown, fallback: string) {
+  if (isUnknownRefreshOutcome(error)) return REFRESH_OUTCOME_UNKNOWN_MESSAGE;
+  return error instanceof Error ? error.message : fallback;
+}
+
+async function waitForRetry(milliseconds: number) {
+  if (milliseconds <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function requestSallaJson<T = Record<string, unknown>>(
+  input: string | URL,
+  init: RequestInit = {},
+  options: SallaRequestOptions = {},
+): Promise<T> {
+  const method = String(init.method || "GET").toUpperCase();
+  const retryable = options.retryable ?? method === "GET";
+  const maxRetries = retryable
+    ? boundedInteger(options.maxRetries, sallaGetMaxRetries(), 0, 4)
+    : 0;
+  const timeoutMs = options.timeoutMs ?? sallaRequestTimeoutMs();
+
+  for (let attempt = 0; ; attempt += 1) {
+    const controller = new AbortController();
+    let timedOut = false;
+    let detachAbort: (() => void) | null = null;
+    if (init.signal) {
+      const forwardAbort = () => controller.abort(init.signal?.reason);
+      if (init.signal.aborted) forwardAbort();
+      else {
+        init.signal.addEventListener("abort", forwardAbort, { once: true });
+        detachAbort = () => init.signal?.removeEventListener("abort", forwardAbort);
+      }
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const response = await fetch(input, { ...init, signal: controller.signal });
+      const body = await response.json().catch(() => ({}));
+      if (response.ok) return body as T;
+
+      const transient = TRANSIENT_SALLA_STATUSES.has(response.status);
+      if (retryable && transient && attempt < maxRetries) {
+        const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"));
+        const backoff = sallaRetryBaseDelayMs() * 2 ** attempt;
+        await waitForRetry(Math.min(retryAfter ?? backoff, sallaRetryMaxDelayMs()));
+        continue;
+      }
+
+      throw new SallaRequestError(sallaResponseMessage(body, response.status), {
+        status: response.status,
+        transient,
+      });
+    } catch (error) {
+      if (error instanceof SallaRequestError) throw error;
+      const externallyAborted = Boolean(init.signal?.aborted);
+      const transient = timedOut || !externallyAborted;
+      if (retryable && transient && attempt < maxRetries) {
+        const backoff = Math.min(sallaRetryBaseDelayMs() * 2 ** attempt, sallaRetryMaxDelayMs());
+        await waitForRetry(backoff);
+        continue;
+      }
+      throw new SallaRequestError(
+        timedOut ? `Salla request timed out after ${timeoutMs}ms.` : "Salla request could not be completed.",
+        {
+          transient,
+          outcomeUnknown: method !== "GET" && transient,
+        },
+      );
+    } finally {
+      clearTimeout(timer);
+      detachAbort?.();
+    }
+  }
+}
+
 async function exchangeToken(params: URLSearchParams) {
-  const response = await fetch(SALLA_TOKEN_URL, {
+  // OAuth authorization codes and refresh tokens are single-use. Retrying a
+  // POST after a lost response can reuse the grant and revoke the whole Salla
+  // session, so token exchange gets a timeout but never an automatic retry.
+  const body = await requestSallaJson<SallaTokenResponse>(SALLA_TOKEN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
     },
     body: params.toString(),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.error_description || body?.message || `Salla token exchange failed (${response.status}).`);
-  }
-  return body as SallaTokenResponse;
-}
-
-async function fetchUserInfo(token: string) {
-  const response = await fetch(SALLA_USERINFO_URL, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla user info failed (${response.status}).`);
+  }, { retryable: false });
+  if (!firstText(body.access_token)) {
+    throw new SallaRequestError("Salla token response did not include an access token.");
   }
   return body;
 }
 
-async function ensureFreshAccessToken(uid: string, integration: SallaIntegrationRecord) {
-  const expiry = integration.expires_at ? Date.parse(integration.expires_at) : NaN;
-  const stillValid = Number.isFinite(expiry) ? expiry - Date.now() > 120_000 : Boolean(integration.access_token);
-  if (stillValid && integration.access_token) return integration.access_token;
-  if (!integration.refresh_token) throw new Error("Salla refresh token is missing.");
+function unwrapSallaData(value: unknown) {
+  const body = asRecord(value);
+  const data = asRecord(body.data);
+  return Object.keys(data).length ? data : body;
+}
 
-  const token = await exchangeToken(new URLSearchParams({
-    grant_type: "refresh_token",
-    refresh_token: integration.refresh_token,
-    client_id: clientId(),
-    client_secret: clientSecret(),
-  }));
+function normalizeStorefrontUrl(value: unknown) {
+  const raw = firstText(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.protocol = "https:";
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractMerchantProfile(userInfo: unknown, storeInfo: unknown): SallaMerchantProfile {
+  const userData = unwrapSallaData(userInfo);
+  const merchant = asRecord(userData.merchant);
+  const store = unwrapSallaData(storeInfo);
+  return {
+    merchantId: firstText(store.id, merchant.id, userData.merchant_id) || null,
+    storeName: firstText(store.name, merchant.name, merchant.store_name, merchant.username) || null,
+    storeUrl: normalizeStorefrontUrl(firstText(store.domain, merchant.domain, merchant.url, merchant.permalink)),
+  };
+}
+
+function merchantProfilePatch(profile: SallaMerchantProfile, fallbackMerchantId?: string | null) {
+  const patch: Partial<SallaIntegrationRecord> = {};
+  const merchantId = profile.merchantId || fallbackMerchantId || null;
+  if (merchantId) patch.merchant_id = merchantId;
+  if (profile.storeName) patch.store_name = profile.storeName;
+  if (profile.storeUrl) patch.store_url = profile.storeUrl;
+  return patch;
+}
+
+async function fetchMerchantProfile(token: string) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
+  const [userInfo, storeInfo] = await Promise.allSettled([
+    requestSallaJson(SALLA_USERINFO_URL, { headers }),
+    requestSallaJson(SALLA_STOREINFO_URL, { headers }),
+  ]);
+  if (userInfo.status === "rejected" && storeInfo.status === "rejected") {
+    throw userInfo.reason;
+  }
+  return extractMerchantProfile(
+    userInfo.status === "fulfilled" ? userInfo.value : {},
+    storeInfo.status === "fulfilled" ? storeInfo.value : {},
+  );
+}
+
+function accessTokenStillValid(integration: SallaIntegrationRecord) {
+  const expiry = integration.expires_at ? Date.parse(integration.expires_at) : NaN;
+  return Number.isFinite(expiry)
+    ? expiry - Date.now() > 120_000 && Boolean(integration.access_token)
+    : Boolean(integration.access_token);
+}
+
+async function withOwnerRefreshLock<T>(uid: string, task: () => Promise<T>): Promise<T> {
+  const previous = refreshLocks.get(uid) || Promise.resolve();
+  const run = previous.catch(() => undefined).then(task);
+  refreshLocks.set(uid, run);
+  try {
+    return await run;
+  } finally {
+    if (refreshLocks.get(uid) === run) refreshLocks.delete(uid);
+  }
+}
+
+async function rotateAccessTokenLocked(uid: string, integration: SallaIntegrationRecord) {
+  if (!integration.refresh_token) throw new Error("Salla refresh token is missing.");
+  let token: SallaTokenResponse;
+  try {
+    token = await exchangeToken(new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: integration.refresh_token,
+      client_id: clientId(),
+      client_secret: clientSecret(),
+    }));
+  } catch (error) {
+    if (isUnknownRefreshOutcome(error)) {
+      // The single-use refresh grant may have reached Salla even though its
+      // response was lost. Quarantine it so no later request can reuse it and
+      // revoke the session.
+      await writeIntegration(uid, {
+        status: "error",
+        refresh_token: null,
+        last_sync_error: REFRESH_OUTCOME_UNKNOWN_MESSAGE,
+      });
+    }
+    throw error;
+  }
 
   await writeIntegration(uid, {
     status: "connected",
     access_token: token.access_token,
-    refresh_token: token.refresh_token || integration.refresh_token,
+    // Never retain a refresh token that has just been consumed. Salla rotates
+    // it on every successful refresh; a missing replacement requires a later
+    // re-authorization instead of unsafe token reuse.
+    refresh_token: firstText(token.refresh_token) || null,
     expires_at: expiresAt(token.expires_in),
     scope: token.scope || integration.scope,
     token_type: token.token_type || integration.token_type || "Bearer",
     last_sync_error: null,
   });
 
+  // Backfill canonical store metadata for records created by older builds.
+  // Token persistence above is deliberately completed first so a slow profile
+  // request can never lose the newly rotated single-use credential pair.
+  const profile = await fetchMerchantProfile(token.access_token).catch(() => null);
+  if (profile) {
+    const profilePatch = merchantProfilePatch(profile);
+    if (Object.keys(profilePatch).length) {
+      await writeIntegration(uid, profilePatch).catch(() => undefined);
+    }
+  }
   return token.access_token;
 }
 
-async function fetchOrdersPage(token: string, page: number) {
+async function ensureFreshAccessToken(uid: string, integration: SallaIntegrationRecord) {
+  if (accessTokenStillValid(integration) && integration.access_token) return integration.access_token;
+  return withOwnerRefreshLock(uid, async () => {
+    const latest = await readIntegration(uid);
+    if (!latest) throw new Error("Salla is not linked for this CRM user.");
+    if (accessTokenStillValid(latest) && latest.access_token) return latest.access_token;
+    return rotateAccessTokenLocked(uid, latest);
+  });
+}
+
+async function refreshAfterUnauthorized(uid: string, failedAccessToken: string) {
+  return withOwnerRefreshLock(uid, async () => {
+    const latest = await readIntegration(uid);
+    if (!latest) throw new Error("Salla is not linked for this CRM user.");
+    if (latest.access_token && latest.access_token !== failedAccessToken && accessTokenStillValid(latest)) {
+      return latest.access_token;
+    }
+    return rotateAccessTokenLocked(uid, latest);
+  });
+}
+
+async function authorizedSallaGet<T = Record<string, unknown>>(
+  session: SallaAuthorizedSession,
+  input: string | URL,
+): Promise<T> {
+  const request = (accessToken: string) => requestSallaJson<T>(input, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  });
+
+  try {
+    return await request(session.accessToken);
+  } catch (error) {
+    if (!(error instanceof SallaRequestError) || error.status !== 401) throw error;
+    session.accessToken = await refreshAfterUnauthorized(session.uid, session.accessToken);
+    return request(session.accessToken);
+  }
+}
+
+async function fetchOrdersPage(session: SallaAuthorizedSession, page: number) {
   const url = new URL(`${SALLA_API_BASE}/orders`);
   url.searchParams.set("page", String(page));
   url.searchParams.set("per_page", String(pageSize()));
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla orders sync failed (${response.status}).`);
-  }
-  return body;
+  return authorizedSallaGet(session, url);
 }
 
-async function fetchProductsPage(token: string, page: number) {
+async function fetchProductsPage(session: SallaAuthorizedSession, page: number) {
   const url = new URL(`${SALLA_API_BASE}/products`);
   url.searchParams.set("page", String(page));
   url.searchParams.set("per_page", String(pageSize()));
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla products sync failed (${response.status}).`);
-  }
-  return body;
+  return authorizedSallaGet(session, url);
 }
 
 function productDocId(uid: string, remoteProductId: string) {
@@ -776,7 +1141,7 @@ export async function getSallaStatus(currentUid: string, req: Request) {
     sync_schedule: syncSchedule(),
     sync_enabled: syncEnabled(),
     store_name: integration?.store_name || null,
-    store_url: integration?.store_url || null,
+    store_url: normalizeStorefrontUrl(integration?.store_url),
     merchant_id: integration?.merchant_id || null,
     expires_at: integration?.expires_at || null,
     has_refresh_token: Boolean(integration?.refresh_token),
@@ -888,9 +1253,8 @@ export async function handleSallaCallback(req: Request) {
       client_secret: clientSecret(),
       redirect_uri: state.redirectUri,
     }));
-    const profile = await fetchUserInfo(token.access_token);
-    const merchant = asRecord(profile.merchant);
-
+    // Persist the one-time authorization grant before any metadata request.
+    // A store-info outage must never force the merchant to authorize again.
     await writeIntegration(state.uid, {
       status: "connected",
       access_token: token.access_token,
@@ -898,12 +1262,17 @@ export async function handleSallaCallback(req: Request) {
       expires_at: expiresAt(token.expires_in),
       scope: token.scope || defaultScopes(),
       token_type: token.token_type || "Bearer",
-      merchant_id: firstText(merchant.id, profile.merchant_id) || null,
-      store_name: firstText(merchant.name, merchant.store_name, profile.name) || null,
-      store_url: firstText(merchant.domain, merchant.url, merchant.permalink) || null,
       last_sync_status: "idle",
       last_sync_error: null,
     });
+
+    const profile = await fetchMerchantProfile(token.access_token).catch(() => null);
+    if (profile) {
+      const profilePatch = merchantProfilePatch(profile);
+      if (Object.keys(profilePatch).length) {
+        await writeIntegration(state.uid, profilePatch).catch(() => undefined);
+      }
+    }
 
     return {
       status: 200,
@@ -930,19 +1299,21 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
   // Persistent audit trail of every accepted (signature-passed) Salla event,
   // so we can reconstruct exactly what arrived from the merchant. Logged AFTER
   // verifySallaAppWebhook so we never log unverified payloads.
-  try {
-    const line = JSON.stringify({
-      at: nowIso(),
-      event: event || "unknown",
-      merchant: merchantId || null,
-      has_access_token: Boolean(firstText(asRecord(body.data).access_token)),
-      data_keys: Object.keys(asRecord(body.data)).slice(0, 30),
-      body_keys: Object.keys(body).slice(0, 30),
-    }) + "\n";
-    const fsync = await import("fs");
-    fsync.appendFileSync(".runtime/salla-webhook.log", line, "utf8");
-  } catch {
-    // Logging best-effort; never fail the webhook handler over a log write.
+  if (process.env.NODE_ENV !== "test") {
+    try {
+      const line = JSON.stringify({
+        at: nowIso(),
+        event: event || "unknown",
+        merchant: merchantId || null,
+        has_access_token: Boolean(firstText(asRecord(body.data).access_token)),
+        data_keys: Object.keys(asRecord(body.data)).slice(0, 30),
+        body_keys: Object.keys(body).slice(0, 30),
+      }) + "\n";
+      const fsync = await import("fs");
+      fsync.appendFileSync(".runtime/salla-webhook.log", line, "utf8");
+    } catch {
+      // Logging best-effort; never fail the webhook handler over a log write.
+    }
   }
 
   if (!uid) {
@@ -950,7 +1321,6 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
   }
 
   await writeIntegration(uid, {
-    status: (await readIntegration(uid))?.status || (configured() ? "ready_to_connect" : "not_configured"),
     last_event_at: occurredAt,
     last_event_type: event || "unknown",
   });
@@ -963,9 +1333,8 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
     }
 
     const refreshToken = firstText(data.refresh_token) || null;
-    const profile = await fetchUserInfo(accessToken).catch(() => ({}));
-    const merchant = asRecord(asRecord(profile).merchant);
-
+    // Easy Mode delivers the only durable copy of the authorization bundle in
+    // this webhook. Save it before making any outbound metadata request.
     await writeIntegration(uid, {
       status: "connected",
       access_token: accessToken,
@@ -973,20 +1342,26 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
       expires_at: expiresAtFromUnixOrSeconds(data.expires),
       scope: firstText(data.scope) || defaultScopes(),
       token_type: firstText(data.token_type) || "bearer",
-      merchant_id: firstText(merchant.id, profile && asRecord(profile).merchant_id, merchantId) || null,
-      store_name: firstText(merchant.name, merchant.store_name, asRecord(profile).name) || null,
-      store_url: firstText(merchant.domain, merchant.url, merchant.permalink) || null,
       last_authorized_at: occurredAt,
       last_sync_status: "idle",
       last_sync_error: null,
     });
 
+    const profile = await fetchMerchantProfile(accessToken).catch(() => null);
+    const profilePatch = merchantProfilePatch(
+      profile || { merchantId: null, storeName: null, storeUrl: null },
+      merchantId,
+    );
+    if (Object.keys(profilePatch).length) {
+      await writeIntegration(uid, profilePatch).catch(() => undefined);
+    }
+
     return {
       success: true,
       event,
       owner_uid: uid,
-      merchant_id: firstText(merchant.id, merchantId) || null,
-      store_name: firstText(merchant.name, merchant.store_name, asRecord(profile).name) || null,
+      merchant_id: profile?.merchantId || merchantId || null,
+      store_name: profile?.storeName || null,
       linked: true,
     };
   }
@@ -1061,7 +1436,6 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
     throw new Error("Salla is not connected. Reinstall the Salla app or start the Salla connection again, then run sync.");
   }
 
-  const token = await ensureFreshAccessToken(currentUid, integration);
   const importedAt = nowIso();
   const existingOrdersSnap = await adminDb
     .collection("store_orders")
@@ -1081,8 +1455,10 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
   let firstFailureMessage: string | null = null;
 
   try {
+    const token = await ensureFreshAccessToken(currentUid, integration);
+    const session: SallaAuthorizedSession = { uid: currentUid, accessToken: token };
     for (let page = 1; page <= maxSyncPages(); page += 1) {
-      const payload = await fetchOrdersPage(token, page);
+      const payload = await fetchOrdersPage(session, page);
       const orders = asArray(payload.data || payload.orders || payload.items);
       if (!orders.length) break;
       pages += 1;
@@ -1137,9 +1513,10 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
       }
 
       const pagination = asRecord(payload.pagination);
-      const totalPages = Number(pagination.total_pages || pagination.last_page || 0);
-      if (totalPages && page >= totalPages) break;
-      if (orders.length < pageSize()) break;
+      const totalPages = Number(pagination.totalPages || pagination.total_pages || pagination.last_page || 0);
+      if (totalPages > 0) {
+        if (page >= totalPages) break;
+      } else if (orders.length < pageSize()) break;
     }
 
     await writeIntegration(currentUid, {
@@ -1166,9 +1543,9 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
         : null,
     };
   } catch (syncError) {
-    const message = syncError instanceof Error ? syncError.message : "Salla sync failed.";
+    const message = syncFailureMessage(syncError, "Salla sync failed.");
     await writeIntegration(currentUid, {
-      status: "error",
+      status: statusAfterSyncFailure(syncError),
       last_sync_at: importedAt,
       last_sync_status: "error",
       last_sync_count: imported + updated,
@@ -1187,7 +1564,6 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
     throw new Error("Salla is not connected. Reinstall the Salla app or start the Salla connection again, then run sync.");
   }
 
-  const token = await ensureFreshAccessToken(currentUid, integration);
   const syncedAt = nowIso();
   const existingProductsSnap = await adminDb
     .collection("products")
@@ -1212,8 +1588,10 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   let firstFailureMessage: string | null = null;
 
   try {
+    const token = await ensureFreshAccessToken(currentUid, integration);
+    const session: SallaAuthorizedSession = { uid: currentUid, accessToken: token };
     for (let page = 1; page <= maxSyncPages(); page += 1) {
-      const payload = await fetchProductsPage(token, page);
+      const payload = await fetchProductsPage(session, page);
       const products = asArray(payload.data || payload.products || payload.items);
       if (!products.length) break;
       pages += 1;
@@ -1254,9 +1632,10 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       }
 
       const pagination = asRecord(payload.pagination);
-      const totalPages = Number(pagination.total_pages || pagination.last_page || 0);
-      if (totalPages && page >= totalPages) break;
-      if (products.length < pageSize()) break;
+      const totalPages = Number(pagination.totalPages || pagination.total_pages || pagination.last_page || 0);
+      if (totalPages > 0) {
+        if (page >= totalPages) break;
+      } else if (products.length < pageSize()) break;
     }
 
     const errorMessage = failed
@@ -1280,9 +1659,9 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       last_error: errorMessage,
     };
   } catch (syncError) {
-    const message = syncError instanceof Error ? syncError.message : "Salla products sync failed.";
+    const message = syncFailureMessage(syncError, "Salla products sync failed.");
     await writeIntegration(currentUid, {
-      status: "error",
+      status: statusAfterSyncFailure(syncError),
       last_product_sync_at: syncedAt,
       last_product_sync_count: imported + updated,
       last_product_sync_error: message,
@@ -1291,22 +1670,11 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   }
 }
 
-async function fetchCustomersPage(token: string, page: number) {
+async function fetchCustomersPage(session: SallaAuthorizedSession, page: number) {
   const url = new URL(`${SALLA_API_BASE}/customers`);
   url.searchParams.set("page", String(page));
   url.searchParams.set("per_page", String(pageSize()));
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla customers sync failed (${response.status}).`);
-  }
-  return body;
+  return authorizedSallaGet(session, url);
 }
 
 export async function syncSallaCustomersForUser(currentUid: string): Promise<SyncResult> {
@@ -1318,7 +1686,6 @@ export async function syncSallaCustomersForUser(currentUid: string): Promise<Syn
     throw new Error("Salla is not connected.");
   }
 
-  const token = await ensureFreshAccessToken(currentUid, integration);
   const syncedAt = nowIso();
 
   let imported = 0;
@@ -1329,8 +1696,10 @@ export async function syncSallaCustomersForUser(currentUid: string): Promise<Syn
   let firstFailureMessage: string | null = null;
 
   try {
+    const token = await ensureFreshAccessToken(currentUid, integration);
+    const session: SallaAuthorizedSession = { uid: currentUid, accessToken: token };
     for (let page = 1; page <= maxSyncPages(); page += 1) {
-      const payload = await fetchCustomersPage(token, page);
+      const payload = await fetchCustomersPage(session, page);
       const customers = asArray(payload.data || payload.customers || payload.items);
       if (!customers.length) break;
       pages += 1;
@@ -1369,9 +1738,10 @@ export async function syncSallaCustomersForUser(currentUid: string): Promise<Syn
       }
 
       const pagination = asRecord(payload.pagination);
-      const totalPages = Number(pagination.total_pages || pagination.last_page || 0);
-      if (totalPages && page >= totalPages) break;
-      if (customers.length < pageSize()) break;
+      const totalPages = Number(pagination.totalPages || pagination.total_pages || pagination.last_page || 0);
+      if (totalPages > 0) {
+        if (page >= totalPages) break;
+      } else if (customers.length < pageSize()) break;
     }
 
     await writeIntegration(currentUid, {
@@ -1391,8 +1761,9 @@ export async function syncSallaCustomersForUser(currentUid: string): Promise<Syn
       last_sync_at: syncedAt,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = syncFailureMessage(error, "Salla customer sync failed.");
     await writeIntegration(currentUid, {
+      status: statusAfterSyncFailure(error),
       last_customer_sync_at: syncedAt,
       last_customer_sync_status: "failed",
       last_customer_sync_count: imported + updated,
@@ -1456,12 +1827,15 @@ export async function syncAllLinkedSallaIntegrations() {
   if (!configured()) return { checked: 0, synced: 0, failed: 0 };
   if (usingSupabaseAdapter()) {
     const store = await readLocalIntegrationStore();
-    const docs = Object.values(store).filter((item) => item?.status === "connected" && item?.createdBy);
+    // The JSON key is the authoritative owner identity. Older backups contain
+    // records whose embedded createdBy drifted during an owner migration; using
+    // that stale field makes the cron read a different (often error) record.
+    const docs = Object.entries(store).filter(([, item]) => item?.status === "connected");
     let synced = 0;
     let failed = 0;
-    for (const item of docs) {
+    for (const [ownerUid] of docs) {
       try {
-        await syncSallaStoreForUser(String(item.createdBy));
+        await syncSallaStoreForUser(ownerUid);
         synced += 1;
       } catch {
         failed += 1;
@@ -1491,3 +1865,22 @@ export async function syncAllLinkedSallaIntegrations() {
 
   return { checked: snap.docs.length, synced, failed };
 }
+
+/** Internal, side-effect-free seams used by the Salla regression tests. */
+export const __sallaTestables = {
+  DEFAULT_SALLA_REQUEST_TIMEOUT_MS,
+  authorizedSallaGet,
+  ensureFreshAccessToken,
+  extractMerchantProfile,
+  isTransientSallaError,
+  normalizeStorefrontUrl,
+  pageSize,
+  readLocalIntegrationStore,
+  requestSallaJson,
+  statusAfterSyncFailure,
+  writeIntegration,
+  resetLocks() {
+    refreshLocks.clear();
+    localIntegrationWriteLock = Promise.resolve();
+  },
+};
