@@ -7,6 +7,7 @@ import {
   LogIn,
   LogOut,
   Menu,
+  Megaphone,
   MessageCircle,
   Package,
   PhoneCall,
@@ -44,6 +45,7 @@ import { AdminUsersPage } from "./pages/AdminUsers";
 import { InvoicesPage } from "./pages/Invoices";
 import { QuotesPage } from "./pages/Quotes";
 import { WhatsAppConsole } from "./pages/WhatsAppConsole";
+import { CampaignsPage } from "./pages/Campaigns";
 import { ReminderDashboard } from "./components/ReminderDashboard";
 import Dashboard from "./pages/Dashboard";
 import CustomersPage from "./pages/Customers";
@@ -353,6 +355,7 @@ export default function App() {
     { id: "messages" as Page, label: "واتساب والسجل", icon: MessageCircle },
     ...(isManagerOrAdmin
       ? [
+          { id: "campaigns" as Page, label: "الحملات", icon: Megaphone },
           { id: "callSystem" as Page, label: "نظام المكالمات", icon: PhoneCall },
           { id: "adminUsers" as Page, label: "إدارة المستخدمين", icon: UserRoundCog },
         ]
@@ -381,6 +384,7 @@ export default function App() {
     care: <CustomerCarePage notify={notify} refreshStats={stats.refresh} />,
     technicians: <TechniciansPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     messages: <WhatsAppConsole notify={notify} />,
+    campaigns: isManagerOrAdmin ? <CampaignsPage notify={notify} /> : <AccessDenied />,
     callSystem: isManagerOrAdmin ? <CallSystemPage notify={notify} /> : <AccessDenied />,
     settings: <SettingsPage notify={notify} />,
     adminUsers: isManagerOrAdmin

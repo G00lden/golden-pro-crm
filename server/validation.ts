@@ -78,6 +78,38 @@ export const whatsappConversationQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 }).passthrough();
 
+const campaignTemplateSchema = z.literal('general_reminder');
+
+export const communicationPreferenceSchema = z.object({
+  phone: z.string().min(1).max(32),
+  channel: z.enum(['whatsapp', 'sms']).optional().default('whatsapp'),
+  status: z.enum(['granted', 'withdrawn']),
+  source: z.string().min(1).max(100).optional().default('manual_admin'),
+  evidence: z.string().min(1, 'Consent evidence is required').max(1000),
+  lift_suppression: z.boolean().optional().default(false),
+});
+
+export const communicationCampaignSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  template_name: campaignTemplateSchema,
+  audience_filter: z.object({
+    allCustomers: z.boolean().optional(),
+    city: z.string().trim().min(1).max(160).optional(),
+    source: z.string().trim().min(1).max(80).optional(),
+    customerIds: z.array(z.string().min(1).max(160)).max(1000).optional(),
+  }).refine(
+    (value) => Boolean(value.allCustomers || value.city || value.source || value.customerIds?.length),
+    'At least one audience criterion is required',
+  ),
+  template_vars: z.record(z.string().max(80), z.union([z.string().max(2000), z.number()])).optional(),
+  rate_limit_per_minute: z.coerce.number().int().min(1).max(120).optional(),
+  frequency_cap_days: z.coerce.number().int().min(1).max(90).optional(),
+});
+
+export const communicationCampaignLaunchSchema = z.object({
+  scheduled_at: z.string().datetime({ offset: true }).optional().nullable(),
+});
+
 export const whatsappWebhookVerifyQuerySchema = z.object({
   'hub.mode': z.string().max(80).optional(),
   'hub.verify_token': z.string().max(4096).optional(),

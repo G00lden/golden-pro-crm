@@ -14,6 +14,8 @@ const files = [
   "server/communicationStatus.test.ts",
   "server/communicationJobs.test.ts",
   "server/communicationEvents.test.ts",
+  "server/communicationPreferences.test.ts",
+  "server/communicationCampaigns.test.ts",
   "server/whatsappTemplates.test.ts",
   "server/whatsappConnection.test.ts",
   "server/telephony/unifonicAdapter.test.ts",

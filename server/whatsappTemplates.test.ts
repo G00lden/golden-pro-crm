@@ -15,3 +15,9 @@ test("cloud parameters follow placeholder order instead of sending one opaque bo
   assert.equal(payload.isFreeform, false);
   assert.deepEqual(payload.parameters?.map((item) => item.text), ["Breexe Pro", "المبيعات", "أحمد"]);
 });
+
+test("campaign reminder maps its message into the approved Cloud placeholder", () => {
+  const payload = templateToCloudParams("general_reminder", { message: "عرض خاص" });
+  assert.equal(payload.isFreeform, false);
+  assert.deepEqual(payload.parameters, [{ type: "text", text: "عرض خاص" }]);
+});

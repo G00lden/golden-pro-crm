@@ -120,7 +120,8 @@ export function cloudTemplateEnvKey(name: TemplateName): string {
 /**
  * Returns the WhatsApp Cloud API parameter payload for a template message.
  * Cloud API templates are pre-approved by Meta; for the freeform template
- * `general_reminder` we instead return a plain text body.
+ * `general_reminder` maps its single `{message}` variable to one approved
+ * Cloud-template body placeholder; WhatsApp Web still renders it as text.
  */
 export function templateToCloudParams(name: TemplateName, vars: RenderVars): {
   isFreeform: boolean;
@@ -130,9 +131,6 @@ export function templateToCloudParams(name: TemplateName, vars: RenderVars): {
 } {
   const merged: RenderVars = { company_name: DEFAULT_COMPANY, ...vars };
   const body = renderTemplate(name, merged);
-  if (name === "general_reminder") {
-    return { isFreeform: true, body };
-  }
   return {
     isFreeform: false,
     body,

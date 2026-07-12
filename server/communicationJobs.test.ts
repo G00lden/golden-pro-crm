@@ -13,6 +13,7 @@ function memoryStore() {
       status TEXT NOT NULL, attempts INTEGER NOT NULL, max_attempts INTEGER NOT NULL,
       available_at TEXT NOT NULL, lease_until TEXT, last_error TEXT,
       provider_message_id TEXT, expires_at TEXT, sent_at TEXT,
+      campaign_id TEXT, campaign_recipient_id TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
       UNIQUE(owner_uid, event_key)
     );
@@ -71,5 +72,25 @@ test("queue visibility is isolated by owner and exposes actionable totals", () =
     attention: 0,
     total: 1,
   });
+  database.close();
+});
+
+test("campaign jobs preserve campaign linkage and can be deferred without spending an attempt", () => {
+  const { database, store } = memoryStore();
+  const job = store.enqueue({
+    ownerUid: "o1",
+    eventKey: "campaign:c1:966501234567",
+    recipientPhone: "0501234567",
+    templateName: "general_reminder",
+    campaignId: "c1",
+    campaignRecipientId: "r1",
+  });
+  assert.equal(job.campaign_id, "c1");
+  assert.equal(job.campaign_recipient_id, "r1");
+  const claimed = store.claimNext();
+  assert.equal(claimed?.attempts, 1);
+  const deferred = store.defer(job.id, 60_000, "campaign_paused");
+  assert.equal(deferred?.status, "retry");
+  assert.equal(deferred?.attempts, 0);
   database.close();
 });

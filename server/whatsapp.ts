@@ -9,6 +9,7 @@ import { decideOutbound, dryRunSendResult, outboundSafetyStatus, type OutboundSe
 import { cloudTemplateEnvKey, renderTemplate, templateToCloudParams, type RenderVars, type TemplateName } from "./whatsappTemplates";
 import { normalizePhoneDigits, requirePhoneDigits } from "../shared/phone";
 import { advanceMessageStatus } from "./communicationStatus";
+import { communicationCampaignStore } from "./communicationCampaigns";
 
 export type WhatsAppConnectionStatus =
   | "disconnected"
@@ -726,6 +727,7 @@ export function updateWhatsAppStatus(messageId: string, status: string, extras: 
     nowIsoMsg(),
     row.id,
   );
+  communicationCampaignStore.updateDeliveryStatus(messageId, nextStatus);
   return true;
 }
 

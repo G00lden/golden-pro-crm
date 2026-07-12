@@ -8,7 +8,7 @@ import {
   recordWhatsAppMessage,
   updateWhatsAppStatus,
 } from "./whatsapp";
-import { listTemplateNames, renderTemplate, type TemplateName } from "./whatsappTemplates";
+import { cloudTemplateEnvKey, listTemplateNames, renderTemplate, type TemplateName } from "./whatsappTemplates";
 import {
   handleWebhook as handleWhatsAppWebhook,
   verifyWebhook as verifyWhatsAppWebhook,
@@ -24,12 +24,17 @@ import {
   whatsappTemplateSendSchema,
   whatsappWebhookBodySchema,
   whatsappWebhookVerifyQuerySchema,
+  communicationPreferenceSchema,
+  communicationCampaignSchema,
+  communicationCampaignLaunchSchema,
 } from "./validation";
 import { appendFileSync } from "fs";
 import path from "path";
 import type { AuthedRequest } from "./auth";
 import { logError, logEvent, redactValue } from "./logger";
 import { communicationJobStore } from "./communicationJobs";
+import { communicationPreferenceStore } from "./communicationPreferences";
+import { communicationCampaignStore } from "./communicationCampaigns";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -70,6 +75,20 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
     return;
   }
   res.status(403).json({ error: "Administrator privileges are required for this action." });
+}
+
+function requireCampaignManager(req: Request, res: Response, next: NextFunction) {
+  const allow = adminUids();
+  const user = (req as AuthedRequest).user;
+  if (!user?.uid) {
+    res.status(401).json({ error: "Authentication required." });
+    return;
+  }
+  if (user.role === "admin" || user.role === "manager" || allow.includes(user.uid)) {
+    next();
+    return;
+  }
+  res.status(403).json({ error: "Manager privileges are required for campaign operations." });
 }
 
 /**
@@ -411,4 +430,134 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
       });
     }),
   );
+
+  app.get("/api/whatsapp/suppressions", requireCampaignManager, (req, res) => {
+    const ownerUid = options.whatsappOwnerUid();
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit || 100)));
+    res.json({ suppressions: communicationPreferenceStore.listSuppressions(ownerUid, limit) });
+  });
+
+  app.put(
+    "/api/whatsapp/preferences",
+    requireCampaignManager,
+    validate(communicationPreferenceSchema),
+    (req, res) => {
+      const ownerUid = options.whatsappOwnerUid();
+      const actorSource = `manual_admin:${(req as AuthedRequest).user.uid}`;
+      const body = req.body as {
+        phone: string;
+        channel: "whatsapp" | "sms";
+        status: "granted" | "withdrawn";
+        source: string;
+        evidence: string;
+        lift_suppression: boolean;
+      };
+      if (body.status === "withdrawn") {
+        communicationPreferenceStore.suppress({
+          ownerUid,
+          phone: body.phone,
+          channel: body.channel,
+          reason: "manual_withdrawal",
+          source: actorSource,
+          evidence: body.evidence,
+        });
+      } else {
+        if (body.lift_suppression) {
+          communicationPreferenceStore.liftSuppression(ownerUid, body.phone, body.channel);
+        }
+        communicationPreferenceStore.setPreference({
+          ownerUid,
+          phone: body.phone,
+          channel: body.channel,
+          status: "granted",
+          source: actorSource,
+          evidence: body.evidence,
+        });
+      }
+      res.json({
+        preference: communicationPreferenceStore.getPreference(ownerUid, body.phone, body.channel),
+        eligibility: communicationPreferenceStore.marketingEligibility(ownerUid, body.phone, body.channel),
+      });
+    },
+  );
+
+  app.get("/api/whatsapp/campaigns", requireCampaignManager, (req, res) => {
+    const ownerUid = options.whatsappOwnerUid();
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit || 100)));
+    res.json({ campaigns: communicationCampaignStore.list(ownerUid, limit) });
+  });
+
+  app.post(
+    "/api/whatsapp/campaigns",
+    requireCampaignManager,
+    validate(communicationCampaignSchema),
+    (req, res) => {
+      const user = (req as AuthedRequest).user;
+      const body = req.body as {
+        name: string;
+        template_name: TemplateName;
+        audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+        template_vars?: Record<string, string | number>;
+        rate_limit_per_minute?: number;
+        frequency_cap_days?: number;
+      };
+      const campaign = communicationCampaignStore.create({
+        ownerUid: options.whatsappOwnerUid(),
+        name: body.name,
+        templateName: body.template_name,
+        audienceFilter: body.audience_filter,
+        templateVars: body.template_vars,
+        rateLimitPerMinute: body.rate_limit_per_minute,
+        frequencyCapDays: body.frequency_cap_days,
+        createdBy: user.uid,
+      });
+      res.status(201).json({ campaign });
+    },
+  );
+
+  app.get("/api/whatsapp/campaigns/:id/preview", requireCampaignManager, (req, res) => {
+    const preview = communicationCampaignStore.preview(options.whatsappOwnerUid(), req.params.id);
+    if (!preview) throw httpError(404, "Campaign not found.");
+    res.json(preview);
+  });
+
+  app.post(
+    "/api/whatsapp/campaigns/:id/launch",
+    requireCampaignManager,
+    validate(communicationCampaignLaunchSchema),
+    (req, res) => {
+      const ownerUid = options.whatsappOwnerUid();
+      const campaign = communicationCampaignStore.get(ownerUid, req.params.id);
+      if (!campaign) throw httpError(404, "Campaign not found.");
+      const preview = communicationCampaignStore.preview(ownerUid, campaign.id);
+      if (!preview?.eligible) throw httpError(409, "Campaign has no eligible recipients with explicit consent.");
+      const providerStatus = whatsappService.getStatus();
+      if (providerStatus.provider !== "cloud_api" || providerStatus.status !== "connected") {
+        throw httpError(409, "Campaign launch requires a verified WhatsApp Cloud API connection.");
+      }
+      if (providerStatus.outbound?.mode !== "production" || !providerStatus.outbound.launchApproved) {
+        throw httpError(409, "Campaign launch requires approved production outbound mode.");
+      }
+      if (providerStatus.provider === "cloud_api") {
+        const envKey = cloudTemplateEnvKey(campaign.template_name);
+        const mapped = process.env[envKey] || (
+          campaign.template_name === "general_reminder"
+            ? process.env.WHATSAPP_CLOUD_TEMPLATE_NAME || process.env.WHATSAPP_TEMPLATE_NAME
+            : ""
+        );
+        if (!mapped) throw httpError(409, `Approved Meta template mapping is missing: ${envKey}`);
+      }
+      const launched = communicationCampaignStore.launch(ownerUid, campaign.id, req.body.scheduled_at);
+      res.json({ campaign: launched });
+    },
+  );
+
+  for (const action of ["pause", "resume", "cancel"] as const) {
+    app.post(`/api/whatsapp/campaigns/:id/${action}`, requireCampaignManager, (req, res) => {
+      const next = action === "pause" ? "paused" : action === "resume" ? "running" : "cancelled";
+      const campaign = communicationCampaignStore.setStatus(options.whatsappOwnerUid(), req.params.id, next);
+      if (!campaign) throw httpError(404, "Campaign not found.");
+      res.json({ campaign });
+    });
+  }
 }

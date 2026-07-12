@@ -23,6 +23,8 @@ export type CommunicationJob = {
   payload: Record<string, unknown>;
   role: string;
   call_id: string | null;
+  campaign_id: string | null;
+  campaign_recipient_id: string | null;
   status: CommunicationJobStatus;
   attempts: number;
   max_attempts: number;
@@ -48,6 +50,9 @@ export type EnqueueCommunicationJob = {
   channel?: string;
   maxAttempts?: number;
   expiresInMinutes?: number;
+  availableAt?: string;
+  campaignId?: string;
+  campaignRecipientId?: string;
 };
 
 function nowIso() {
@@ -97,9 +102,9 @@ export function createCommunicationJobStore(database: Database.Database) {
     database.prepare(
       `INSERT OR IGNORE INTO communication_jobs (
         id, owner_uid, event_key, kind, channel, recipient_phone, template_name,
-        payload, role, call_id, status, attempts, max_attempts, available_at,
-        expires_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?)`,
+        payload, role, call_id, campaign_id, campaign_recipient_id, status,
+        attempts, max_attempts, available_at, expires_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?)`,
     ).run(
       jobId,
       input.ownerUid,
@@ -111,8 +116,10 @@ export function createCommunicationJobStore(database: Database.Database) {
       JSON.stringify(input.payload || {}),
       input.role || "customer",
       input.callId || null,
+      input.campaignId || null,
+      input.campaignRecipientId || null,
       Math.max(1, Math.min(10, input.maxAttempts ?? 5)),
-      createdAt,
+      input.availableAt || createdAt,
       expiresAt,
       createdAt,
       createdAt,
@@ -181,6 +188,17 @@ export function createCommunicationJobStore(database: Database.Database) {
     return get(jobId);
   };
 
+  const defer = (jobId: string, delayMs: number, reason: string) => {
+    const availableAt = new Date(Date.now() + Math.max(1_000, delayMs)).toISOString();
+    database.prepare(
+      `UPDATE communication_jobs SET status = 'retry', available_at = ?,
+       attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+       last_error = ?, lease_until = NULL, updated_at = ?
+       WHERE id = ? AND status = 'processing'`,
+    ).run(availableAt, reason.slice(0, 2000), nowIso(), jobId);
+    return get(jobId);
+  };
+
   const listRecent = (ownerUid: string, limit = 50): CommunicationJob[] => {
     const rows = database.prepare(
       `SELECT * FROM communication_jobs
@@ -214,7 +232,7 @@ export function createCommunicationJobStore(database: Database.Database) {
     };
   };
 
-  return { enqueue, get, claimNext, markSent, markBlocked, markFailed, listRecent, summary };
+  return { enqueue, get, claimNext, markSent, markBlocked, markFailed, defer, listRecent, summary };
 }
 
 export const communicationJobStore = createCommunicationJobStore(db);

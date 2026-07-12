@@ -35,6 +35,7 @@ import {
 } from "./smsTemplates";
 import { logError, logEvent } from "./logger";
 import { normalizePhoneDigits } from "../shared/phone";
+import { captureInboundOptOut } from "./communicationPreferences";
 
 function newId(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 18)}`;
@@ -211,6 +212,18 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
   const from = normalizePhoneDigits(event.from);
 
   if (!from) return { handled: false, reason: "missing_from" };
+
+  if (type === "sms_in") {
+    const source = String(event.to || "").startsWith("whatsapp_") ? String(event.to) : "sms_gateway";
+    const optOut = captureInboundOptOut({
+      ownerUid,
+      phone: from,
+      text: String(event.text || ""),
+      channel: source === "sms_gateway" ? "sms" : "whatsapp",
+      source,
+    });
+    if (optOut) return optOut;
+  }
 
   // ── Missed / unanswered call ──
   if (["missed_call", "call_missed", "no_answer", "unanswered", "call_ended_unanswered"].includes(type)) {

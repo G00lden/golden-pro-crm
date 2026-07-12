@@ -3166,6 +3166,54 @@ export type CommunicationQueueSummary = Record<CommunicationJob["status"], numbe
   total: number;
 };
 
+export type CampaignStats = {
+  total: number;
+  eligible: number;
+  queued: number;
+  processing: number;
+  sent: number;
+  delivered: number;
+  read: number;
+  retry: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  cancelled: number;
+};
+
+export type CommunicationCampaign = {
+  id: string;
+  name: string;
+  template_name: string;
+  status: "draft" | "scheduled" | "running" | "paused" | "completed" | "cancelled";
+  audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+  template_vars: Record<string, string | number>;
+  scheduled_at?: string | null;
+  rate_limit_per_minute: number;
+  frequency_cap_days: number;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  stats: CampaignStats;
+};
+
+export type CampaignPreview = {
+  campaign: CommunicationCampaign;
+  audience: number;
+  eligible: number;
+  excluded: Record<string, number>;
+  sample: Array<{ customer_id: string; name: string; phone: string; eligible: boolean; reason?: string | null }>;
+};
+
+export type CommunicationSuppression = {
+  id: string;
+  phone: string;
+  channel: "whatsapp" | "sms";
+  reason: string;
+  source: string;
+  created_at: string;
+};
+
 export const listRecentWhatsAppMessages = (limit = 50) =>
   apiFetch<{ count: number; items: WhatsAppMessage[] }>(`/api/whatsapp/messages?limit=${limit}`);
 
@@ -3179,6 +3227,50 @@ export const getWhatsAppTemplates = () =>
 
 export const getWhatsAppJobs = (limit = 50) =>
   apiFetch<{ summary: CommunicationQueueSummary; jobs: CommunicationJob[] }>(`/api/whatsapp/jobs?limit=${limit}`);
+
+export const listCommunicationCampaigns = (limit = 100) =>
+  apiFetch<{ campaigns: CommunicationCampaign[] }>(`/api/whatsapp/campaigns?limit=${limit}`);
+
+export const createCommunicationCampaign = (data: {
+  name: string;
+  template_name: string;
+  audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+  template_vars?: Record<string, string | number>;
+  rate_limit_per_minute?: number;
+  frequency_cap_days?: number;
+}) => apiFetch<{ campaign: CommunicationCampaign }>("/api/whatsapp/campaigns", {
+  method: "POST",
+  body: JSON.stringify(data),
+});
+
+export const previewCommunicationCampaign = (id: string) =>
+  apiFetch<CampaignPreview>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/preview`);
+
+export const launchCommunicationCampaign = (id: string, scheduledAt?: string | null) =>
+  apiFetch<{ campaign: CommunicationCampaign }>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/launch`, {
+    method: "POST",
+    body: JSON.stringify({ scheduled_at: scheduledAt || null }),
+  });
+
+export const changeCommunicationCampaign = (id: string, action: "pause" | "resume" | "cancel") =>
+  apiFetch<{ campaign: CommunicationCampaign }>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  });
+
+export const listCommunicationSuppressions = (limit = 100) =>
+  apiFetch<{ suppressions: CommunicationSuppression[] }>(`/api/whatsapp/suppressions?limit=${limit}`);
+
+export const updateCommunicationPreference = (data: {
+  phone: string;
+  channel?: "whatsapp" | "sms";
+  status: "granted" | "withdrawn";
+  source?: string;
+  evidence: string;
+  lift_suppression?: boolean;
+}) => apiFetch<{ preference: Record<string, unknown>; eligibility: { eligible: boolean; reason?: string } }>(
+  "/api/whatsapp/preferences",
+  { method: "PUT", body: JSON.stringify(data) },
+);
 
 export const sendWhatsAppTemplateMessage = (data: {
   phone: string;

@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10200;
+const TARGET_SCHEMA_VERSION = 10300;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -701,6 +701,84 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_communication_jobs_owner
     ON communication_jobs(owner_uid, created_at DESC);
 
+  -- Explicit marketing consent. Absence of a granted row means the recipient
+  -- is not eligible for campaign messages (fail closed).
+  CREATE TABLE IF NOT EXISTS communication_preferences (
+    owner_uid TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    purpose TEXT NOT NULL DEFAULT 'marketing',
+    status TEXT NOT NULL DEFAULT 'unknown',
+    source TEXT NOT NULL DEFAULT 'manual',
+    evidence TEXT NOT NULL DEFAULT '',
+    captured_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY(owner_uid, phone, channel, purpose)
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_preferences_status
+    ON communication_preferences(owner_uid, channel, purpose, status, updated_at DESC);
+
+  -- Suppression is independent of consent: once an opt-out is active it wins
+  -- over every audience rule and is rechecked immediately before send.
+  CREATE TABLE IF NOT EXISTS communication_suppressions (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    reason TEXT NOT NULL DEFAULT 'opt_out',
+    source TEXT NOT NULL DEFAULT 'inbound',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    lifted_at TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_communication_suppressions_active
+    ON communication_suppressions(owner_uid, phone, channel) WHERE active = 1;
+
+  CREATE TABLE IF NOT EXISTS communication_campaigns (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    name TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    template_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    audience_filter TEXT NOT NULL DEFAULT '{}',
+    template_vars TEXT NOT NULL DEFAULT '{}',
+    scheduled_at TEXT,
+    rate_limit_per_minute INTEGER NOT NULL DEFAULT 30,
+    frequency_cap_days INTEGER NOT NULL DEFAULT 7,
+    created_by TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_campaigns_owner
+    ON communication_campaigns(owner_uid, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_communication_campaigns_due
+    ON communication_campaigns(status, scheduled_at);
+
+  CREATE TABLE IF NOT EXISTS communication_campaign_recipients (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL,
+    owner_uid TEXT NOT NULL,
+    customer_id TEXT,
+    phone TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'eligible',
+    skip_reason TEXT,
+    job_id TEXT,
+    provider_message_id TEXT,
+    sent_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(campaign_id, phone)
+  );
+  CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign
+    ON communication_campaign_recipients(campaign_id, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_campaign_recipients_owner_phone
+    ON communication_campaign_recipients(owner_uid, phone, sent_at DESC);
+
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
@@ -735,6 +813,16 @@ for (const col of [
     db.exec(`ALTER TABLE bookings ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
+for (const col of [
+  ["campaign_id", "TEXT"],
+  ["campaign_recipient_id", "TEXT"],
+] as const) {
+  if (!hasColumn("communication_jobs", col[0])) {
+    db.exec(`ALTER TABLE communication_jobs ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_communication_jobs_campaign ON communication_jobs(campaign_id, status, created_at)");
 
 for (const col of [
   ["owner_uid", "TEXT"],
@@ -909,6 +997,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10007, '1.0.7');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10100, '1.1.0');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10200, '1.2.0');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10300, '1.3.0');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

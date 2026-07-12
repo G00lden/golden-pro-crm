@@ -5,6 +5,7 @@ import { listTemplateNames, type TemplateName } from "./whatsappTemplates";
 import { sendWhatsAppTemplate } from "./whatsapp";
 import { logError, logEvent } from "./logger";
 import type { RenderVars } from "./whatsappTemplates";
+import { communicationCampaignStore } from "./communicationCampaigns";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -40,8 +41,20 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
   const job = communicationJobStore.claimNext();
   if (!job) return null;
   updateCall(job, "processing");
+  if (job.campaign_id) communicationCampaignStore.updateRecipient(job, "processing");
 
   try {
+    const guard = communicationCampaignStore.guardJob(job);
+    if (guard.action === "defer") {
+      const deferred = communicationJobStore.defer(job.id, 60_000, guard.reason);
+      if (deferred) communicationCampaignStore.updateRecipient(deferred, "queued", guard.reason);
+      return deferred;
+    }
+    if (guard.action === "block") {
+      const blocked = communicationJobStore.markBlocked(job.id, guard.reason);
+      if (blocked) communicationCampaignStore.updateRecipient(blocked, "blocked", guard.reason);
+      return blocked;
+    }
     if (job.kind !== "whatsapp_template" || !isTemplateName(job.template_name)) {
       throw new Error(`Unsupported communication job: ${job.kind}/${job.template_name || "missing-template"}`);
     }
@@ -55,15 +68,18 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     if (isDryRunSendResult(result)) {
       const blocked = communicationJobStore.markBlocked(job.id, result.reason);
       if (blocked) updateCall(blocked, "blocked");
+      if (blocked) communicationCampaignStore.updateRecipient(blocked, "blocked", result.reason);
       return blocked;
     }
     const sent = communicationJobStore.markSent(job.id, result.messageId);
     if (sent) updateCall(sent, "sent", true);
+    if (sent) communicationCampaignStore.updateRecipient(sent, "sent", null, result.messageId);
     logEvent("info", "communication.job.sent", { jobId: job.id, kind: job.kind, role: job.role });
     return sent;
   } catch (error) {
     const failed = communicationJobStore.markFailed(job.id, error);
     if (failed) updateCall(failed, failed.status);
+    if (failed) communicationCampaignStore.updateRecipient(failed, failed.status, failed.last_error);
     logError("communication.job.failed", error, { jobId: job.id, attempts: job.attempts });
     return failed;
   }
@@ -76,9 +92,12 @@ export function startCommunicationWorker() {
     if (running) return;
     running = true;
     try {
+      communicationCampaignStore.activateDue();
       for (let i = 0; i < 10; i += 1) {
         if (!await processNextCommunicationJob()) break;
       }
+    } catch (error) {
+      logError("communication.worker.tick_failed", error);
     } finally {
       running = false;
     }

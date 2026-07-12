@@ -37,6 +37,7 @@ export type Page =
   | "care"
   | "technicians"
   | "messages"
+  | "campaigns"
   | "callSystem"
   | "settings"
   | "adminUsers";
