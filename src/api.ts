@@ -19,6 +19,7 @@ import {
   getCurrentAppUser,
   buildLocalToken,
 } from "./firebase";
+import { serverDataEnabled } from "./dataProvider";
 import {
   calculateDocumentTotals,
   type DiscountMode,
@@ -1034,10 +1035,6 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   return body as T;
 }
-
-const serverDataEnabled = () =>
-  ["sqlite", "supabase"].includes(import.meta.env.VITE_DATA_PROVIDER || "") ||
-  ["sqlite", "supabase"].includes(import.meta.env.VITE_DB_PROVIDER || "");
 
 export const logout = firebaseLogout;
 export const isAuthenticated = () => !!getCurrentAppUser();

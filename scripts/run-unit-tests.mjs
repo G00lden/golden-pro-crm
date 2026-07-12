@@ -10,6 +10,8 @@ const files = [
   "server/localAuthPolicy.test.ts",
   "server/crmValidation.test.ts",
   "server/userValidation.test.ts",
+  "server/repositories/ownedRepository.test.ts",
+  "src/dataProvider.test.ts",
 ];
 
 const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...files], {

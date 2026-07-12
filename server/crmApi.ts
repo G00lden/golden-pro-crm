@@ -37,6 +37,20 @@ import {
   validateInstallments,
   type DiscountMode,
 } from "../shared/financial";
+import {
+  createOwnedRepository,
+  type FirestoreLikeStore,
+} from "./repositories/ownedRepository";
+
+const ownedRepository = createOwnedRepository(adminDb as unknown as FirestoreLikeStore);
+const {
+  list: listOwned,
+  get: getOwned,
+  create: createOwned,
+  update: updateOwned,
+  delete: deleteOwned,
+  findBlockingReferences,
+} = ownedRepository;
 
 type DocSnapshot = {
   id: string;
@@ -88,85 +102,6 @@ function clean<T extends Record<string, unknown>>(value: T) {
 
 function docData(doc: DocSnapshot): Record<string, any> & { id: string } {
   return { id: doc.id, ...doc.data() };
-}
-
-async function listOwned(table: string, uid: string, orderField?: string, limit = 250): Promise<Array<Record<string, any> & { id: string }>> {
-  let ref = adminDb.collection(table).where("createdBy", "==", uid);
-  if (orderField) ref = ref.orderBy(orderField);
-  const snap = await ref.limit(limit).get();
-  return snap.docs.map((doc: DocSnapshot) => docData(doc));
-}
-
-async function getOwned(table: string, id: string, uid: string) {
-  const snap = await adminDb.collection(table).doc(id).get();
-  if (!snap.exists) return null;
-  const data = docData(snap);
-  // SQLite stores ownership in `owner_uid`; the Firestore code path uses `createdBy`.
-  // Accept either so the adapter abstraction does not require reverse-mapping.
-  const ownerKey = (data as Record<string, unknown>).createdBy ?? (data as Record<string, unknown>).owner_uid;
-  return ownerKey === uid ? data : null;
-}
-
-async function createOwned(table: string, uid: string, data: Record<string, unknown>) {
-  const ref = adminDb.collection(table).doc();
-  const now = nowIso();
-  await ref.set(clean({
-    ...data,
-    createdBy: uid,
-    createdAt: data.createdAt || now,
-    updatedAt: now,
-  }));
-  return ref.id;
-}
-
-// Fields a client must never be able to set through an update body. Several PUT
-// endpoints forward req.body straight here, so without this a caller could send
-// createdBy/owner_uid and reassign a record's ownership (mass assignment).
-const PROTECTED_UPDATE_FIELDS = ["createdBy", "owner_uid", "id", "createdAt"] as const;
-
-async function updateOwned(table: string, id: string, uid: string, data: Record<string, unknown>) {
-  const existing = await getOwned(table, id, uid);
-  if (!existing) return false;
-  const safe: Record<string, unknown> = { ...(data || {}) };
-  for (const field of PROTECTED_UPDATE_FIELDS) delete safe[field];
-  await adminDb.collection(table).doc(id).update(clean({ ...safe, updatedAt: nowIso() }));
-  return true;
-}
-
-async function deleteOwned(table: string, id: string, uid: string) {
-  const existing = await getOwned(table, id, uid);
-  if (!existing) return false;
-  await adminDb.collection(table).doc(id).delete();
-  return true;
-}
-
-/** Count the owner's rows in `table` whose `field` equals `value`. */
-async function countReferencing(table: string, field: string, value: string, uid: string): Promise<number> {
-  const snap = await adminDb
-    .collection(table)
-    .where("createdBy", "==", uid)
-    .where(field, "==", value)
-    .get();
-  return snap.size;
-}
-
-/**
- * Reference-integrity guard for hard-deletes. Returns an Arabic description of
- * the records that still point at this entity (so deleting it would orphan
- * their foreign keys), or null when nothing references it. We RESTRICT rather
- * than cascade — cascading a customer/product delete would silently destroy the
- * linked installations and bookings.
- */
-async function findBlockingReferences(
-  uid: string,
-  checks: Array<{ table: string; field: string; value: string; label: string }>,
-): Promise<string | null> {
-  const blockers: string[] = [];
-  for (const c of checks) {
-    const count = await countReferencing(c.table, c.field, c.value, uid);
-    if (count > 0) blockers.push(`${c.label} (${count})`);
-  }
-  return blockers.length ? blockers.join("، ") : null;
 }
 
 async function stats(uid: string) {
