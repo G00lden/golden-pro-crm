@@ -37,7 +37,7 @@ import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
-import { logError } from "./server/logger";
+import { logError, logEvent } from "./server/logger";
 import { getLocalAuthPolicy } from "./server/localAuthPolicy";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
@@ -480,7 +480,7 @@ async function startServer() {
       },
       { timezone: timeZone },
     );
-    console.log(`Reminder cron enabled: ${reminderSchedule} (${timeZone})`);
+    logEvent("info", "reminder_cron_enabled", { schedule: reminderSchedule, timeZone });
   }
 
   if (process.env.SALLA_SYNC_CRON_ENABLED === "true") {
@@ -496,7 +496,7 @@ async function startServer() {
       },
       { timezone: timeZone },
     );
-    console.log(`Salla sync cron enabled: ${sallaSchedule} (${timeZone})`);
+    logEvent("info", "salla_sync_cron_enabled", { schedule: sallaSchedule, timeZone });
   }
 
   // Technician pre-alert cron: scan every 10 minutes for confirmed bookings
@@ -514,7 +514,7 @@ async function startServer() {
       },
       { timezone: timeZone },
     );
-    console.log(`Technician pre-alert cron enabled: ${techSchedule} (${timeZone})`);
+    logEvent("info", "technician_prealert_cron_enabled", { schedule: techSchedule, timeZone });
   }
 
   if (developmentServer) {
@@ -567,7 +567,11 @@ async function startServer() {
   }
 
   app.listen(port, listenHost, () => {
-    console.log(`Golden Pro CRM (${developmentServer ? "development" : "production"}) running on http://${listenHost}:${port}`);
+    logEvent("info", "server_started", {
+      mode: developmentServer ? "development" : "production",
+      host: listenHost,
+      port,
+    });
   });
 }
 
