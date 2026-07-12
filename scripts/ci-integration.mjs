@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,10 +9,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const directory = mkdtempSync(path.join(os.tmpdir(), "breexe-ci-"));
 const port = 3400 + (process.pid % 500);
 const appUrl = `http://127.0.0.1:${port}`;
-const sharedEnv = {
-  ...process.env,
+const serverConfig = {
   PORT: String(port),
-  APP_URL: appUrl,
   DB_PATH: path.join(directory, "ci.db"),
   DATA_PROVIDER: "sqlite",
   DB_PROVIDER: "sqlite",
@@ -24,14 +22,24 @@ const sharedEnv = {
   DISABLE_OUTBOUND: "true",
   DISABLE_HMR: "true",
   NODE_ENV: "development",
-  ENABLE_VITE_DEV_SERVER: "true",
+  ENABLE_VITE_DEV_SERVER: "false",
 };
+const envFile = path.join(directory, ".env.integration");
+writeFileSync(
+  envFile,
+  `${Object.entries(serverConfig).map(([key, value]) => `${key}=${value}`).join("\n")}\n`,
+  "utf8",
+);
 
-// Start the actual server process instead of the npm/start wrapper. On Windows,
-// killing the wrapper could leave the tsx child orphaned after CI completed.
-const server = spawn(process.execPath, ["--import", "tsx", "server.ts"], {
+const sharedEnv = { ...process.env, ...serverConfig, APP_URL: appUrl };
+const serverEnv = { ...process.env, ENV_FILE: envFile };
+for (const key of Object.keys(serverConfig)) delete serverEnv[key];
+
+// Exercise the deployable bundle and ENV_FILE bootstrap, not a development
+// proxy. This also avoids an npm/tsx wrapper that could be orphaned on Windows.
+const server = spawn(process.execPath, ["dist-server/server.mjs"], {
   cwd: root,
-  env: sharedEnv,
+  env: serverEnv,
   stdio: ["ignore", "pipe", "pipe"],
   shell: false,
   windowsHide: true,
@@ -55,6 +63,20 @@ async function waitForServer() {
   throw new Error(`Test server did not become healthy.\n${serverOutput}`);
 }
 
+async function verifyProductionSurface() {
+  for (const pathname of ["/@vite/client", "/src/main.tsx", "/package.json", "/server.ts"]) {
+    const response = await fetch(`${appUrl}${pathname}`);
+    if (response.status !== 404) {
+      throw new Error(`Production source path ${pathname} returned ${response.status}, expected 404.`);
+    }
+  }
+  const versionResponse = await fetch(`${appUrl}/api/version`);
+  const version = await versionResponse.json();
+  if (!versionResponse.ok || version.version !== "1.0.9") {
+    throw new Error(`Production version endpoint is invalid: ${JSON.stringify(version)}`);
+  }
+}
+
 async function run(script) {
   await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script], {
@@ -71,6 +93,7 @@ async function run(script) {
 
 try {
   await waitForServer();
+  await verifyProductionSurface();
   await run("scripts/smoke.mjs");
   await run("scripts/golden-path.mjs");
   console.log(`CI integration passed against ${appUrl}`);

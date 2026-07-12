@@ -1,11 +1,17 @@
 import { accessSync, constants } from "node:fs";
 import { spawn } from "node:child_process";
+import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveServerMode, serverEnvironment } from "./lib/server-mode.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const mode = resolveServerMode(process.argv.slice(2));
+const environment = serverEnvironment(mode);
+const envFile = path.isAbsolute(environment.ENV_FILE)
+  ? environment.ENV_FILE
+  : path.join(root, environment.ENV_FILE);
+dotenv.config({ path: envFile, processEnv: environment, quiet: true });
 
 if (mode === "production") {
   try {
@@ -22,7 +28,7 @@ const serverArgs = mode === "development"
   : [path.join("dist-server", "server.mjs")];
 const child = spawn(process.execPath, serverArgs, {
   cwd: root,
-  env: serverEnvironment(mode),
+  env: environment,
   stdio: "inherit",
   windowsHide: true,
 });

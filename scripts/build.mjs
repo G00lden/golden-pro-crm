@@ -3,7 +3,7 @@ import { build as buildFrontend } from "vite";
 
 await buildFrontend();
 await bundleServer({
-  entryPoints: ["server.ts"],
+  entryPoints: ["server/bootstrap.ts"],
   outfile: "dist-server/server.mjs",
   bundle: true,
   format: "esm",
