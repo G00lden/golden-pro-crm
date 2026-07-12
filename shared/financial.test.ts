@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  calculateDocumentLineAmounts,
   calculateDocumentTotals,
   calculateInstallmentAmounts,
   calculateLineAmounts,
@@ -87,4 +88,45 @@ test("installments must total 100 and their rounded amounts preserve the total",
   assert.deepEqual(amounts, [333.3, 333.3, 333.4]);
   assert.equal(amounts.reduce((sum, amount) => sum + amount, 0), 1000);
   assert.equal(validateInstallments([{ percent: 70 }, { percent: 20 }]).valid, false);
+});
+
+test("invoice line VAT reconciles with the discounted document header", () => {
+  const result = calculateDocumentLineAmounts({
+    lines: [
+      { total: 100, vat_excluded: true },
+      { total: 100, vat_excluded: true },
+    ],
+    discountValue: 20,
+    discountMode: "fixed",
+    vatPercent: 15,
+  });
+
+  assert.equal(result.lines.reduce((sum, line) => sum + line.discount, 0), 20);
+  assert.equal(result.lines.reduce((sum, line) => sum + line.taxableAmount, 0), 180);
+  assert.equal(result.lines.reduce((sum, line) => sum + line.vat, 0), 27);
+  assert.equal(result.lines.reduce((sum, line) => sum + line.gross, 0), 207);
+  assert.deepEqual(result.lines[0], {
+    enteredTotal: 100,
+    netBeforeDiscount: 100,
+    discount: 10,
+    taxableAmount: 90,
+    vat: 13.5,
+    gross: 103.5,
+  });
+});
+
+test("halala allocation stays exact for uneven invoice lines", () => {
+  const result = calculateDocumentLineAmounts({
+    lines: [
+      { total: 100, vat_excluded: true },
+      { total: 50, vat_excluded: true },
+    ],
+    discountValue: 10,
+    vatPercent: 15,
+  });
+
+  assert.equal(result.lines.reduce((sum, line) => sum + line.discount, 0), 10);
+  assert.equal(result.lines.reduce((sum, line) => sum + line.taxableAmount, 0), 140);
+  assert.equal(result.lines.reduce((sum, line) => sum + line.vat, 0), 21);
+  assert.equal(result.lines.reduce((sum, line) => sum + line.gross, 0), 161);
 });

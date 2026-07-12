@@ -7,6 +7,7 @@ const files = [
   "scripts/user-identity.test.mjs",
   "shared/date.test.ts",
   "shared/financial.test.ts",
+  "shared/zatca.test.ts",
   "server/localAuthPolicy.test.ts",
   "server/crmValidation.test.ts",
   "server/userValidation.test.ts",

@@ -24,8 +24,10 @@ import {
   calculateDocumentTotals,
   type DiscountMode,
 } from "../shared/financial";
+import { resolveInvoiceTaxType, type InvoiceTaxType } from "../shared/zatca";
 
 export type { DiscountMode } from "../shared/financial";
+export type { InvoiceTaxType } from "../shared/zatca";
 import { addCalendarMonths } from "../shared/date";
 
 export type Customer = {
@@ -569,6 +571,7 @@ export type Invoice = {
   customer_city?: string;
   customer_vat?: string;
   title?: string;
+  invoice_type?: InvoiceTaxType;
   status: InvoiceStatus;
   issue_date: string;
   due_date?: string | null;
@@ -576,6 +579,8 @@ export type Invoice = {
   payment_method?: string;
   subtotal: number;
   discount: number;
+  discount_mode?: DiscountMode;
+  discount_value?: number;
   vat_percent: number;  // 15 for ZATCA standard
   vat_amount: number;
   total_with_vat: number;
@@ -593,9 +598,10 @@ export type Invoice = {
   updatedAt?: string;
 };
 
-export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "subtotal" | "vat_amount" | "total_with_vat" | "total_without_vat" | "createdBy" | "createdAt" | "updatedAt" | "qr_code">> & {
+export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "invoice_type" | "subtotal" | "vat_amount" | "total_with_vat" | "total_without_vat" | "createdBy" | "createdAt" | "updatedAt" | "qr_code">> & {
   customer_name: string;
   items: InvoiceItem[];
+  invoice_type?: InvoiceTaxType | "auto";
 };
 
 export type InvoiceStats = {
@@ -1671,16 +1677,18 @@ function normalizeInvoiceItems(items: InvoiceItem[] = []) {
 // Treat an explicit 0 (zero-rated) as a valid VAT rate. Only an unset value
 // (undefined / null / "") or a non-numeric value falls back to the default —
 // `0 || 15` would otherwise turn a 0% invoice into 15%.
-function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15) {
+function invoiceTotals(items: InvoiceItem[], discountValue = 0, vat_percent = 15, discountMode: DiscountMode = "fixed") {
   const totals = calculateDocumentTotals({
     lines: items,
-    discountValue: discount,
-    discountMode: "fixed",
+    discountValue,
+    discountMode,
     vatPercent: vat_percent,
   });
   return {
     subtotal: totals.subtotal,
     discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
     vat_percent: totals.vatPercent,
     vat_amount: totals.vatAmount,
     total_with_vat: totals.total,
@@ -1715,7 +1723,9 @@ function invoiceStats(invoices: Invoice[]): InvoiceStats {
 
 function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings, existing?: Invoice): Invoice {
   const items = normalizeInvoiceItems(data.items);
-  const totals = invoiceTotals(items, data.discount, data.vat_percent);
+  const discountMode: DiscountMode = (data.discount_mode ?? existing?.discount_mode) === "percent" ? "percent" : "fixed";
+  const discountValue = data.discount_value ?? data.discount ?? existing?.discount_value ?? existing?.discount ?? 0;
+  const totals = invoiceTotals(items, discountValue, data.vat_percent ?? existing?.vat_percent, discountMode);
   const now = nowIso();
   return {
     id: existing?.id || localId("inv"),
@@ -1727,6 +1737,11 @@ function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings
     customer_city: String(data.customer_city || existing?.customer_city || "").trim(),
     customer_vat: String(data.customer_vat || existing?.customer_vat || "").trim(),
     title: String(data.title || existing?.title || "").trim(),
+    invoice_type: resolveInvoiceTaxType({
+      requested: data.invoice_type ?? existing?.invoice_type,
+      buyerVat: data.customer_vat ?? existing?.customer_vat,
+      taxableAmount: totals.total_without_vat,
+    }),
     status: (data.status || existing?.status || "issued") as InvoiceStatus,
     issue_date: data.issue_date || existing?.issue_date || today(),
     due_date: data.due_date ?? existing?.due_date ?? addDays(today(), 30),
@@ -1831,7 +1846,13 @@ export const updateInvoice = async (id: string, data: InvoiceInput) => {
       seller_name: String(data.seller_name || "").trim(),
       seller_vat_number: String(data.seller_vat_number || "").trim(),
       seller_address: String(data.seller_address || "").trim(),
-      ...invoiceTotals(items, data.discount, data.vat_percent),
+      invoice_type: resolveInvoiceTaxType({
+        requested: data.invoice_type,
+        buyerVat: data.customer_vat,
+        taxableAmount: invoiceTotals(items, data.discount_value ?? data.discount, data.vat_percent, data.discount_mode).total_without_vat,
+      }),
+      customer_vat: String(data.customer_vat || "").trim(),
+      ...invoiceTotals(items, data.discount_value ?? data.discount, data.vat_percent, data.discount_mode),
       updatedAt: nowIso(),
     }),
     OperationType.UPDATE,

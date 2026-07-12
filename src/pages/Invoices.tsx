@@ -21,9 +21,10 @@ import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
 import QRCode from "qrcode";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import * as api from "../api";
-import { calculateDocumentTotals, calculateLineAmounts } from "../../shared/financial";
+import { calculateDocumentLineAmounts, calculateDocumentTotals } from "../../shared/financial";
+import { generateZatcaQrBase64, resolveInvoiceTaxType } from "../../shared/zatca";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -49,11 +50,16 @@ const sellerEnglishName = "Breexe Pro Co.";
 const sellerCrNumber = "7016449519";
 const sellerPhone = "+966533971168";
 
-// نوع الفاتورة حسب الإجمالي شامل الضريبة: مبسطة ≤ 999، ضريبية (عادية) ≥ 1000
-const invoiceKind = (totalWithVat?: number) =>
-  Number(totalWithVat || 0) >= 1000
-    ? { ar: "فاتورة ضريبية", en: "Tax Invoice" }
-    : { ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
+const invoiceKind = (invoice: api.Invoice) => {
+  const type = resolveInvoiceTaxType({
+    requested: invoice.invoice_type,
+    buyerVat: invoice.customer_vat,
+    taxableAmount: invoice.total_without_vat,
+  });
+  return type === "tax"
+    ? { type, ar: "فاتورة ضريبية", en: "Tax Invoice" }
+    : { type, ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
+};
 const invoiceSellerOptions = ["أبو عامر", "أبو سيف"] as const;
 
 const statusLabels: Record<api.InvoiceStatus, string> = {
@@ -101,28 +107,17 @@ function invoiceTimestamp(invoice: api.Invoice): string {
 }
 
 function generateZATCAQR(invoice: api.Invoice): string {
-  const timestamp = invoiceTimestamp(invoice);
-  const total = invoice.total_with_vat.toFixed(2);
-  const vatAmount = invoice.vat_amount.toFixed(2);
-
-  const tlvData: Array<[number, string]> = [
-    [1, invoice.seller_name || sellerEnglishName],
-    [2, invoice.seller_vat_number],
-    [3, timestamp],
-    [4, total],
-    [5, vatAmount],
-  ];
-
-  const encoder = new TextEncoder();
-  const bytes: number[] = [];
-
-  for (const [tag, value] of tlvData) {
-    const valueBytes = Array.from(encoder.encode(String(value)));
-    bytes.push(tag, valueBytes.length);
-    bytes.push(...valueBytes);
+  try {
+    return generateZatcaQrBase64({
+      sellerName: invoice.seller_name || sellerEnglishName,
+      vatNumber: invoice.seller_vat_number,
+      timestamp: invoiceTimestamp(invoice),
+      total: invoice.total_with_vat,
+      vatTotal: invoice.vat_amount,
+    });
+  } catch {
+    return "";
   }
-
-  return btoa(String.fromCharCode(...bytes));
 }
 
 /* ── QR Code component ─────────────────────────────────── */
@@ -132,6 +127,10 @@ function QRCodeDisplay({ data, size = 80 }: { data: string; size?: number }) {
 
   useEffect(() => {
     let active = true;
+    if (!data) {
+      setSrc("");
+      return () => { active = false; };
+    }
     QRCode.toDataURL(data, {
       errorCorrectionLevel: "M",
       margin: 1,
@@ -174,6 +173,27 @@ const invoiceStandaloneCss = `
   .invoice-party-side { display: grid !important; gap: 8px !important; grid-template-rows: auto 1fr !important; }
   .invoice-bottom-grid { display: flex !important; justify-content: flex-end !important; align-items: start !important; }
   .invoice-doc-totals { width: min(100%, 300px) !important; }
+  .invoice-doc-table { display: table !important; }
+  .invoice-doc-table thead {
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
+    clip: auto !important;
+    clip-path: none !important;
+    white-space: normal !important;
+  }
+  .invoice-doc-table tbody { display: table-row-group !important; }
+  .invoice-doc-table tbody tr { display: table-row !important; padding: 0 !important; }
+  .invoice-doc-table td,
+  .invoice-doc-table td:nth-child(2) {
+    display: table-cell !important;
+    padding: 7px 5px !important;
+    border-bottom: 1px solid #d7e0ea !important;
+    text-align: center !important;
+  }
+  .invoice-doc-table td:nth-child(2) { text-align: right !important; }
+  .invoice-doc-table td::before { display: none !important; content: none !important; }
   .invoice-doc-head,
   .invoice-identity-grid,
   .invoice-parties,
@@ -188,7 +208,9 @@ const invoiceStandaloneCss = `
 async function replaceInvoiceQrInClone(clone: HTMLElement, invoice: api.Invoice) {
   const qrTarget = clone.querySelector<HTMLElement>(".zatca-qr-code");
   if (!qrTarget) return;
-  const qrSrc = await QRCode.toDataURL(generateZATCAQR(invoice), {
+  const qrData = generateZATCAQR(invoice);
+  if (!qrData) return;
+  const qrSrc = await QRCode.toDataURL(qrData, {
     errorCorrectionLevel: "M",
     margin: 1,
     width: 140,
@@ -263,6 +285,46 @@ async function writeInvoiceHtmlToFrame(frame: HTMLIFrameElement, html: string) {
   return doc;
 }
 
+function addInvoiceCanvasPages(pdf: jsPDF, canvas: HTMLCanvasElement, invoiceNode: HTMLElement) {
+  const pageWidthMm = 210;
+  const pageHeightMm = 297;
+  const pageHeightPx = canvas.width * pageHeightMm / pageWidthMm;
+  const rootTop = invoiceNode.getBoundingClientRect().top;
+  const canvasScale = canvas.width / invoiceNode.scrollWidth;
+  const safeBreaks = Array.from(invoiceNode.querySelectorAll<HTMLElement>(
+    ".invoice-doc-table tbody tr, .invoice-parties, .invoice-bottom-grid, .invoice-doc-terms",
+  ))
+    .flatMap((element) => {
+      const rect = element.getBoundingClientRect();
+      return [rect.top - rootTop, rect.bottom - rootTop];
+    })
+    .map((value) => Math.round(value * canvasScale))
+    .filter((value) => value > 0 && value < canvas.height)
+    .sort((left, right) => left - right);
+
+  let start = 0;
+  let page = 0;
+  while (start < canvas.height) {
+    const maximum = Math.min(canvas.height, Math.floor(start + pageHeightPx));
+    const minimumUseful = start + Math.floor(pageHeightPx * 0.35);
+    const safe = safeBreaks.filter((value) => value >= minimumUseful && value <= maximum - 4).at(-1);
+    const end = maximum < canvas.height ? (safe || maximum) : canvas.height;
+    const slice = document.createElement("canvas");
+    slice.width = canvas.width;
+    slice.height = Math.max(1, end - start);
+    const context = slice.getContext("2d");
+    if (!context) throw new Error("Invoice PDF canvas is unavailable.");
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, slice.width, slice.height);
+    context.drawImage(canvas, 0, start, canvas.width, slice.height, 0, 0, canvas.width, slice.height);
+    if (page > 0) pdf.addPage();
+    const heightMm = slice.height * pageWidthMm / slice.width;
+    pdf.addImage(slice.toDataURL("image/png"), "PNG", 0, 0, pageWidthMm, heightMm, undefined, "FAST");
+    start = end;
+    page += 1;
+  }
+}
+
 async function saveInvoicePdfFile(invoice: api.Invoice) {
   const html = await buildInvoiceDocumentHtml(invoice);
   const frame = document.createElement("iframe");
@@ -290,21 +352,7 @@ async function saveInvoicePdfFile(invoice: api.Invoice) {
       windowHeight: invoiceNode.scrollHeight,
     });
     const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-    const imageData = canvas.toDataURL("image/png");
-    const pageWidth = 210;
-    const pageHeight = 297;
-    const imageHeight = (canvas.height * pageWidth) / canvas.width;
-    if (imageHeight <= pageHeight + 2) {
-      pdf.addImage(imageData, "PNG", 0, 0, pageWidth, pageHeight);
-    } else {
-      let offset = 0;
-      pdf.addImage(imageData, "PNG", 0, offset, pageWidth, imageHeight);
-      while (imageHeight + offset > pageHeight) {
-        offset -= pageHeight;
-        pdf.addPage();
-        pdf.addImage(imageData, "PNG", 0, offset, pageWidth, imageHeight);
-      }
-    }
+    addInvoiceCanvasPages(pdf, canvas, invoiceNode);
     pdf.save(`${safeFilePart(invoice.invoice_number)}-${safeFilePart(invoice.customer_name)}.pdf`);
   } finally {
     frame.remove();
@@ -356,18 +404,31 @@ function InvoiceBadge({ status }: { status: api.InvoiceStatus }) {
 /* ── Modal ─────────────────────────────────────────────── */
 
 function InvoiceModal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  return (
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onClose]);
+  return createPortal(
     <div className="modal-backdrop" onMouseDown={onClose}>
-      <section className="modal wide" onMouseDown={(event) => event.stopPropagation()}>
+      <section className="modal wide invoice-modal" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
         <header className="modal-head">
           <h2>{title}</h2>
-          <button className="icon-btn" type="button" title="إغلاق" onClick={onClose}>
+          <button className="icon-btn" type="button" title="إغلاق" aria-label="إغلاق" onClick={onClose}>
             <X size={16} />
           </button>
         </header>
         {children}
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -387,7 +448,7 @@ function invoiceSummaryRows(stats: api.InvoiceStats) {
 function invoiceShareText(invoice: api.Invoice) {
   const lines = invoice.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, invoice.currency)}`);
   return [
-    `${invoiceKind(invoice.total_with_vat).ar} - ${invoice.seller_name || sellerEnglishName}`,
+    `${invoiceKind(invoice).ar} - ${invoice.seller_name || sellerEnglishName}`,
     `رقم الفاتورة: ${invoice.invoice_number}`,
     invoice.title || "فاتورة",
     `العميل: ${invoice.customer_name}`,
@@ -396,7 +457,9 @@ function invoiceShareText(invoice: api.Invoice) {
     "",
     ...lines,
     "",
-    `المجموع (بدون ضريبة): ${money(invoice.total_without_vat, invoice.currency)}`,
+    `المجموع قبل الخصم والضريبة: ${money(invoice.subtotal, invoice.currency)}`,
+    invoice.discount ? `الخصم: ${money(invoice.discount, invoice.currency)}` : "",
+    `الخاضع للضريبة بعد الخصم: ${money(invoice.total_without_vat, invoice.currency)}`,
     `ضريبة القيمة المضافة (${invoice.vat_percent}%): ${money(invoice.vat_amount, invoice.currency)}`,
     `الإجمالي شامل الضريبة: ${money(invoice.total_with_vat, invoice.currency)}`,
     invoice.terms ? `الشروط: ${invoice.terms}` : "",
@@ -529,8 +592,8 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     try {
       const result = await api.createPayment(invoice.id);
       if (result.redirect_url) {
-        window.open(result.redirect_url, "_blank");
-        notify("جاري توجيهك لبوابة الدفع...");
+        window.open(result.redirect_url, "_blank", "noopener,noreferrer");
+        notify("جاري توجيهك لبوابة الدفع…");
       } else {
         notify("تعذر إنشاء جلسة دفع. تأكد من إعداد بوابة الدفع.", false);
       }
@@ -545,7 +608,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
         <div className="cloud-hero-copy">
           <span className="eyebrow">الفواتير الضريبية</span>
           <h1>الفواتير الضريبية (ZATCA)</h1>
-          <p>إصدار فواتير ضريبية مبسطة متوافقة مع هيئة الزكاة والضريبة والجمارك مع QR code.</p>
+          <p>إصدار فواتير ضريبية واضحة مع رمز QR لحقول المرحلة الأولى. التكامل مع منصة فاتورة للمرحلة الثانية غير مفعّل بعد.</p>
           <div className="hero-actions">
             <button className="btn primary" type="button" onClick={() => setCreating(true)}>
               <Plus size={16} /> إصدار فاتورة
@@ -587,11 +650,14 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
         <Search size={16} />
         <input
           className="input"
-          placeholder="بحث برقم الفاتورة أو العميل أو الجوال"
+          name="invoice_search"
+          autoComplete="off"
+          aria-label="بحث في الفواتير"
+          placeholder="بحث برقم الفاتورة أو العميل أو الجوال…"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
-        <select className="input" value={status} onChange={(event) => setStatus(event.target.value)}>
+        <select className="input" name="invoice_status_filter" autoComplete="off" aria-label="تصفية الفواتير حسب الحالة" value={status} onChange={(event) => setStatus(event.target.value)}>
           <option value="all">كل الحالات</option>
           <option value="issued">مصدرة</option>
           <option value="sent">مرسلة</option>
@@ -605,7 +671,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       {invoices.loading ? (
         <div className="empty">
           <RefreshCcw size={26} className="spin" />
-          <p>جاري تحميل الفواتير...</p>
+          <p>جاري تحميل الفواتير…</p>
         </div>
       ) : invoices.error ? (
         <div className="error-box">
@@ -636,22 +702,22 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                 <small>ضريبة {money(invoice.vat_amount, invoice.currency)}</small>
               </div>
               <div className="row-actions">
-                <button className="icon-btn success" type="button" title="تأكيد الدفع" onClick={() => setInvoiceStatus(invoice, "paid")} disabled={invoice.status === "paid"}>
+                <button className="icon-btn success" type="button" title="تأكيد الدفع" aria-label="تأكيد الدفع" onClick={() => setInvoiceStatus(invoice, "paid")} disabled={invoice.status === "paid"}>
                   <CheckCircle2 size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="تعليم كمرسلة" onClick={() => setInvoiceStatus(invoice, "sent")} disabled={invoice.status === "sent" || invoice.status === "paid"}>
+                <button className="icon-btn" type="button" title="تعليم كمرسلة" aria-label="تعليم الفاتورة كمرسلة" onClick={() => setInvoiceStatus(invoice, "sent")} disabled={invoice.status === "sent" || invoice.status === "paid"}>
                   <Send size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="طباعة" onClick={() => printInvoice(invoice)}>
+                <button className="icon-btn" type="button" title="طباعة" aria-label="طباعة الفاتورة" onClick={() => printInvoice(invoice)}>
                   <Printer size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="معاينة" onClick={() => setPreview(invoice)}>
+                <button className="icon-btn" type="button" title="معاينة" aria-label="معاينة الفاتورة" onClick={() => setPreview(invoice)}>
                   <Eye size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="نسخ" onClick={() => copyInvoice(invoice)}>
+                <button className="icon-btn" type="button" title="نسخ" aria-label="نسخ نص الفاتورة" onClick={() => copyInvoice(invoice)}>
                   <Copy size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="تعديل" onClick={() => setEditing(invoice)}>
+                <button className="icon-btn" type="button" title="تعديل" aria-label="تعديل الفاتورة" onClick={() => setEditing(invoice)}>
                   <Edit3 size={15} />
                 </button>
                 {invoice.customer_phone && (
@@ -659,6 +725,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                     className="icon-btn"
                     type="button"
                     title="إرسال واتساب"
+                    aria-label="إرسال الفاتورة عبر واتساب"
                     disabled={sendingInvoiceId === invoice.id}
                     onClick={() => sendInvoiceWhatsApp(invoice)}
                   >
@@ -670,18 +737,19 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                     className="icon-btn accent"
                     type="button"
                     title="ادفع الآن"
+                    aria-label="دفع الفاتورة الآن"
                     onClick={() => handlePayInvoice(invoice)}
                   >
                     <CreditCard size={15} />
                   </button>
                 )}
-                <button className="icon-btn danger" type="button" title="إلغاء" onClick={() => setInvoiceStatus(invoice, "cancelled")} disabled={invoice.status === "cancelled"}>
+                <button className="icon-btn danger" type="button" title="إلغاء" aria-label="إلغاء الفاتورة" onClick={() => setInvoiceStatus(invoice, "cancelled")} disabled={invoice.status === "cancelled"}>
                   <X size={15} />
                 </button>
-                <button className="icon-btn danger" type="button" title="مستردة" onClick={() => setInvoiceStatus(invoice, "refunded")} disabled={invoice.status === "refunded"}>
+                <button className="icon-btn danger" type="button" title="مستردة" aria-label="تعليم الفاتورة كمستردة" onClick={() => setInvoiceStatus(invoice, "refunded")} disabled={invoice.status === "refunded"}>
                   <RefreshCcw size={15} />
                 </button>
-                <button className="icon-btn danger" type="button" title="حذف" onClick={() => remove(invoice)}>
+                <button className="icon-btn danger" type="button" title="حذف" aria-label="حذف الفاتورة" onClick={() => remove(invoice)}>
                   <Trash2 size={15} />
                 </button>
               </div>
@@ -726,22 +794,19 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
 
 /* ── Preview ───────────────────────────────────────────── */
 
-function invoiceLineAmounts(item: api.InvoiceItem, vatPercent: number) {
-  const quantity = Math.max(0, Number(item.quantity || 0));
-  const enteredTotal = Math.max(0, Number(item.total || quantity * Number(item.unit_price || 0)));
-  const amounts = calculateLineAmounts({ total: enteredTotal, vat_excluded: item.vat_excluded }, vatPercent);
-  return {
-    quantity,
-    net: amounts.net,
-    unitNet: quantity ? Math.round((amounts.net / quantity) * 100) / 100 : 0,
-    vat: amounts.vat,
-    gross: amounts.gross,
-  };
+function invoiceBreakdown(invoice: api.Invoice) {
+  return calculateDocumentLineAmounts({
+    lines: invoice.items,
+    discountValue: invoice.discount_value ?? invoice.discount,
+    discountMode: invoice.discount_mode === "percent" ? "percent" : "fixed",
+    vatPercent: invoice.vat_percent,
+  });
 }
 
 function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; onCopy: () => void; onPrint: (asPdf?: boolean) => void }) {
   const qrCode = useMemo(() => generateZATCAQR(invoice), [invoice]);
-  const kind = invoiceKind(invoice.total_with_vat);
+  const kind = invoiceKind(invoice);
+  const breakdown = useMemo(() => invoiceBreakdown(invoice), [invoice]);
   const issueTime = invoiceTimestamp(invoice).replace("T", " ").replace("Z", " UTC");
   const [sellerOption, setSellerOption] = useState<string>(invoiceSellerOptions[0]);
   const [customSeller, setCustomSeller] = useState("");
@@ -808,7 +873,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
             </article>
             <aside className="invoice-zatca-card">
               <QRCodeDisplay data={qrCode} size={132} />
-              <span>رمز الاستجابة السريع — متوافق مع زاتكا</span>
+              <span>رمز الاستجابة السريع — حقول زاتكا للمرحلة الأولى</span>
             </aside>
           </div>
         </section>
@@ -820,18 +885,21 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
               <th>البيان</th>
               <th>الكمية</th>
               <th>سعر الوحدة قبل الضريبة</th>
-              <th>الخاضع للضريبة</th>
+              <th>خصم البند</th>
+              <th>الخاضع بعد الخصم</th>
               <th>VAT</th>
               <th>الإجمالي شامل الضريبة</th>
             </tr>
           </thead>
           <tbody>
             {invoice.items.map((item, index) => {
-              const line = invoiceLineAmounts(item, invoice.vat_percent);
+              const line = breakdown.lines[index];
+              const quantity = Math.max(0, Number(item.quantity || 0));
+              const unitNet = quantity ? line.netBeforeDiscount / quantity : 0;
               return (
                 <tr key={`${item.description}-${index}`}>
-                  <td>{index + 1}</td>
-                  <td>
+                  <td data-label="البند">{index + 1}</td>
+                  <td className="invoice-line-description" data-label="البيان">
                     {item.description}
                     {item.product_sku && (
                       <small style={{ display: "block", opacity: 0.6, fontSize: "0.85em", direction: "ltr", textAlign: "right" }}>
@@ -839,11 +907,12 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
                       </small>
                     )}
                   </td>
-                  <td>{line.quantity}</td>
-                  <td>{money(line.unitNet, invoice.currency)}</td>
-                  <td>{money(line.net, invoice.currency)}</td>
-                  <td>{money(line.vat, invoice.currency)}</td>
-                  <td>{money(line.gross, invoice.currency)}</td>
+                  <td data-label="الكمية">{quantity}</td>
+                  <td data-label="سعر الوحدة قبل الضريبة">{money(unitNet, invoice.currency)}</td>
+                  <td data-label="خصم البند">{money(line.discount, invoice.currency)}</td>
+                  <td data-label="الخاضع بعد الخصم">{money(line.taxableAmount, invoice.currency)}</td>
+                  <td data-label="الضريبة">{money(line.vat, invoice.currency)}</td>
+                  <td data-label="الإجمالي شامل الضريبة">{money(line.gross, invoice.currency)}</td>
                 </tr>
               );
             })}
@@ -852,8 +921,9 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
 
         <section className="invoice-bottom-grid">
           <div className="invoice-doc-totals">
-            <p><span>الإجمالي غير شامل الضريبة</span><strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
+            <p><span>المجموع قبل الخصم والضريبة</span><strong>{money(invoice.subtotal, invoice.currency)}</strong></p>
             <p><span>الخصم</span><strong>{money(invoice.discount, invoice.currency)}</strong></p>
+            <p><span>الخاضع للضريبة بعد الخصم</span><strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
             <p><span>ضريبة القيمة المضافة ({invoice.vat_percent}%)</span><strong>{money(invoice.vat_amount, invoice.currency)}</strong></p>
             <p className="grand"><span>الإجمالي شامل الضريبة</span><strong>{money(invoice.total_with_vat, invoice.currency)}</strong></p>
           </div>
@@ -868,7 +938,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
         <div className="invoice-export-options">
           <label>
             <span>المندوب (يظهر على الفاتورة)</span>
-            <select className="input" value={sellerOption} onChange={(event) => setSellerOption(event.target.value)}>
+            <select className="input" name="invoice_representative" autoComplete="off" value={sellerOption} onChange={(event) => setSellerOption(event.target.value)}>
               {invoiceSellerOptions.map((name) => <option key={name} value={name}>{name}</option>)}
               <option value="custom">إضافة جديد</option>
             </select>
@@ -876,7 +946,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
           {sellerOption === "custom" && (
             <label>
               <span>اسم جديد</span>
-              <input className="input" value={customSeller} onChange={(event) => setCustomSeller(event.target.value)} placeholder="اكتب اسم البائع" />
+              <input className="input" name="custom_invoice_representative" autoComplete="off" value={customSeller} onChange={(event) => setCustomSeller(event.target.value)} placeholder="اكتب اسم المندوب…" />
             </label>
           )}
         </div>
@@ -911,10 +981,12 @@ function InvoiceForm({
   const [customerVat, setCustomerVat] = useState(initial?.customer_vat || "");
   const [title, setTitle] = useState(initial?.title || "");
   const [status, setStatus] = useState<api.InvoiceStatus>(initial?.status || "issued");
+  const [invoiceType, setInvoiceType] = useState<api.InvoiceTaxType | "auto">(initial?.invoice_type || "auto");
   const [issueDate, setIssueDate] = useState(initial?.issue_date || today());
   const [dueDate, setDueDate] = useState(initial?.due_date || addDays(today(), 30));
   const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent ?? 15));
-  const [discount, setDiscount] = useState(String(initial?.discount || 0));
+  const [discountMode, setDiscountMode] = useState<api.DiscountMode>(initial?.discount_mode || "fixed");
+  const [discountValue, setDiscountValue] = useState(String(initial?.discount_value ?? initial?.discount ?? 0));
   const [sellerName, setSellerName] = useState(initial?.seller_name || "");
   const [sellerVat, setSellerVat] = useState(initial?.seller_vat_number || "");
   const [sellerAddress, setSellerAddress] = useState(initial?.seller_address || "");
@@ -956,11 +1028,16 @@ function InvoiceForm({
   );
   const financialTotals = useMemo(() => calculateDocumentTotals({
     lines: normalizedItems,
-    discountValue: Number(discount || 0),
-    discountMode: "fixed",
+    discountValue: Number(discountValue || 0),
+    discountMode,
     vatPercent: Number(vatPercent || 0),
-  }), [normalizedItems, discount, vatPercent]);
+  }), [normalizedItems, discountValue, discountMode, vatPercent]);
   const vatRate = financialTotals.vatPercent / 100;
+  const resolvedInvoiceType = resolveInvoiceTaxType({
+    requested: invoiceType,
+    buyerVat: customerVat,
+    taxableAmount: financialTotals.totalWithoutVat,
+  });
 
   const updateItem = (index: number, patch: Partial<api.InvoiceItem>) => {
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
@@ -992,11 +1069,14 @@ function InvoiceForm({
         customer_city: customerCity.trim(),
         customer_vat: customerVat.trim(),
         title: title.trim(),
+        invoice_type: invoiceType,
         status,
         issue_date: issueDate,
         due_date: dueDate || null,
         vat_percent: Number(vatPercent || 15),
-        discount: Number(discount || 0),
+        discount: financialTotals.discountAmount,
+        discount_mode: discountMode,
+        discount_value: Number(discountValue || 0),
         currency: "SAR",
         items: normalizedItems.filter((item) => item.description.trim()),
         notes: notes.trim(),
@@ -1017,7 +1097,7 @@ function InvoiceForm({
       <div className="form-grid">
         <label className="field">
           <span>عميل موجود</span>
-          <select className="input" value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
+          <select className="input" name="customer_id" autoComplete="off" value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
             <option value="">عميل جديد / إدخال يدوي</option>
             {(customers.data?.data || []).map((customer) => (
               <option key={customer.id} value={customer.id}>{customer.name} - {customer.phone}</option>
@@ -1026,29 +1106,29 @@ function InvoiceForm({
         </label>
         <label className="field">
           <span>عنوان الفاتورة</span>
-          <input className="input" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="فاتورة ضريبية" />
+          <input className="input" name="invoice_title" autoComplete="off" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="مثال: توريد وتركيب…" />
         </label>
       </div>
 
       <div className="form-grid">
         <label className="field">
           <span>اسم العميل</span>
-          <input className="input" value={customerName} onChange={(event) => setCustomerName(event.target.value)} required />
+          <input className="input" name="customer_name" autoComplete="name" value={customerName} onChange={(event) => setCustomerName(event.target.value)} required />
         </label>
         <label className="field">
           <span>الجوال</span>
-          <input className="input" value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value)} placeholder="05xxxxxxxx" />
+          <input className="input" name="customer_phone" autoComplete="tel" type="tel" inputMode="tel" value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value)} placeholder="مثال: 05xxxxxxxx…" />
         </label>
       </div>
 
       <div className="form-grid">
         <label className="field">
           <span>المدينة</span>
-          <input className="input" value={customerCity} onChange={(event) => setCustomerCity(event.target.value)} />
+          <input className="input" name="customer_city" autoComplete="address-level2" value={customerCity} onChange={(event) => setCustomerCity(event.target.value)} />
         </label>
         <label className="field">
           <span>الرقم الضريبي للعميل (اختياري)</span>
-          <input className="input" inputMode="numeric" value={customerVat} onChange={(event) => setCustomerVat(event.target.value.replace(/\D/g, "").slice(0, 15))} placeholder="15 رقم" />
+          <input className="input" name="customer_vat" autoComplete="off" inputMode="numeric" value={customerVat} onChange={(event) => setCustomerVat(event.target.value.replace(/\D/g, "").slice(0, 15))} placeholder="مثال: 15 رقمًا…" />
         </label>
       </div>
 
@@ -1060,23 +1140,23 @@ function InvoiceForm({
         <div className="form-grid">
           <label className="field">
             <span>اسم البائع</span>
-            <input className="input" value={sellerName} onChange={(event) => setSellerName(event.target.value)} placeholder={sellerEnglishName} required />
+            <input className="input" name="seller_name" autoComplete="organization" value={sellerName} onChange={(event) => setSellerName(event.target.value)} placeholder={`${sellerEnglishName}…`} required />
           </label>
           <label className="field">
             <span>الرقم الضريبي للبائع</span>
-            <input className="input" inputMode="numeric" value={sellerVat} onChange={(event) => setSellerVat(event.target.value.replace(/\D/g, "").slice(0, 15))} placeholder="15 رقم" required />
+            <input className="input" name="seller_vat" autoComplete="off" inputMode="numeric" value={sellerVat} onChange={(event) => setSellerVat(event.target.value.replace(/\D/g, "").slice(0, 15))} placeholder="15 رقمًا…" required />
           </label>
         </div>
         <label className="field">
           <span>عنوان البائع</span>
-          <input className="input" value={sellerAddress} onChange={(event) => setSellerAddress(event.target.value)} placeholder={`${sellerLegalName} - الرياض`} />
+          <input className="input" name="seller_address" autoComplete="street-address" value={sellerAddress} onChange={(event) => setSellerAddress(event.target.value)} placeholder={`${sellerLegalName} - الرياض…`} />
         </label>
       </div>
 
       <div className="form-grid">
         <label className="field">
           <span>حالة الفاتورة</span>
-          <select className="input" value={status} onChange={(event) => setStatus(event.target.value as api.InvoiceStatus)}>
+          <select className="input" name="invoice_status" autoComplete="off" value={status} onChange={(event) => setStatus(event.target.value as api.InvoiceStatus)}>
             <option value="issued">مصدرة</option>
             <option value="sent">مرسلة</option>
             <option value="draft">مسودة</option>
@@ -1085,28 +1165,54 @@ function InvoiceForm({
             <option value="refunded">مستردة</option>
           </select>
         </label>
+        <label className="field">
+          <span>نوع الفاتورة</span>
+          <select className="input" name="invoice_type" autoComplete="off" value={invoiceType} onChange={(event) => setInvoiceType(event.target.value as api.InvoiceTaxType | "auto")}>
+            <option value="auto">تلقائي حسب العميل والمبلغ</option>
+            <option value="simplified">فاتورة ضريبية مبسطة (B2C)</option>
+            <option value="tax">فاتورة ضريبية (B2B)</option>
+          </select>
+          <small>النوع الناتج: {resolvedInvoiceType === "tax" ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة"}</small>
+        </label>
       </div>
 
       <div className="form-grid">
         <label className="field">
           <span>تاريخ الإصدار</span>
-          <input className="input" type="date" value={issueDate} onChange={(event) => setIssueDate(event.target.value)} />
+          <input className="input" name="issue_date" autoComplete="off" type="date" value={issueDate} onChange={(event) => setIssueDate(event.target.value)} />
         </label>
         <label className="field">
           <span>تاريخ الاستحقاق</span>
-          <input className="input" type="date" value={dueDate || ""} onChange={(event) => setDueDate(event.target.value)} />
+          <input className="input" name="due_date" autoComplete="off" type="date" value={dueDate || ""} onChange={(event) => setDueDate(event.target.value)} />
         </label>
       </div>
 
       <div className="form-grid">
         <label className="field">
           <span>نسبة الضريبة (%)</span>
-          <input className="input" type="number" min={0} max={100} step="0.01" value={vatPercent} onChange={(event) => setVatPercent(event.target.value)} />
+          <input className="input" name="vat_percent" autoComplete="off" inputMode="decimal" type="number" min={0} max={100} step="0.01" value={vatPercent} onChange={(event) => setVatPercent(event.target.value)} />
         </label>
         <label className="field">
-          <span>الخصم</span>
-          <input className="input" type="number" min={0} step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} />
+          <span>{discountMode === "percent" ? "نسبة الخصم (%)" : "قيمة الخصم"}</span>
+          <input
+            className="input"
+            name="discount_value"
+            autoComplete="off"
+            inputMode="decimal"
+            type="number"
+            min={0}
+            max={discountMode === "percent" ? 100 : undefined}
+            step={discountMode === "percent" ? "0.01" : "0.01"}
+            value={discountValue}
+            onChange={(event) => setDiscountValue(event.target.value)}
+          />
         </label>
+      </div>
+
+      <div className="quote-price-mode" aria-label="طريقة الخصم">
+        <span>طريقة الخصم</span>
+        <button type="button" className={discountMode === "fixed" ? "active" : ""} onClick={() => setDiscountMode("fixed")}>مبلغ ثابت</button>
+        <button type="button" className={discountMode === "percent" ? "active" : ""} onClick={() => setDiscountMode("percent")}>نسبة مئوية</button>
       </div>
 
       <div className="quote-price-mode" aria-label="طريقة إدخال السعر">
@@ -1131,6 +1237,8 @@ function InvoiceForm({
           <div className="quote-line" key={index}>
             <select
               className="input"
+              name={`invoice_item_${index}_product`}
+              autoComplete="off"
               value={item.product_id || ""}
               onChange={(event) => applyProduct(index, event.target.value)}
               aria-label="اختيار منتج"
@@ -1147,14 +1255,19 @@ function InvoiceForm({
             </select>
             <input
               className="input"
+              name={`invoice_item_${index}_description`}
+              autoComplete="off"
               value={item.description}
               onChange={(event) => updateItem(index, { description: event.target.value })}
-              placeholder="وصف البند"
+              placeholder="وصف البند…"
               required={index === 0}
             />
             <input
               className="input"
               type="number"
+              name={`invoice_item_${index}_quantity`}
+              autoComplete="off"
+              inputMode="decimal"
               min={0}
               step="1"
               value={item.quantity}
@@ -1164,6 +1277,9 @@ function InvoiceForm({
             <input
               className="input"
               type="number"
+              name={`invoice_item_${index}_unit_price`}
+              autoComplete="off"
+              inputMode="decimal"
               min={0}
               step="0.01"
               value={item.unit_price}
@@ -1172,6 +1288,8 @@ function InvoiceForm({
             />
             <select
               className="input line-tax-mode"
+              name={`invoice_item_${index}_tax_mode`}
+              autoComplete="off"
               value={item.vat_excluded === false ? "inclusive" : "exclusive"}
               onChange={(event) => updateItem(index, { vat_excluded: event.target.value !== "inclusive" })}
               aria-label="طريقة ضريبة البند"
@@ -1188,6 +1306,7 @@ function InvoiceForm({
               className="icon-btn danger"
               type="button"
               title="حذف البند"
+              aria-label={`حذف البند ${index + 1}`}
               onClick={() => setItems((current) => current.filter((_, i) => i !== index))}
               disabled={items.length === 1}
             >
@@ -1198,8 +1317,16 @@ function InvoiceForm({
       </div>
 
       <div className="quote-total-summary">
+        <article>
+          <span>المجموع قبل الخصم والضريبة</span>
+          <strong>{money(financialTotals.subtotal)}</strong>
+        </article>
+        <article>
+          <span>الخصم</span>
+          <strong>{money(financialTotals.discountAmount)}</strong>
+        </article>
         <article className="vat-summary">
-          <span>المجموع (بدون ضريبة)</span>
+          <span>الخاضع للضريبة بعد الخصم</span>
           <strong>{money(financialTotals.totalWithoutVat)}</strong>
         </article>
         <article>
@@ -1214,17 +1341,17 @@ function InvoiceForm({
 
       <label className="field">
         <span>ملاحظات داخلية</span>
-        <textarea className="input textarea" value={notes} onChange={(event) => setNotes(event.target.value)} />
+        <textarea className="input textarea" name="invoice_notes" autoComplete="off" value={notes} onChange={(event) => setNotes(event.target.value)} />
       </label>
 
       <label className="field">
         <span>الشروط التي تظهر في الفاتورة</span>
-        <textarea className="input textarea" value={terms} onChange={(event) => setTerms(event.target.value)} />
+        <textarea className="input textarea" name="invoice_terms" autoComplete="off" value={terms} onChange={(event) => setTerms(event.target.value)} />
       </label>
 
       <div className="form-actions">
         <button className="btn primary" type="submit" disabled={saving}>
-          <FileText size={16} /> {saving ? "جاري الحفظ..." : "حفظ الفاتورة"}
+          <FileText size={16} /> {saving ? "جاري الحفظ…" : "حفظ الفاتورة"}
         </button>
         <button className="btn muted" type="button" onClick={onCancel}>إلغاء</button>
       </div>

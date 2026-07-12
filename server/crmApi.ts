@@ -32,11 +32,18 @@ import {
 } from "./crmValidation";
 import {
   calculateDocumentTotals,
-  calculateLineAmounts,
+  calculateDocumentLineAmounts,
   normalizeVatPercent,
   validateInstallments,
   type DiscountMode,
 } from "../shared/financial";
+import {
+  generateZatcaQrBase64,
+  resolveInvoiceTaxType,
+  zatcaQrFields,
+  type InvoiceTaxType,
+  type InvoiceTaxTypeInput,
+} from "../shared/zatca";
 import {
   createOwnedRepository,
   type FirestoreLikeStore,
@@ -838,40 +845,6 @@ function invoiceNumber(seed = Date.now(), index = 1) {
   return `INV-${ymd}-${String(index).padStart(3, "0")}`;
 }
 
-function generateTLV(tag: number, value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  const len = bytes.length;
-  const tagHex = tag.toString(16).padStart(2, "0");
-  const lenHex = len.toString(16).padStart(2, "0");
-  return tagHex + lenHex + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function generateZatcaBase64(sellerName: string, vatNumber: string, timestamp: string, total: number, vatTotal: number) {
-  const tlv =
-    generateTLV(1, sellerName) +
-    generateTLV(2, vatNumber) +
-    generateTLV(3, timestamp) +
-    generateTLV(4, total.toFixed(2)) +
-    generateTLV(5, vatTotal.toFixed(2));
-  const hexPairs = tlv.match(/.{1,2}/g) || [];
-  const bytes = new Uint8Array(hexPairs.map((h) => parseInt(h, 16)));
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function zatcaQrFields(sellerName: string, vatNumber: string, timestamp: string, total: number, vatTotal: number) {
-  return [
-    { tag: 1, label: "Seller name", value: sellerName },
-    { tag: 2, label: "VAT registration number", value: vatNumber },
-    { tag: 3, label: "Invoice timestamp", value: timestamp },
-    { tag: 4, label: "Invoice total including VAT", value: total.toFixed(2) },
-    { tag: 5, label: "VAT total", value: vatTotal.toFixed(2) },
-  ];
-}
-
 function escapeHtml(value: unknown) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -951,16 +924,23 @@ function normalizeInvoiceItems(items: unknown) {
 // Resolve a VAT percentage while treating an explicit 0 (zero-rated) as valid.
 // Only an unset value (undefined / null / "") or a non-numeric value falls back
 // to the default — `0 || 15` would otherwise turn a 0% invoice into 15%.
-function invoiceTotals(items: Array<{ total: number; vat_excluded?: boolean }>, discount = 0, vatPercent = 15) {
+function invoiceTotals(
+  items: Array<{ total: number; vat_excluded?: boolean }>,
+  discountValue = 0,
+  vatPercent = 15,
+  discountMode: DiscountMode = "fixed",
+) {
   const totals = calculateDocumentTotals({
     lines: items,
-    discountValue: discount,
-    discountMode: "fixed",
+    discountValue,
+    discountMode,
     vatPercent,
   });
   return {
     subtotal: totals.subtotal,
     discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
     vat: totals.vatAmount,
     vat_percent: totals.vatPercent,
     vat_amount: totals.vatAmount,
@@ -971,10 +951,16 @@ function invoiceTotals(items: Array<{ total: number; vat_excluded?: boolean }>, 
 
 function normalizeInvoice(row: Record<string, any>): Record<string, any> {
   const items = normalizeInvoiceItems(row.items);
-  const totals = invoiceTotals(items, row.discount, row.vat_percent);
+  const discountMode: DiscountMode = row.discount_mode === "percent" ? "percent" : "fixed";
+  const totals = invoiceTotals(items, row.discount_value ?? row.discount, row.vat_percent, discountMode);
   const vatAmount = Number(row.vat_amount ?? row.vat ?? totals.vat_amount);
   const totalWithoutVat = Number(row.total_without_vat ?? totals.total_without_vat);
   const sellerVatNumber = String(row.seller_vat_number || row.seller_vat || "").trim();
+  const invoiceType = resolveInvoiceTaxType({
+    requested: row.invoice_type as InvoiceTaxTypeInput,
+    buyerVat: row.customer_vat,
+    taxableAmount: Number(row.total_without_vat ?? totals.total_without_vat),
+  });
   return {
     ...row,
     currency: row.currency || "SAR",
@@ -982,6 +968,8 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     items,
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
+    discount_mode: discountMode,
+    discount_value: Number(row.discount_value ?? row.discount ?? totals.discount_value),
     vat: vatAmount,
     vat_percent: Number(row.vat_percent ?? totals.vat_percent),
     vat_amount: vatAmount,
@@ -989,20 +977,23 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     total_with_vat: Number(row.total_with_vat ?? totalWithoutVat + vatAmount),
     seller_vat: String(row.seller_vat || sellerVatNumber).trim(),
     seller_vat_number: sellerVatNumber,
+    invoice_type: invoiceType,
   };
 }
 
-function invoiceLineAmounts(item: Record<string, any>, vatPercent: number) {
-  const quantity = Math.max(0, Number(item.quantity || 0));
-  const enteredTotal = Math.max(0, Number(item.total || quantity * Number(item.unit_price || 0)));
-  const amounts = calculateLineAmounts({ total: enteredTotal, vat_excluded: item.vat_excluded }, vatPercent);
-  return {
-    quantity,
-    net: amounts.net,
-    unitNet: quantity ? Math.round((amounts.net / quantity) * 100) / 100 : 0,
-    vat: amounts.vat,
-    gross: amounts.gross,
-  };
+function invoiceKindLabels(type: InvoiceTaxType) {
+  return type === "tax"
+    ? { ar: "فاتورة ضريبية", en: "Tax Invoice" }
+    : { ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
+}
+
+function invoiceBreakdown(invoice: Record<string, any>) {
+  return calculateDocumentLineAmounts({
+    lines: Array.isArray(invoice.items) ? invoice.items : [],
+    discountValue: invoice.discount_value ?? invoice.discount,
+    discountMode: invoice.discount_mode === "percent" ? "percent" : "fixed",
+    vatPercent: invoice.vat_percent,
+  });
 }
 
 async function publicInvoiceHtml(invoice: Record<string, any>) {
@@ -1011,17 +1002,14 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
   const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
   const sellerCr = invoice.seller_cr || invoice.seller_cr_number || "7016449519";
   const sellerPhone = invoice.seller_phone || "+966533971168";
-  // نوع الفاتورة حسب الإجمالي: مبسطة ≤ 999، ضريبية (عادية) ≥ 1000
-  const kind = Number(invoice.total_with_vat || 0) >= 1000
-    ? { ar: "فاتورة ضريبية", en: "Tax Invoice" }
-    : { ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
-  const qrBase64 = generateZatcaBase64(
+  const kind = invoiceKindLabels(invoice.invoice_type);
+  const qrBase64 = generateZatcaQrBase64({
     sellerName,
-    sellerVat,
+    vatNumber: sellerVat,
     timestamp,
-    Number(invoice.total_with_vat || 0),
-    Number(invoice.vat_amount || invoice.vat || 0),
-  );
+    total: Number(invoice.total_with_vat || 0),
+    vatTotal: Number(invoice.vat_amount || invoice.vat || 0),
+  });
   const qrSrc = await QRCode.toDataURL(qrBase64, {
     errorCorrectionLevel: "M",
     margin: 1,
@@ -1029,15 +1017,19 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     color: { dark: "#000000", light: "#ffffff" },
   });
   const currency = String(invoice.currency || "SAR");
+  const breakdown = invoiceBreakdown(invoice);
   const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
-    const line = invoiceLineAmounts(item, normalizeVatPercent(invoice.vat_percent));
+    const line = breakdown.lines[index];
+    const quantity = Math.max(0, Number(item.quantity || 0));
+    const unitNet = quantity ? line.netBeforeDiscount / quantity : 0;
     const sku = item.product_sku ? `<small style="display:block;opacity:.6;font-size:.85em;direction:ltr">${escapeHtml(item.product_sku)}</small>` : "";
     return `<tr>
       <td>${index + 1}</td>
       <td>${escapeHtml(item.description)}${sku}</td>
-      <td>${line.quantity}</td>
-      <td>${escapeHtml(formatMoney(line.unitNet, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.net, currency))}</td>
+      <td>${quantity}</td>
+      <td>${escapeHtml(formatMoney(unitNet, currency))}</td>
+      <td>${escapeHtml(formatMoney(line.discount, currency))}</td>
+      <td>${escapeHtml(formatMoney(line.taxableAmount, currency))}</td>
       <td>${escapeHtml(formatMoney(line.vat, currency))}</td>
       <td>${escapeHtml(formatMoney(line.gross, currency))}</td>
     </tr>`;
@@ -1066,9 +1058,12 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     .party h2 { margin: 0 0 8px; color: #0f6a86; font-size: 14px; }
     .party p { margin: 5px 0; color: #334155; font-size: 12px; }
     .qr { display: grid; place-items: center; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
-    th { padding: 9px; background: #0f6a86; color: #fff; font-size: 11px; }
-    td { padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 11px; text-align: center; }
+    table { width: 100%; table-layout: fixed; border-collapse: collapse; margin-bottom: 12px; }
+    th { padding: 8px 5px; background: #0f6a86; color: #fff; font-size: 9px; }
+    td { padding: 7px 5px; border-bottom: 1px solid #e2e8f0; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; break-inside: avoid; }
+    th:nth-child(1) { width: 4%; } th:nth-child(2) { width: 24%; } th:nth-child(3) { width: 7%; }
+    th:nth-child(4) { width: 15%; } th:nth-child(5) { width: 11%; } th:nth-child(6) { width: 14%; }
+    th:nth-child(7) { width: 10%; } th:nth-child(8) { width: 15%; }
     td:nth-child(2) { text-align: right; white-space: pre-line; }
     .totals { width: 330px; margin-right: auto; border: 1px solid #d7e0ea; border-radius: 10px; overflow: hidden; }
     .totals p { display: flex; justify-content: space-between; margin: 0; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
@@ -1120,12 +1115,13 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       <aside class="qr"><img src="${qrSrc}" width="132" height="132" alt="ZATCA QR" /></aside>
     </section>
     <table>
-      <thead><tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th><th>الخاضع للضريبة</th><th>VAT</th><th>الإجمالي شامل الضريبة</th></tr></thead>
+      <thead><tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th><th>خصم البند</th><th>الخاضع بعد الخصم</th><th>VAT</th><th>الإجمالي شامل الضريبة</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <section class="totals">
-      <p><span>الإجمالي غير شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
+      <p><span>المجموع قبل الخصم والضريبة</span><strong>${escapeHtml(formatMoney(invoice.subtotal, currency))}</strong></p>
       <p><span>الخصم</span><strong>${escapeHtml(formatMoney(invoice.discount, currency))}</strong></p>
+      <p><span>الخاضع للضريبة بعد الخصم</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
       <p><span>ضريبة القيمة المضافة (${escapeHtml(normalizeVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
       <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
     </section>
@@ -1190,7 +1186,13 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     }
     const all = await listOwned("invoices", uid, undefined, 10000);
     const settings = await getSettings(uid);
-    const totals = invoiceTotals(items, req.body?.discount, req.body?.vat_percent);
+    const discountMode: DiscountMode = req.body?.discount_mode === "percent" ? "percent" : "fixed";
+    const totals = invoiceTotals(items, req.body?.discount_value ?? req.body?.discount, req.body?.vat_percent, discountMode);
+    const invoiceType = resolveInvoiceTaxType({
+      requested: req.body?.invoice_type,
+      buyerVat: req.body?.customer_vat,
+      taxableAmount: totals.total_without_vat,
+    });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
@@ -1201,6 +1203,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       customer_city: String(req.body?.customer_city || "").trim(),
       customer_vat: String(req.body?.customer_vat || "").trim(),
       title: String(req.body?.title || "").trim(),
+      invoice_type: invoiceType,
       status: invoiceStatuses.has(req.body?.status) ? req.body.status : "issued",
       issue_date: req.body?.issue_date || todayInTimeZone(),
       due_date: req.body?.due_date || null,
@@ -1249,15 +1252,24 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     }
     const items = req.body?.items ? normalizeInvoiceItems(req.body.items) : normalizeInvoiceItems(existing.items);
     const settings = await getSettings(uid);
-    const totals = invoiceTotals(items, req.body?.discount ?? existing.discount, req.body?.vat_percent ?? existing.vat_percent);
+    const discountMode: DiscountMode = (req.body?.discount_mode ?? existing.discount_mode) === "percent" ? "percent" : "fixed";
+    const discountValue = req.body?.discount_value ?? req.body?.discount ?? existing.discount_value ?? existing.discount;
+    const totals = invoiceTotals(items, discountValue, req.body?.vat_percent ?? existing.vat_percent, discountMode);
+    const customerVat = String(req.body?.customer_vat ?? existing.customer_vat ?? "").trim();
+    const invoiceType = resolveInvoiceTaxType({
+      requested: req.body?.invoice_type ?? existing.invoice_type,
+      buyerVat: customerVat,
+      taxableAmount: totals.total_without_vat,
+    });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || existing.seller_vat_number || existing.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       customer_id: req.body?.customer_id ?? existing.customer_id,
       customer_name: String(req.body?.customer_name || existing.customer_name || "").trim(),
       customer_phone: String(req.body?.customer_phone || existing.customer_phone || "").trim(),
       customer_city: String(req.body?.customer_city || existing.customer_city || "").trim(),
-      customer_vat: String(req.body?.customer_vat || existing.customer_vat || "").trim(),
+      customer_vat: customerVat,
       title: String(req.body?.title || existing.title || "").trim(),
+      invoice_type: invoiceType,
       status: invoiceStatuses.has(req.body?.status) ? req.body.status : existing.status,
       issue_date: req.body?.issue_date || existing.issue_date,
       due_date: req.body?.due_date ?? existing.due_date ?? null,
@@ -1325,22 +1337,24 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     }
     const currency = String(invoice.currency || "SAR");
     const documentUrl = invoiceShareUrl(req, invoice);
+    const breakdown = invoiceBreakdown(invoice);
     const lines = (Array.isArray(invoice.items) ? invoice.items : []).map(
-      (item: Record<string, any>) => `- ${item.description} × ${item.quantity}: ${Number(item.total || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      (item: Record<string, any>, index: number) => `- ${item.description} × ${item.quantity}: ${Number(breakdown.lines[index]?.gross || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
     const message = [
-      `${Number(invoice.total_with_vat || 0) >= 1000 ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة"} - Breexe Pro Co.`,
+      `${invoiceKindLabels(invoice.invoice_type).ar} - Breexe Pro Co.`,
       `${invoice.invoice_number}`,
       `العميل: ${invoice.customer_name}`,
       "",
       ...lines,
       "",
-      `المجموع: ${Number(invoice.subtotal || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `المجموع قبل الخصم والضريبة: ${Number(invoice.subtotal || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       `الخصم: ${Number(invoice.discount || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
-      `ضريبة ١٥٪: ${Number(invoice.vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `الخاضع للضريبة بعد الخصم: ${Number(invoice.total_without_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `ضريبة ${Number(invoice.vat_percent || 0).toLocaleString("ar-SA")}%: ${Number(invoice.vat_amount || invoice.vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       `الإجمالي شامل الضريبة: ${Number(invoice.total_with_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       "",
-      `الرقم الضريبي: ${invoice.seller_vat || "313049114100003"}`,
+      `الرقم الضريبي: ${invoice.seller_vat_number || invoice.seller_vat || "313049114100003"}`,
       `رابط الفاتورة للطباعة أو الحفظ PDF: ${documentUrl}`,
       invoice.notes ? `ملاحظات: ${invoice.notes}` : "",
     ].filter(Boolean).join("\n");
@@ -1391,18 +1405,13 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
     const total = Number(invoice.total_with_vat || 0);
     const vatTotal = Number(invoice.vat_amount || invoice.vat || 0);
-    const qr = generateZatcaBase64(
-      sellerName,
-      sellerVat,
-      timestamp,
-      total,
-      vatTotal,
-    );
+    const qrInput = { sellerName, vatNumber: sellerVat, timestamp, total, vatTotal };
+    const qr = generateZatcaQrBase64(qrInput);
     res.json({
       qr_base64: qr,
       format: "TLV_BASE64",
       phase: "ZATCA phase 1 QR fields",
-      fields: zatcaQrFields(sellerName, sellerVat, timestamp, total, vatTotal),
+      fields: zatcaQrFields(qrInput),
     });
   }));
 
@@ -1417,7 +1426,17 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const all = await listOwned("invoices", uid, undefined, 10000);
     const settings = await getSettings(uid);
     const items = normalizeInvoiceItems(quote.items || []);
-    const totals = invoiceTotals(items, quote.discount, quote.vat_percent);
+    const totals = invoiceTotals(
+      items,
+      quote.discount_value ?? quote.discount,
+      quote.vat_percent,
+      quote.discount_mode === "percent" ? "percent" : "fixed",
+    );
+    const invoiceType = resolveInvoiceTaxType({
+      requested: req.body?.invoice_type,
+      buyerVat: quote.customer_vat,
+      taxableAmount: totals.total_without_vat,
+    });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
@@ -1426,6 +1445,8 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       customer_name: quote.customer_name || "",
       customer_phone: quote.customer_phone || "",
       customer_city: quote.customer_city || "",
+      customer_vat: quote.customer_vat || "",
+      invoice_type: invoiceType,
       status: "issued",
       issue_date: todayInTimeZone(),
       currency: quote.currency || "SAR",

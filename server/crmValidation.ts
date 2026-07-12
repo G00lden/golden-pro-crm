@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isSaudiVatNumber, normalizeVatNumber } from "../shared/zatca";
 import { addCalendarMonths } from "../shared/date";
 
 const id = z.string().trim().min(1).max(160);
@@ -18,6 +19,14 @@ const isoDate = z.string()
   }, "Date does not exist");
 const optionalDate = isoDate.optional().nullable();
 const money = z.coerce.number().finite().min(0).max(1_000_000_000);
+const optionalSaudiVat = z.string().trim().max(32).refine(
+  (value) => !value || isSaudiVatNumber(value),
+  "VAT number must contain exactly 15 digits.",
+).transform(normalizeVatNumber).optional();
+const zatcaSellerName = z.string().trim().max(300).refine(
+  (value) => new TextEncoder().encode(value).length <= 255,
+  "Seller name must fit within 255 UTF-8 bytes for the ZATCA QR.",
+);
 
 function nonEmptyUpdate<T extends z.ZodRawShape>(shape: T) {
   return z.object(shape).partial().refine((value) => Object.keys(value).length > 0, "At least one field is required.");
@@ -125,7 +134,7 @@ const quoteShape = {
   customer_name: z.string().trim().min(1).max(200),
   customer_phone: optionalPhone,
   customer_city: shortText.optional(),
-  customer_vat: z.string().trim().max(32).optional(),
+  customer_vat: optionalSaudiVat,
   title: z.string().trim().max(500).optional(),
   status: z.enum(["draft", "issued", "confirmed", "declined", "expired", "follow_up"]).optional(),
   issue_date: isoDate.optional(),
@@ -175,25 +184,33 @@ const invoiceShape = {
   customer_name: z.string().trim().min(1).max(200),
   customer_phone: optionalPhone,
   customer_city: shortText.optional(),
-  customer_vat: z.string().trim().max(32).optional(),
+  customer_vat: optionalSaudiVat,
   title: z.string().trim().max(500).optional(),
+  invoice_type: z.enum(["auto", "simplified", "tax"]).optional(),
   status: z.enum(["draft", "issued", "sent", "paid", "cancelled", "refunded"]).optional(),
   issue_date: isoDate.optional(),
   due_date: optionalDate,
   payment_method: shortText.optional(),
   discount: money.optional(),
+  discount_mode: z.enum(["fixed", "percent"]).optional(),
+  discount_value: money.optional(),
   vat_percent: z.coerce.number().finite().min(0).max(100).optional(),
   currency: z.string().trim().min(3).max(8).optional(),
   items: z.array(invoiceItemSchema).min(1).max(200),
   notes: longText.optional(),
   terms: longText.optional(),
-  seller_name: z.string().trim().max(300).optional(),
-  seller_vat: z.string().trim().max(32).optional(),
-  seller_vat_number: z.string().trim().max(32).optional(),
+  seller_name: zatcaSellerName.optional(),
+  seller_vat: optionalSaudiVat,
+  seller_vat_number: optionalSaudiVat,
   seller_address: z.string().trim().max(1000).optional(),
 };
-export const invoiceCreateSchema = z.object(invoiceShape);
-export const invoiceUpdateSchema = z.object(invoiceShape);
+function invoiceDiscountBounds(value: z.infer<z.ZodObject<typeof invoiceShape>>, context: z.RefinementCtx) {
+  if (value.discount_mode === "percent" && Number(value.discount_value ?? value.discount ?? 0) > 100) {
+    context.addIssue({ code: "custom", path: ["discount_value"], message: "Percentage discount cannot exceed 100." });
+  }
+}
+export const invoiceCreateSchema = z.object(invoiceShape).superRefine(invoiceDiscountBounds);
+export const invoiceUpdateSchema = z.object(invoiceShape).superRefine(invoiceDiscountBounds);
 export const invoiceStatusSchema = z.object({
   status: z.enum(["draft", "issued", "sent", "paid", "cancelled", "refunded"]),
 });
@@ -203,15 +220,16 @@ export const settingsUpdateSchema = z.object({
   jobs_per_tech: z.coerce.number().int().min(0).max(10_000).optional(),
   response_rate: z.coerce.number().min(0).max(100).optional(),
   maxDaily: z.coerce.number().int().min(0).max(100_000).optional(),
-  seller_name: z.string().trim().max(300).optional(),
-  seller_vat_number: z.string().trim().max(32).optional(),
+  seller_name: zatcaSellerName.optional(),
+  seller_vat_number: optionalSaudiVat,
   seller_address: z.string().trim().max(1000).optional(),
 }).refine((value) => Object.keys(value).length > 0, "At least one setting is required.");
 
 export const demoDataSchema = z.object({ count: z.coerce.number().int().min(1).max(50).optional() });
 export const quoteConvertSchema = z.object({
-  seller_name: z.string().trim().max(300).optional(),
-  seller_vat: z.string().trim().max(32).optional(),
-  seller_vat_number: z.string().trim().max(32).optional(),
+  invoice_type: z.enum(["auto", "simplified", "tax"]).optional(),
+  seller_name: zatcaSellerName.optional(),
+  seller_vat: optionalSaudiVat,
+  seller_vat_number: optionalSaudiVat,
   seller_address: z.string().trim().max(1000).optional(),
 });

@@ -53,7 +53,7 @@ for (const required of [
 ]) {
   if (!quoteColumns.has(required)) throw new Error(`quotes.${required} is missing`);
 }
-for (const required of ["vat_percent", "vat_amount", "total_without_vat", "total_with_vat"]) {
+for (const required of ["discount_mode", "discount_value", "vat_percent", "vat_amount", "total_without_vat", "total_with_vat", "invoice_type"]) {
   if (!columns("invoices").has(required)) throw new Error(`invoices.${required} is missing`);
 }
 for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
@@ -61,7 +61,7 @@ for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10007) throw new Error(`Expected schema 10007, got ${userVersion}`);
+if (userVersion !== 10100) throw new Error(`Expected schema 10100, got ${userVersion}`);
 
 if (scenario === "legacy") {
   const legacy = db.prepare("SELECT discount, total FROM quotes WHERE id = 'legacy_quote'").get() as { discount: number; total: number };
@@ -83,6 +83,8 @@ const migration = db.prepare("SELECT release FROM schema_migrations WHERE versio
 if (migration?.release !== "1.0.4") throw new Error("Schema migration ledger was not updated.");
 const identityMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10007").get() as { release?: string };
 if (identityMigration?.release !== "1.0.7") throw new Error("Identity migration ledger was not updated.");
+const invoiceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10100").get() as { release?: string };
+if (invoiceMigration?.release !== "1.1.0") throw new Error("Invoice migration ledger was not updated.");
 
 db.close();
 console.log(JSON.stringify({ scenario, userVersion, quotes: [...quoteColumns].length }));

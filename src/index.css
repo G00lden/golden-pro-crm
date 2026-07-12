@@ -1621,6 +1621,10 @@ main {
   width: min(1120px, 100%);
 }
 
+.modal.invoice-modal {
+  width: min(1120px, 100%);
+}
+
 .quote-template-panel,
 .quote-payment-form,
 .invoice-seller-form {
@@ -2391,6 +2395,7 @@ img.quote-cover-logo {
 
 .invoice-doc-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   margin: 0 0 14px;
   overflow: hidden;
@@ -2398,21 +2403,34 @@ img.quote-cover-logo {
 }
 
 .invoice-doc-table th {
-  padding: 9px 8px;
+  padding: 8px 5px;
   background: #0b355c;
   color: #ffffff;
-  font-size: 10px;
+  font-size: 9px;
   text-align: center;
 }
 
 .invoice-doc-table td {
-  padding: 8px;
+  padding: 7px 5px;
   border-bottom: 1px solid #e2e8f0;
   color: #334155;
   font-size: 10px;
   line-height: 1.55;
   text-align: center;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  break-inside: avoid;
+  page-break-inside: avoid;
 }
+
+.invoice-doc-table th:nth-child(1) { width: 4%; }
+.invoice-doc-table th:nth-child(2) { width: 24%; }
+.invoice-doc-table th:nth-child(3) { width: 7%; }
+.invoice-doc-table th:nth-child(4) { width: 15%; }
+.invoice-doc-table th:nth-child(5) { width: 11%; }
+.invoice-doc-table th:nth-child(6) { width: 14%; }
+.invoice-doc-table th:nth-child(7) { width: 10%; }
+.invoice-doc-table th:nth-child(8) { width: 15%; }
 
 .invoice-doc-table td:nth-child(2) {
   text-align: right;
@@ -2502,6 +2520,7 @@ img.quote-cover-logo {
 .invoice-doc-totals strong {
   color: #ffffff;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .invoice-doc-totals .grand {
@@ -2847,6 +2866,51 @@ img.quote-cover-logo {
   .invoice-a4-doc {
     min-height: auto;
     padding: 18px;
+  }
+
+  .invoice-doc-table,
+  .invoice-doc-table tbody {
+    display: block;
+  }
+
+  .invoice-doc-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    clip-path: inset(50%);
+  }
+
+  .invoice-doc-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0;
+    padding: 8px;
+    border-bottom: 1px solid #d7e0ea;
+  }
+
+  .invoice-doc-table td,
+  .invoice-doc-table td:nth-child(2) {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    padding: 7px;
+    border: 0;
+    text-align: start;
+    white-space: normal;
+  }
+
+  .invoice-doc-table td::before {
+    content: attr(data-label);
+    color: #64748b;
+    font-size: 9px;
+    font-weight: 900;
+  }
+
+  .invoice-doc-table .invoice-line-description {
+    grid-column: 1 / -1;
   }
 
   .hero-status-grid {

@@ -196,9 +196,15 @@ try {
     });
     assert.equal(r.status, 201, `expected 201, got ${r.status}: ${JSON.stringify(r.body)}`);
     assert.equal(r.body?.invoice?.discount, 20);
+    assert.equal(r.body?.invoice?.discount_mode, "percent");
+    assert.equal(r.body?.invoice?.discount_value, 10);
     assert.equal(r.body?.invoice?.vat_amount, 27);
     assert.equal(r.body?.invoice?.total_with_vat, 207);
+    assert.equal(r.body?.invoice?.invoice_type, "simplified", "B2C invoices stay simplified regardless of total");
     created.invoiceId = r.body?.id;
+    const qr = await request(`/api/invoices/${created.invoiceId}/qr`);
+    assert.equal(qr.status, 200);
+    assert.equal(qr.body?.fields?.length, 5);
   });
 
   // -- 5. Mark quote as confirmed (the conversion event)

@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10007;
+const TARGET_SCHEMA_VERSION = 10100;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -458,6 +458,8 @@ db.exec(`
     payment_method TEXT DEFAULT '',
     subtotal NUMERIC DEFAULT 0,
     discount NUMERIC DEFAULT 0,
+    discount_mode TEXT DEFAULT 'fixed',
+    discount_value NUMERIC DEFAULT 0,
     vat NUMERIC DEFAULT 0,
     vat_percent NUMERIC DEFAULT 15,
     vat_amount NUMERIC DEFAULT 0,
@@ -471,6 +473,7 @@ db.exec(`
     seller_vat TEXT DEFAULT '',
     seller_vat_number TEXT DEFAULT '',
     seller_address TEXT DEFAULT '',
+    invoice_type TEXT DEFAULT '',
     qr_code TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
@@ -775,6 +778,8 @@ for (const col of [
   ["payment_method", "TEXT DEFAULT ''"],
   ["subtotal", "NUMERIC DEFAULT 0"],
   ["discount", "NUMERIC DEFAULT 0"],
+  ["discount_mode", "TEXT DEFAULT 'fixed'"],
+  ["discount_value", "NUMERIC DEFAULT 0"],
   ["vat", "NUMERIC DEFAULT 0"],
   ["vat_percent", "NUMERIC DEFAULT 15"],
   ["vat_amount", "NUMERIC DEFAULT 0"],
@@ -788,6 +793,7 @@ for (const col of [
   ["seller_vat", "TEXT DEFAULT ''"],
   ["seller_vat_number", "TEXT DEFAULT ''"],
   ["seller_address", "TEXT DEFAULT ''"],
+  ["invoice_type", "TEXT DEFAULT ''"],
   ["qr_code", "TEXT DEFAULT ''"],
   ["created_at", "TEXT DEFAULT (datetime('now'))"],
   ["updated_at", "TEXT DEFAULT (datetime('now'))"],
@@ -833,6 +839,7 @@ db.exec(`
   UPDATE users SET email = NULL
     WHERE provider = 'local-dev' AND LOWER(IFNULL(email, '')) = 'local@golden-pro-crm.dev';
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10007, '1.0.7');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10100, '1.1.0');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

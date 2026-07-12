@@ -56,6 +56,7 @@ export default defineConfig(() => {
             firebase: ['firebase/app', 'firebase/auth', 'firebase/firestore'],
             canvas: ['html2canvas'],
             pdf: ['jspdf'],
+            qr: ['qrcode'],
           },
         },
       },

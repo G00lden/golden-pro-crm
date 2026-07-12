@@ -77,6 +77,69 @@ export function calculateDocumentTotals(input: FinancialInput) {
   };
 }
 
+function moneyCents(value: number) {
+  return Math.round(roundMoney(value) * 100);
+}
+
+function allocateCents(totalCents: number, weights: number[]) {
+  const safeTotal = Math.max(0, Math.round(totalCents));
+  const safeWeights = weights.map((weight) => finiteNonNegative(weight));
+  const weightTotal = safeWeights.reduce((sum, weight) => sum + weight, 0);
+  if (!safeWeights.length || safeTotal === 0 || weightTotal === 0) {
+    return safeWeights.map(() => 0);
+  }
+
+  const rawShares = safeWeights.map((weight) => safeTotal * weight / weightTotal);
+  const allocated = rawShares.map(Math.floor);
+  let remainder = safeTotal - allocated.reduce((sum, value) => sum + value, 0);
+  const priority = rawShares
+    .map((share, index) => ({ index, fraction: share - Math.floor(share) }))
+    .sort((left, right) => right.fraction - left.fraction || left.index - right.index);
+  for (let index = 0; remainder > 0; index += 1, remainder -= 1) {
+    allocated[priority[index % priority.length].index] += 1;
+  }
+  return allocated;
+}
+
+/**
+ * Reconciled invoice lines after a document-level discount. Every monetary
+ * column is allocated in halalas, so the line sums always match the header.
+ */
+export function calculateDocumentLineAmounts(input: FinancialInput) {
+  const totals = calculateDocumentTotals(input);
+  const vatRate = totals.vatPercent / 100;
+  const sourceLines = input.lines || [];
+  const rawNetWeights = sourceLines.map((line) => {
+    const enteredTotal = finiteNonNegative(line.total);
+    return line.vat_excluded === false && vatRate > 0
+      ? enteredTotal / (1 + vatRate)
+      : enteredTotal;
+  });
+  const netBeforeDiscount = allocateCents(moneyCents(totals.subtotal), rawNetWeights);
+  const discounts = allocateCents(moneyCents(totals.discountAmount), netBeforeDiscount);
+  const taxable = netBeforeDiscount.map((value, index) => Math.max(0, value - discounts[index]));
+  const vat = allocateCents(moneyCents(totals.vatAmount), taxable);
+
+  return {
+    totals,
+    lines: sourceLines.map((line, index) => {
+      const enteredTotal = roundMoney(finiteNonNegative(line.total));
+      const net = netBeforeDiscount[index] / 100;
+      const discount = discounts[index] / 100;
+      const taxableAmount = taxable[index] / 100;
+      const vatAmount = vat[index] / 100;
+      return {
+        enteredTotal,
+        netBeforeDiscount: net,
+        discount,
+        taxableAmount,
+        vat: vatAmount,
+        gross: roundMoney(taxableAmount + vatAmount),
+      };
+    }),
+  };
+}
+
 export function validateInstallments(installments: Installment[]) {
   if (!Array.isArray(installments) || installments.length === 0 || installments.length > 6) {
     return { valid: false, totalPercent: 0, error: "Installments must contain between 1 and 6 entries." };

@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const release = JSON.parse(readFileSync(path.join(root, "release.json"), "utf8"));
 const directory = mkdtempSync(path.join(os.tmpdir(), "breexe-ci-"));
 const port = 3400 + (process.pid % 500);
 const appUrl = `http://127.0.0.1:${port}`;
@@ -72,7 +73,7 @@ async function verifyProductionSurface() {
   }
   const versionResponse = await fetch(`${appUrl}/api/version`);
   const version = await versionResponse.json();
-  if (!versionResponse.ok || version.version !== "1.0.9") {
+  if (!versionResponse.ok || version.version !== release.version) {
     throw new Error(`Production version endpoint is invalid: ${JSON.stringify(version)}`);
   }
 }

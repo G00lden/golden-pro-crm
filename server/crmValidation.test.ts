@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   bookingCreateSchema,
   customerCreateSchema,
+  invoiceCreateSchema,
   quoteCreateSchema,
   settingsUpdateSchema,
 } from "./crmValidation";
@@ -10,6 +11,17 @@ import {
 test("customer input strips unknown privilege fields", () => {
   const parsed = customerCreateSchema.parse({ name: "A", phone: "0500000000", role: "admin" });
   assert.deepEqual(parsed, { name: "A", phone: "0500000000" });
+});
+
+test("invoice validation protects VAT and discount fields", () => {
+  const base = {
+    customer_name: "A",
+    items: [{ description: "X", quantity: 1, unit_price: 100, vat_excluded: true }],
+  };
+  assert.equal(invoiceCreateSchema.safeParse({ ...base, customer_vat: "123" }).success, false);
+  assert.equal(invoiceCreateSchema.safeParse({ ...base, seller_vat_number: "313049114100003" }).success, true);
+  assert.equal(invoiceCreateSchema.safeParse({ ...base, discount_mode: "percent", discount_value: 101 }).success, false);
+  assert.equal(invoiceCreateSchema.safeParse({ ...base, seller_name: "س".repeat(128) }).success, false);
 });
 
 test("invalid booking dates and times are rejected", () => {
