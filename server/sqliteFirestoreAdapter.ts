@@ -23,6 +23,8 @@ const collectionPrefixes: Record<string, string> = {
   reminders: "rem",
   store_orders: "store",
   store_webhook_events: "swe",
+  salla_order_inbox: "soi",
+  salla_order_commands: "soc",
   technician_notifications: "tn",
   quotes: "quote",
   invoices: "inv",
@@ -109,6 +111,32 @@ class SqliteDocSnapshot {
       ["owner_uid", "createdBy"],
       ["created_at", "createdAt"],
       ["updated_at", "updatedAt"],
+      ["merchant_id", "merchantId"],
+      ["event_type", "eventType"],
+      ["remote_order_id", "remoteOrderId"],
+      ["payload_hash", "payloadHash"],
+      ["received_at", "receivedAt"],
+      ["processed_at", "processedAt"],
+      ["next_attempt_at", "nextAttemptAt"],
+      ["error_code", "errorCode"],
+      ["order_doc_id", "orderDocId"],
+      ["command_type", "commandType"],
+      ["desired_hash", "desiredHash"],
+      ["attempt_count", "attemptCount"],
+      ["before_hash", "beforeHash"],
+      ["after_hash", "afterHash"],
+      ["result_status", "resultStatus"],
+      ["last_error", "lastError"],
+      ["actor_uid", "actorUid"],
+      ["completed_at", "completedAt"],
+      ["lease_token", "leaseToken"],
+      ["remote_status_id", "remoteStatusId"],
+      ["remote_status_name", "remoteStatusName"],
+      ["remote_status_slug", "remoteStatusSlug"],
+      ["remote_updated_at", "remoteUpdatedAt"],
+      ["remote_synced_at", "remoteSyncedAt"],
+      ["sync_origin", "syncOrigin"],
+      ["remote_deleted_at", "remoteDeletedAt"],
     ];
     for (const [col, alias] of aliases) {
       if (row[col] !== undefined && row[alias] === undefined) {
@@ -177,6 +205,21 @@ const fieldToColumn: Record<string, string> = {
   sentAt: "sent_at",
   eventType: "event_type",
   eventId: "event_id",
+  merchantId: "merchant_id",
+  remoteOrderId: "remote_order_id",
+  payloadHash: "payload_hash",
+  receivedAt: "received_at",
+  processedAt: "processed_at",
+  nextAttemptAt: "next_attempt_at",
+  errorCode: "error_code",
+  orderDocId: "order_doc_id",
+  commandType: "command_type",
+  desiredHash: "desired_hash",
+  attemptCount: "attempt_count",
+  beforeHash: "before_hash",
+  afterHash: "after_hash",
+  resultStatus: "result_status",
+  lastError: "last_error",
   rawBody: "raw_body",
   ownerUid: "owner_uid",
   quoteNumber: "quote_number",
@@ -202,6 +245,7 @@ const fieldToColumn: Record<string, string> = {
   relatedType: "related_type",
   relatedId: "related_id",
   completedAt: "completed_at",
+  leaseToken: "lease_token",
   actorUid: "actor_uid",
   entityType: "entity_type",
   entityId: "entity_id",
@@ -219,6 +263,13 @@ const fieldToColumn: Record<string, string> = {
   sellerVatNumber: "seller_vat_number",
   sellerAddress: "seller_address",
   qrCode: "qr_code",
+  remoteStatusId: "remote_status_id",
+  remoteStatusName: "remote_status_name",
+  remoteStatusSlug: "remote_status_slug",
+  remoteUpdatedAt: "remote_updated_at",
+  remoteSyncedAt: "remote_synced_at",
+  syncOrigin: "sync_origin",
+  remoteDeletedAt: "remote_deleted_at",
 };
 
 const jsonColumns = new Set([
@@ -231,6 +282,7 @@ const jsonColumns = new Set([
   "order_types",
   "permissions",
   "product_ids",
+  "payload",
 ]);
 
 function mapToColumn(key: string): string {
@@ -306,6 +358,47 @@ class SqliteDocRef {
       const record = { [pk]: this.id, ...mapped };
       this._upsert(record);
     }
+  }
+
+  async create(data: Record<string, unknown>) {
+    const pk = this.primaryKey();
+    const record = { [pk]: this.id, ...mapRecord(data, this.table) };
+    const keys = Object.keys(record);
+    const placeholders = keys.map(() => "?").join(", ");
+    const quotedKeys = keys.map((key) => `"${key}"`).join(", ");
+    try {
+      db.prepare(`INSERT INTO "${this.table}" (${quotedKeys}) VALUES (${placeholders})`)
+        .run(...keys.map((key) => record[key]));
+    } catch (error) {
+      if (String((error as { code?: unknown })?.code || "").startsWith("SQLITE_CONSTRAINT")) {
+        const conflict = new Error(`Document ${this.id} already exists.`) as Error & { code?: string };
+        conflict.code = "ALREADY_EXISTS";
+        throw conflict;
+      }
+      throw error;
+    }
+  }
+
+  async compareAndSet(expected: Record<string, unknown>, data: Record<string, unknown>) {
+    const pk = this.primaryKey();
+    const mappedExpected = mapRecord(expected, this.table);
+    const mappedData = mapRecord(data, this.table);
+    const updateKeys = Object.keys(mappedData).filter((key) => key !== pk && isValidColumn(this.table, key));
+    const expectedKeys = Object.keys(mappedExpected).filter((key) => key !== pk && isValidColumn(this.table, key));
+    if (!updateKeys.length) return false;
+    const setClause = updateKeys.map((key) => `"${key}" = ?`).join(", ");
+    const whereClause = expectedKeys.map((key) => mappedExpected[key] === null
+      ? `"${key}" IS NULL`
+      : `"${key}" = ?`).join(" AND ");
+    const values = updateKeys.map((key) => mappedData[key]);
+    values.push(this.id);
+    for (const key of expectedKeys) {
+      if (mappedExpected[key] !== null) values.push(mappedExpected[key]);
+    }
+    const result = db.prepare(
+      `UPDATE "${this.table}" SET ${setClause} WHERE "${pk}" = ?${whereClause ? ` AND ${whereClause}` : ""}`,
+    ).run(...values);
+    return result.changes === 1;
   }
 
   async update(data: Record<string, unknown>) {

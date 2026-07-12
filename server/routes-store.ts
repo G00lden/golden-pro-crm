@@ -4,7 +4,6 @@ import path from "path";
 import {
   processStoreWebhook,
   getStoreWebhookDiagnostics,
-  getStoreOrdersForUser,
   getStoreOrderForUser,
   classifyStoreOrderItem,
   assignStoreOrderTechnician,
@@ -13,6 +12,8 @@ import {
 import { notifyTechnicianForBooking } from "./bookingNotifications";
 import { requireFirebaseUser, type AuthedRequest } from "./auth";
 import { validate, storeWebhookSchema } from "./validation";
+import { storeOrderRealtimeListenerCount, subscribeStoreOrderChanges } from "./storeOrderRealtime";
+import { getStoreOrderPageForUser, normalizeStoreOrderRemoteFields } from "./storeOrderQuery";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -103,8 +104,38 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
     requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      res.json(await getStoreOrdersForUser(userReq.user.uid, String(req.query.type || "all")));
+      res.json(await getStoreOrderPageForUser(userReq.user.uid, req.query as Record<string, unknown>));
     }),
+  );
+
+  app.get(
+    "/api/store/orders/events",
+    requireFirebaseUser,
+    (req, res) => {
+      const userReq = req as AuthedRequest;
+      if (storeOrderRealtimeListenerCount(userReq.user.uid) >= 20) {
+        res.status(429).json({ error: "Too many live order streams are open for this account." });
+        return;
+      }
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+      res.write(": connected\n\n");
+
+      const unsubscribe = subscribeStoreOrderChanges(userReq.user.uid, (event) => {
+        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      });
+      const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 20_000);
+      const close = () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      };
+      req.once("close", close);
+      req.once("aborted", close);
+    },
   );
 
   app.get(
@@ -112,7 +143,9 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
     requireFirebaseUser,
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      res.json(await getStoreOrderForUser(userReq.user.uid, req.params.id));
+      res.json(normalizeStoreOrderRemoteFields(
+        await getStoreOrderForUser(userReq.user.uid, req.params.id),
+      ));
     }),
   );
 

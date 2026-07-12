@@ -2,12 +2,14 @@ import type { Express, Request, Response, NextFunction } from "express";
 import {
   getSallaStatus,
   getSallaConnectUrl,
+  getSallaOrderStatusesForUser,
   syncSallaStoreForUser,
+  updateSallaOrderForUser,
+  updateSallaOrderStatusForUser,
 } from "./salla";
 import { adminDb } from "./firebaseAdmin";
-import { getStoreOrdersForUser } from "./storeWebhook";
-import { ownedCount } from "./sharedRouteHelpers";
 import type { AuthedRequest } from "./auth";
+import { getStoreOrderPageForUser } from "./storeOrderQuery";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -25,6 +27,53 @@ function httpError(status: number, message: string) {
 
 export function registerSallaRoutes(app: Express) {
   app.get(
+    "/api/integrations/salla/order-statuses",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      const statuses = await getSallaOrderStatusesForUser(userReq.user.uid);
+      res.json({
+        data: statuses.map((status) => ({
+          id: status.id,
+          name: status.name,
+          slug: status.slug,
+          sort: status.sort,
+          type: status.type,
+          original: status.original,
+          parent: status.parent,
+          message: status.message,
+          is_active: status.isActive,
+        })),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/integrations/salla/orders/:id/status",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      res.json(await updateSallaOrderStatusForUser(
+        userReq.user.uid,
+        userReq.user.uid,
+        req.params.id,
+        req.body,
+      ));
+    }),
+  );
+
+  app.put(
+    "/api/integrations/salla/orders/:id",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      res.json(await updateSallaOrderForUser(
+        userReq.user.uid,
+        userReq.user.uid,
+        req.params.id,
+        req.body,
+      ));
+    }),
+  );
+
+  app.get(
     "/api/integrations/salla/status",
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
@@ -37,12 +86,14 @@ export function registerSallaRoutes(app: Express) {
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       const uid = userReq.user.uid;
-      const [status, orders] = await Promise.all([
+      const [status, orderPage] = await Promise.all([
         getSallaStatus(uid, req),
-        getStoreOrdersForUser(uid, String(req.query.type || "all")),
+        getStoreOrderPageForUser(uid, {
+          ...req.query,
+          page: 1,
+          page_size: 100,
+        }),
       ]);
-      const list = Array.isArray(orders) ? orders : (orders as { orders?: unknown[] }).orders ?? orders;
-      const arr = Array.isArray(list) ? list : [];
       res.json({
         provider: "salla",
         linked: (status as { linked?: boolean }).linked || false,
@@ -52,8 +103,10 @@ export function registerSallaRoutes(app: Express) {
         last_sync_error: (status as { last_sync_error?: string | null }).last_sync_error || null,
         sync_enabled: (status as { sync_enabled?: boolean }).sync_enabled ?? false,
         sync_schedule: (status as { sync_schedule?: string }).sync_schedule ?? null,
-        total: arr.length,
-        orders: arr,
+        total: orderPage.total,
+        orders: orderPage.data,
+        capped: orderPage.capped,
+        warning: orderPage.warning,
       });
     }),
   );
@@ -66,16 +119,20 @@ export function registerSallaRoutes(app: Express) {
       const products = await adminDb
         .collection("products")
         .where("createdBy", "==", uid)
-        .limit(500)
+        .limit(10_001)
         .get();
       const orders = await adminDb
         .collection("store_orders")
         .where("createdBy", "==", uid)
-        .limit(500)
+        .limit(10_001)
         .get();
 
+      const productDocs = products.docs.slice(0, 10_000);
+      const orderDocs = orders.docs.slice(0, 10_000);
+      const capped = products.docs.length > productDocs.length || orders.docs.length > orderDocs.length;
+
       const usageBySku = new Map<string, number>();
-      for (const doc of orders.docs) {
+      for (const doc of orderDocs) {
         const data = doc.data() as { items?: Array<{ sku?: string }> };
         const items = Array.isArray(data.items) ? data.items : [];
         for (const item of items) {
@@ -83,7 +140,7 @@ export function registerSallaRoutes(app: Express) {
         }
       }
 
-      const mapped = products.docs.map((doc) => {
+      const mapped = productDocs.map((doc) => {
         const data = doc.data() as Record<string, unknown>;
         const sku = (data.sku as string) || "";
         return {
@@ -103,6 +160,8 @@ export function registerSallaRoutes(app: Express) {
         provider: "salla",
         total: mapped.length,
         mapped_count: mapped.filter((p) => p.mapped_to_salla).length,
+        capped,
+        warning: capped ? "Product usage summary reached the 10,000-row safety cap." : null,
         products: mapped,
       });
     }),

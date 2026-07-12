@@ -30,6 +30,16 @@ if (scenario === "legacy") {
     );
     INSERT INTO quotes (id, owner_uid, quote_number, customer_name, discount, total)
     VALUES ('legacy_quote', 'owner', 'QT-LEGACY', 'Legacy customer', 10, 90);
+    CREATE TABLE store_orders (
+      id TEXT PRIMARY KEY,
+      owner_uid TEXT NOT NULL,
+      order_id TEXT,
+      status TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    INSERT INTO store_orders (id, owner_uid, order_id, status, created_at, updated_at)
+    VALUES ('legacy_store_order', 'owner', 'SALLA-LEGACY', 'paid', '2026-01-01', '2026-01-01');
   `);
   legacy.close();
 }
@@ -39,6 +49,15 @@ const { default: db } = await import("../server/db");
 function columns(table: string) {
   return new Set(
     (db.prepare("SELECT name FROM pragma_table_info(?)").all(table) as Array<{ name: string }>).map((row) => row.name),
+  );
+}
+
+function indexes(table: string) {
+  return new Map(
+    (db.prepare("SELECT name, [unique] AS is_unique FROM pragma_index_list(?)").all(table) as Array<{
+      name: string;
+      is_unique: number;
+    }>).map((row) => [row.name, Boolean(row.is_unique)]),
   );
 }
 
@@ -61,7 +80,76 @@ for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10300) throw new Error(`Expected schema 10300, got ${userVersion}`);
+if (userVersion !== 10303) throw new Error(`Expected schema 10303, got ${userVersion}`);
+
+for (const required of [
+  "remote_status_id",
+  "remote_status_name",
+  "remote_status_slug",
+  "remote_updated_at",
+  "remote_synced_at",
+  "sync_origin",
+  "remote_deleted_at",
+]) {
+  if (!columns("store_orders").has(required)) throw new Error(`store_orders.${required} is missing`);
+}
+
+const inboxColumns = columns("salla_order_inbox");
+for (const required of [
+  "id",
+  "owner_uid",
+  "merchant_id",
+  "event_type",
+  "remote_order_id",
+  "payload_hash",
+  "status",
+  "attempts",
+  "received_at",
+  "processed_at",
+  "next_attempt_at",
+  "error_code",
+  "error",
+  "lease_token",
+  "created_at",
+  "updated_at",
+]) {
+  if (!inboxColumns.has(required)) throw new Error(`salla_order_inbox.${required} is missing`);
+}
+
+const commandColumns = columns("salla_order_commands");
+for (const required of [
+  "id",
+  "owner_uid",
+  "order_doc_id",
+  "remote_order_id",
+  "command_type",
+  "desired_hash",
+  "payload",
+  "status",
+  "attempt_count",
+  "before_hash",
+  "after_hash",
+  "result_status",
+  "last_error",
+  "actor_uid",
+  "lease_token",
+  "created_at",
+  "updated_at",
+  "completed_at",
+]) {
+  if (!commandColumns.has(required)) throw new Error(`salla_order_commands.${required} is missing`);
+}
+
+for (const required of ["idx_salla_order_inbox_owner_status", "idx_salla_order_inbox_due"]) {
+  if (!indexes("salla_order_inbox").has(required)) throw new Error(`${required} is missing`);
+}
+const commandIndexes = indexes("salla_order_commands");
+for (const required of ["idx_salla_order_commands_owner_status", "idx_salla_order_commands_due"]) {
+  if (!commandIndexes.has(required)) throw new Error(`${required} is missing`);
+}
+if (commandIndexes.get("uq_salla_order_commands_desired_hash") !== true) {
+  throw new Error("The desired-command hash unique index is missing or not unique.");
+}
 
 for (const table of [
   "communication_events",
@@ -88,6 +176,13 @@ if (scenario === "legacy") {
   }
   const legacyLocal = db.prepare("SELECT email FROM users WHERE id = 'legacy_local'").get() as { email: string | null };
   if (legacyLocal.email !== null) throw new Error("Legacy local synthetic email was not cleared.");
+  const legacyStoreOrder = db.prepare("SELECT order_id, status FROM store_orders WHERE id = 'legacy_store_order'").get() as {
+    order_id: string;
+    status: string;
+  };
+  if (legacyStoreOrder?.order_id !== "SALLA-LEGACY" || legacyStoreOrder.status !== "paid") {
+    throw new Error("Legacy store-order values changed during migration.");
+  }
 }
 
 db.prepare(`
@@ -107,6 +202,56 @@ const communicationMigration = db.prepare("SELECT release FROM schema_migrations
 if (communicationMigration?.release !== "1.2.0") throw new Error("Communication migration ledger was not updated.");
 const campaignMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10300").get() as { release?: string };
 if (campaignMigration?.release !== "1.3.0") throw new Error("Campaign migration ledger was not updated.");
+const orderSyncMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10303").get() as { release?: string };
+if (orderSyncMigration?.release !== "1.3.3") throw new Error("Salla order-sync migration ledger was not updated.");
+
+const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
+const adapter = createSqliteFirestoreAdapter();
+const inboxRef = await adapter.collection("salla_order_inbox").add({
+  createdBy: "owner",
+  merchantId: "merchant-1",
+  eventType: "order.updated",
+  remoteOrderId: "SALLA-1",
+  payloadHash: "event-hash-1",
+});
+if (!inboxRef.id.startsWith("soi_")) throw new Error("Salla inbox IDs do not use the expected prefix.");
+
+const commandRef = await adapter.collection("salla_order_commands").add({
+  createdBy: "owner",
+  orderDocId: "store-order-1",
+  remoteOrderId: "SALLA-1",
+  commandType: "status.update",
+  desiredHash: "desired-hash-1",
+  payload: { status: "completed", metadata: { source: "schema-test" } },
+  actorUid: "schema-test",
+});
+if (!commandRef.id.startsWith("soc_")) throw new Error("Salla command IDs do not use the expected prefix.");
+const commandSnapshot = await commandRef.get();
+const commandData = commandSnapshot.data() as Record<string, unknown>;
+if (
+  commandData.remote_order_id !== "SALLA-1" ||
+  commandData.order_doc_id !== "store-order-1" ||
+  commandData.remoteOrderId !== "SALLA-1" ||
+  commandData.orderDocId !== "store-order-1"
+) {
+  throw new Error("Salla command camelCase fields were not mapped to SQLite columns.");
+}
+if ((commandData.payload as { metadata?: { source?: string } })?.metadata?.source !== "schema-test") {
+  throw new Error("Salla command JSON payload did not round-trip through SQLite.");
+}
+let duplicateRejected = false;
+try {
+  await adapter.collection("salla_order_commands").add({
+    createdBy: "owner",
+    orderDocId: "store-order-1",
+    commandType: "status.update",
+    desiredHash: "desired-hash-1",
+    payload: { status: "completed" },
+  });
+} catch (error) {
+  duplicateRejected = String(error).includes("UNIQUE constraint failed");
+}
+if (!duplicateRejected) throw new Error("Duplicate desired Salla commands were not rejected.");
 
 db.close();
 console.log(JSON.stringify({ scenario, userVersion, quotes: [...quoteColumns].length }));

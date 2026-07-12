@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10300;
+const TARGET_SCHEMA_VERSION = 10303;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -117,6 +117,13 @@ for (const col of [
   ["booking_ids", "TEXT DEFAULT '[]'"],
   ["order_types", "TEXT DEFAULT '[]'"],
   ["customer_id", "TEXT"],
+  ["remote_status_id", "TEXT"],
+  ["remote_status_name", "TEXT"],
+  ["remote_status_slug", "TEXT"],
+  ["remote_updated_at", "TEXT"],
+  ["remote_synced_at", "TEXT"],
+  ["sync_origin", "TEXT"],
+  ["remote_deleted_at", "TEXT"],
   // Columns that ONLY existed in the full CREATE TABLE below (line ~262). Because
   // the shell table above is created first, that CREATE ... IF NOT EXISTS is a
   // no-op, so on a fresh DB these were never created and every store-order
@@ -140,6 +147,73 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_imported ON store_orders(imported_at)");
+
+// Durable Salla order synchronization queues. The inbox makes incoming events
+// replayable; commands provide an idempotent outbox for changes sent to Salla.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS salla_order_inbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    merchant_id TEXT,
+    event_type TEXT NOT NULL DEFAULT '',
+    remote_order_id TEXT,
+    payload_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at TEXT,
+    next_attempt_at TEXT,
+    error_code TEXT,
+    error TEXT,
+    lease_token TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS salla_order_commands (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    order_doc_id TEXT NOT NULL,
+    remote_order_id TEXT,
+    command_type TEXT NOT NULL,
+    desired_hash TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    before_hash TEXT,
+    after_hash TEXT,
+    result_status TEXT,
+    last_error TEXT,
+    actor_uid TEXT,
+    lease_token TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_salla_order_inbox_owner_status
+    ON salla_order_inbox(owner_uid, status, received_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_inbox_due
+    ON salla_order_inbox(status, next_attempt_at, received_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_inbox_remote_order
+    ON salla_order_inbox(owner_uid, remote_order_id, received_at);
+
+  CREATE INDEX IF NOT EXISTS idx_salla_order_commands_owner_status
+    ON salla_order_commands(owner_uid, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_commands_due
+    ON salla_order_commands(status, updated_at, created_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_commands_order
+    ON salla_order_commands(owner_uid, order_doc_id, created_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_salla_order_commands_desired_hash
+    ON salla_order_commands(owner_uid, order_doc_id, command_type, desired_hash)
+    WHERE desired_hash <> '';
+`);
+
+for (const table of ["salla_order_inbox", "salla_order_commands"] as const) {
+  if (!hasColumn(table, "lease_token")) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN lease_token TEXT`);
+  }
+}
 
 // bookings + technician_notifications were created with a minimal column set.
 // bookingLifecycle / bookingNotifications write to richer columns; the missing
@@ -998,6 +1072,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10100, '1.1.0');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10200, '1.2.0');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10300, '1.3.0');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10303, '1.3.3');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

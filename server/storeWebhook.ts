@@ -4,8 +4,23 @@ import path from "path";
 import type { Request } from "express";
 import { adminDb } from "./firebaseAdmin";
 import { addCalendarMonths } from "../shared/date";
+import { publishStoreOrderChange } from "./storeOrderRealtime";
+import { compareAndSetDocument } from "./atomicDocumentUpdate";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
+
+const storeOrderProjectionLocks = new Map<string, Promise<unknown>>();
+
+async function withStoreOrderProjectionLock<T>(key: string, task: () => Promise<T>) {
+  const previous = storeOrderProjectionLocks.get(key) || Promise.resolve();
+  const run = previous.catch(() => undefined).then(task);
+  storeOrderProjectionLocks.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (storeOrderProjectionLocks.get(key) === run) storeOrderProjectionLocks.delete(key);
+  }
+}
 
 export type StoreItemType =
   | "sale_only"
@@ -28,6 +43,7 @@ export type StoreJourneyStatus =
 export type StoreWebhookItem = {
   name: string;
   sku: string;
+  remoteItemId?: string | null;
   quantity: number;
   maintenanceMonths: number;
   orderType: StoreItemType;
@@ -57,6 +73,7 @@ export type StoreWebhookOrder = {
 type ImportedOrderItem = {
   name: string;
   sku: string;
+  remote_item_id?: string | null;
   quantity: number;
   unit_price?: number | null;
   total_price?: number | null;
@@ -71,6 +88,29 @@ type ImportedOrderItem = {
   booking_id?: string | null;
   reason?: string | null;
 };
+
+function importedResultFromExisting(existing: Record<string, any>): ImportedOrderResult {
+  return {
+    customer_id: String(existing.customer_id || ""),
+    product_ids: Array.isArray(existing.product_ids) ? existing.product_ids : [],
+    installation_ids: Array.isArray(existing.installation_ids) ? existing.installation_ids : [],
+    booking_ids: Array.isArray(existing.booking_ids) ? existing.booking_ids : [],
+    journey_status: (existing.journey_status || "needs_review") as StoreJourneyStatus,
+    items: Array.isArray(existing.items) ? existing.items : [],
+  };
+}
+
+function incomingProjectionIsOlder(existing: Record<string, any>, extras: Record<string, unknown>) {
+  const incoming = Date.parse(String(extras.remote_updated_at || extras.last_event_at || ""));
+  const current = Date.parse(String(existing.remote_updated_at || existing.remoteUpdatedAt || existing.last_event_at || ""));
+  return Number.isFinite(incoming) && Number.isFinite(current) && incoming < current;
+}
+
+function isAlreadyExistsError(error: unknown) {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  return record.code === "ALREADY_EXISTS" || record.code === 6 ||
+    /already exists|duplicate key|constraint/i.test(error instanceof Error ? error.message : String(error));
+}
 
 export type ImportedOrderResult = {
   customer_id: string;
@@ -159,7 +199,8 @@ function ensureLocalWebhookOwner(currentUid: string) {
 }
 
 function localStoreFallbackEnabled() {
-  const usesSupabase = process.env.DATA_PROVIDER === "supabase" || process.env.DB_PROVIDER === "supabase";
+  const configuredProvider = String(process.env.DATA_PROVIDER || process.env.DB_PROVIDER || "").toLowerCase();
+  const usesPersistentAdapter = configuredProvider === "supabase" || configuredProvider === "sqlite";
   const hasAdminCredential = Boolean(
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
       process.env.FIREBASE_SERVICE_ACCOUNT_PATH ||
@@ -169,7 +210,7 @@ function localStoreFallbackEnabled() {
   );
   return (
     process.env.NODE_ENV !== "production" &&
-    !usesSupabase &&
+    !usesPersistentAdapter &&
     process.env.STORE_WEBHOOK_LOCAL_FALLBACK !== "false" &&
     !hasAdminCredential
   );
@@ -450,6 +491,7 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
     return {
       name: truncate(name, 80),
       sku: truncate(sku, 80),
+      remoteItemId: truncate(firstText(item.id, item.order_item_id, item.item_id, item.uuid), 120) || null,
       quantity,
       unitPrice: unitPrice ?? null,
       totalPrice: totalPrice ?? null,
@@ -466,6 +508,7 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
   return [{
     name: "طلب متجر",
     sku: fallbackSku,
+    remoteItemId: null,
     quantity: 1,
     unitPrice: null,
     totalPrice: null,
@@ -764,6 +807,7 @@ function hydrateImportedOrderItem(item: any): ImportedOrderItem {
   return {
     name: String(item?.name || "Store item"),
     sku: String(item?.sku || ""),
+    remote_item_id: item?.remote_item_id ? String(item.remote_item_id) : null,
     quantity: Math.max(1, Number(item?.quantity || 1)),
     unit_price: optionalNumberValue(item?.unit_price) ?? null,
     total_price: optionalNumberValue(item?.total_price) ?? null,
@@ -784,6 +828,7 @@ function importedItemBase(item: StoreWebhookItem) {
   return {
     name: item.name,
     sku: item.sku,
+    remote_item_id: item.remoteItemId || null,
     quantity: item.quantity,
     unit_price: item.unitPrice ?? null,
     total_price: item.totalPrice ?? (item.unitPrice !== undefined && item.unitPrice !== null ? item.unitPrice * item.quantity : null),
@@ -842,13 +887,20 @@ function applyManualClassification(item: ImportedOrderItem, manualType: StoreIte
   return next;
 }
 
-function mergeImportedItemsWithExisting(nextItems: ImportedOrderItem[], existingOrder: Record<string, any> = {}) {
+function mergeImportedItemsWithExisting(
+  nextItems: ImportedOrderItem[],
+  existingOrder: Record<string, any> = {},
+  options: { preserveOperationalLinks?: boolean } = {},
+) {
   const previousItems = Array.isArray(existingOrder.items)
     ? existingOrder.items.map(hydrateImportedOrderItem)
     : [];
 
   return nextItems.map((nextItem) => {
     const previous =
+      (nextItem.remote_item_id
+        ? previousItems.find((item) => item.remote_item_id === nextItem.remote_item_id)
+        : undefined) ||
       previousItems.find((item) => item.sku === nextItem.sku) ||
       previousItems.find((item) => item.name === nextItem.name);
     if (!previous) return nextItem;
@@ -864,7 +916,13 @@ function mergeImportedItemsWithExisting(nextItems: ImportedOrderItem[], existing
     };
 
     if (previous.manual_type && isStoreItemType(previous.manual_type)) {
-      return applyManualClassification(merged, previous.manual_type);
+      const classified = applyManualClassification(merged, previous.manual_type);
+      if (!options.preserveOperationalLinks) return classified;
+      return {
+        ...classified,
+        installation_id: previous.installation_id || merged.installation_id || null,
+        booking_id: previous.booking_id || merged.booking_id || null,
+      };
     }
 
     if (previous.booking_id || previous.installation_id) {
@@ -1139,6 +1197,197 @@ async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<
   };
 }
 
+function projectedItemState(item: StoreWebhookItem, productId: string, installationId?: string | null): ImportedOrderItem {
+  const base: ImportedOrderItem = {
+    ...importedItemBase(item),
+    order_type: item.orderType,
+    detected_type: item.orderType,
+    manual_type: null,
+    status: "received",
+    product_id: productId,
+    installation_id: installationId || null,
+    booking_id: null,
+    reason: null,
+  };
+
+  if (item.orderType === "sale_only") return { ...base, status: "sale_recorded" };
+  if (item.orderType === "install_maintenance") {
+    return {
+      ...base,
+      status: "awaiting_schedule",
+      reason: "Historical store order projected without creating an installation or booking.",
+    };
+  }
+  if (item.orderType === "external_maintenance") {
+    return {
+      ...base,
+      status: "awaiting_schedule",
+      reason: "Historical external-maintenance order projected without creating an installation or booking.",
+    };
+  }
+  if (item.orderType === "maintenance_existing") {
+    return installationId
+      ? {
+          ...base,
+          status: "maintenance_matched",
+          reason: "Linked safely to an existing active installation; no booking was created.",
+        }
+      : {
+          ...base,
+          status: "needs_review",
+          reason: "No active installation found for customer phone + SKU; no operational record was created.",
+        };
+  }
+  return {
+    ...base,
+    status: "needs_review",
+    reason: "SKU/tag did not match SALE-, INSTALL-, MAINT-, or EXT- classification.",
+  };
+}
+
+async function projectStoreOrder(
+  uid: string,
+  order: StoreWebhookOrder,
+  extras: Record<string, unknown> = {},
+  writeAttempt = 0,
+) {
+  const now = new Date().toISOString();
+  const customerId = order.customerPhone ? await upsertCustomer(uid, order, now) : "";
+  const productIds: string[] = [];
+  const projectedItems: ImportedOrderItem[] = [];
+
+  for (const item of order.items) {
+    const productId = await upsertProduct(uid, item, now);
+    productIds.push(productId);
+
+    // A historical order may safely point at an installation that already
+    // exists. This path never creates installations, bookings, reminder state,
+    // webhook event records, or notifications.
+    const existingInstallation = item.orderType === "maintenance_existing" && order.customerPhone
+      ? await findInstallationByPhoneAndSku(uid, order.customerPhone, item.sku)
+      : null;
+    projectedItems.push(projectedItemState(item, productId, existingInstallation?.id || null));
+  }
+
+  const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
+  const orderRef = adminDb.collection("store_orders").doc(orderKey);
+  const existingOrderDoc = await orderRef.get();
+  const existingOrder = existingOrderDoc.exists ? existingOrderDoc.data() || {} : {};
+  if (existingOrderDoc.exists && incomingProjectionIsOlder(existingOrder, extras)) {
+    return {
+      result: importedResultFromExisting(existingOrder),
+      existed: true,
+      orderKey,
+      stale: true,
+    };
+  }
+  const mergedItems = mergeImportedItemsWithExisting(projectedItems, existingOrder, {
+    preserveOperationalLinks: true,
+  });
+  const finalProductIds = uniqueValues([
+    ...productIds,
+    ...mergedItems.map((item) => item.product_id),
+    ...(Array.isArray(existingOrder.product_ids) ? existingOrder.product_ids : []),
+  ]);
+  const finalInstallationIds = uniqueValues([
+    ...(Array.isArray(existingOrder.installation_ids) ? existingOrder.installation_ids : []),
+    ...mergedItems.map((item) => item.installation_id),
+  ]);
+  const finalBookingIds = uniqueValues([
+    ...(Array.isArray(existingOrder.booking_ids) ? existingOrder.booking_ids : []),
+    ...mergedItems.map((item) => item.booking_id),
+  ]);
+  const projectedJourneyStatus = resolveJourneyStatus(mergedItems);
+  const hasLocalWorkflowState = mergedItems.some((item) => Boolean(
+    item.manual_type || item.installation_id || item.booking_id,
+  )) || Boolean(
+    existingOrder.scheduled_date || existingOrder.scheduled_time,
+  );
+  const journeyStatus = hasLocalWorkflowState && existingOrder.journey_status
+    ? existingOrder.journey_status as StoreJourneyStatus
+    : projectedJourneyStatus;
+  const currentStep = hasLocalWorkflowState && existingOrder.current_step
+    ? existingOrder.current_step
+    : journeyStatus;
+  const scheduledDate = Object.prototype.hasOwnProperty.call(existingOrder, "scheduled_date")
+    ? existingOrder.scheduled_date
+    : order.scheduledDate || null;
+  const scheduledTime = Object.prototype.hasOwnProperty.call(existingOrder, "scheduled_time")
+    ? existingOrder.scheduled_time
+    : order.scheduledTime || null;
+
+  const orderPatch = {
+    createdBy: uid,
+    source: "salla",
+    provider: order.provider,
+    event_type: order.eventType,
+    order_id: order.orderId,
+    order_number: order.orderNumber,
+    status: order.status,
+    journey_status: journeyStatus,
+    current_step: currentStep,
+    customer_id: customerId,
+    customer_name: order.customerName,
+    customer_phone: order.customerPhone,
+    customer_city: order.customerCity || null,
+    product_ids: finalProductIds,
+    installation_ids: finalInstallationIds,
+    booking_ids: finalBookingIds,
+    order_types: uniqueValues(mergedItems.map((item) => effectiveItemType(item))),
+    items: mergedItems,
+    scheduled_date: scheduledDate,
+    scheduled_time: scheduledTime,
+    order_date: order.orderDate,
+    total: order.total ?? null,
+    imported_at: existingOrder.imported_at || now,
+    last_event_at: firstText(extras.last_event_at, extras.remote_updated_at, existingOrder.last_event_at, now),
+    ...extras,
+    updatedAt: now,
+  };
+
+  if (existingOrderDoc.exists) {
+    const updated = await compareAndSetDocument(orderRef, {
+      remote_updated_at: existingOrder.remote_updated_at ?? existingOrder.remoteUpdatedAt ?? null,
+    }, orderPatch);
+    if (!updated) {
+      const competing = await orderRef.get();
+      const competingData = competing.exists ? competing.data() || {} : {};
+      if (competing.exists && (
+        incomingProjectionIsOlder(competingData, extras) ||
+        String(competingData.remote_updated_at || "") === String(extras.remote_updated_at || "")
+      )) {
+        return {
+          result: importedResultFromExisting(competingData),
+          existed: true,
+          orderKey,
+          stale: true,
+        };
+      }
+      if (writeAttempt < 2) return projectStoreOrder(uid, order, extras, writeAttempt + 1);
+      throw new Error(`Store order ${orderKey} changed concurrently; retry the authoritative projection.`);
+    }
+  } else {
+    try {
+      await orderRef.create(orderPatch);
+    } catch (error) {
+      if (isAlreadyExistsError(error) && writeAttempt < 2) {
+        return projectStoreOrder(uid, order, extras, writeAttempt + 1);
+      }
+      throw error;
+    }
+  }
+
+  const result: ImportedOrderResult = {
+    customer_id: customerId,
+    product_ids: finalProductIds,
+    installation_ids: finalInstallationIds,
+    booking_ids: finalBookingIds,
+    journey_status: journeyStatus,
+    items: mergedItems,
+  };
+  return { result, existed: existingOrderDoc.exists, orderKey, stale: false };
+}
+
 export function getStoreOrderDocId(uid: string, provider: string, orderId: string) {
   return `store_${hash(`${uid}:${provider}:${orderId}`)}`;
 }
@@ -1148,18 +1397,60 @@ export async function importStoreOrderForUser(
   order: StoreWebhookOrder,
   extras: Record<string, unknown> = {},
 ): Promise<ImportedOrderResult> {
-  const imported = await importStoreOrder(uid, order);
+  const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
+  return withStoreOrderProjectionLock(orderKey, async () => {
+    const existingSnapshot = await adminDb.collection("store_orders").doc(orderKey).get();
+    const existingData = existingSnapshot.exists ? existingSnapshot.data() || {} : {};
+    if (existingSnapshot.exists && incomingProjectionIsOlder(existingData, extras)) {
+      return importedResultFromExisting(existingData);
+    }
+    const existed = existingSnapshot.exists;
+    const imported = await importStoreOrder(uid, order);
 
-  if (!localStoreFallbackEnabled()) {
-    const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
-    await adminDb.collection("store_orders").doc(orderKey).update({
-      createdBy: uid,
-      ...extras,
-      updatedAt: new Date().toISOString(),
+    if (!localStoreFallbackEnabled()) {
+      await adminDb.collection("store_orders").doc(orderKey).update({
+        createdBy: uid,
+        ...extras,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    publishStoreOrderChange(uid, {
+      type: existed ? "order.updated" : "order.created",
+      orderId: orderKey,
+      remoteOrderId: order.orderId,
+      source: order.provider === "salla" ? "salla_webhook" : "crm",
     });
-  }
 
-  return imported;
+    return imported;
+  });
+}
+
+export async function projectStoreOrderForUser(
+  uid: string,
+  order: StoreWebhookOrder,
+  extras: Record<string, unknown> = {},
+  options: { suppressRealtime?: boolean } = {},
+): Promise<ImportedOrderResult> {
+  const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
+  return withStoreOrderProjectionLock(orderKey, async () => {
+    const projected = await projectStoreOrder(uid, order, extras);
+
+    if (!options.suppressRealtime && !projected.stale) {
+      publishStoreOrderChange(uid, {
+        type: projected.existed ? "order.updated" : "order.created",
+        orderId: projected.orderKey,
+        remoteOrderId: order.orderId,
+        source: extras.sync_origin === "salla_webhook"
+          ? "salla_webhook"
+          : extras.sync_origin === "salla_command"
+            ? "salla_command"
+            : "salla_sync",
+      });
+    }
+
+    return projected.result;
+  });
 }
 
 type LocalStoreDb = {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -29,7 +29,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10300/);
+    assert.match(result.stdout, /"userVersion":10303/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -51,8 +51,32 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10300/);
+    assert.match(backups[0], /pre-schema-10303/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the Supabase migration mirrors the Salla order synchronization schema", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260713010000_salla_order_sync_foundation.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "remote_status_id",
+    "remote_status_name",
+    "remote_status_slug",
+    "remote_updated_at",
+    "remote_synced_at",
+    "sync_origin",
+    "remote_deleted_at",
+    "salla_order_inbox",
+    "salla_order_commands",
+    "payload jsonb",
+    "lease_token",
+    "salla_order_commands_desired_hash_uidx",
+    "enable row level security",
+  ]) {
+    assert.match(migration, new RegExp(required));
   }
 });

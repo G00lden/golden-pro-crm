@@ -308,6 +308,7 @@ export type StoreJourneyStatus =
 export type StoreOrderItem = {
   name: string;
   sku: string;
+  remote_item_id?: string | number | null;
   quantity: number;
   unit_price?: number | null;
   total_price?: number | null;
@@ -330,6 +331,13 @@ export type StoreOrder = {
   order_id: string;
   order_number: string;
   status?: string;
+  remote_status_id?: string | number | null;
+  remote_status_name?: string | null;
+  remote_status_slug?: string | null;
+  remote_updated_at?: string | null;
+  remote_synced_at?: string | null;
+  sync_origin?: string | null;
+  remote_deleted_at?: string | null;
   external_order_id?: string;
   external_status?: string;
   journey_status: StoreJourneyStatus;
@@ -352,6 +360,112 @@ export type StoreOrder = {
   last_remote_update_at?: string;
   updatedAt?: string;
   createdBy?: string;
+};
+
+export type StoreOrderPage = {
+  data: StoreOrder[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  capped: boolean;
+  warning: string | null;
+};
+
+export type StoreOrderListParams = {
+  search?: string;
+  type?: string;
+  journey?: string;
+  status?: string;
+  city?: string;
+  product?: string;
+  min_total?: number;
+  max_total?: number;
+  page?: number;
+  pageSize?: number;
+};
+
+export type SallaOrderStatus = {
+  id: string | number;
+  name: string;
+  slug: string;
+  sort?: number | null;
+  type?: string | null;
+  original?: string | null;
+  parent?: string | null;
+  message?: string | null;
+  is_active?: boolean;
+};
+
+export type SallaOrderStatusUpdateResult = {
+  success: boolean;
+  changed?: boolean;
+  order?: StoreOrder;
+  status?: SallaOrderStatus | string | null;
+};
+
+export type SallaOrderReceiverUpdate = {
+  name?: string;
+  country_code?: string;
+  phone?: string;
+  email?: string;
+  notify?: boolean;
+};
+
+export type SallaOrderNationalAddressUpdate = {
+  country: number;
+  city: number;
+  address_line: string;
+  street_number: string;
+  block: string;
+  short_address: string;
+  building_number: string;
+  additional_number: string;
+  postal_code: string;
+  geo_coordinates: {
+    lat: number;
+    lng: number;
+  };
+};
+
+export type SallaOrderUpdatePayload = {
+  customer?: {
+    id?: string | number;
+    name?: string;
+    mobile?: string;
+    email?: string;
+  };
+  receiver?: SallaOrderReceiverUpdate;
+  delivery_method?: string;
+  branch_id?: number;
+  courier_id?: number;
+  ship_to?: SallaOrderNationalAddressUpdate;
+  payment?: {
+    status?: string;
+    method?: string;
+    store_bank_id?: number;
+    receipt_image_path?: string;
+    accepted_methods?: string[];
+    cash_on_delivery?: { amount: number; currency: string };
+  };
+  coupon_code?: string;
+  employees?: number[];
+};
+
+export type SallaOrderUpdateResult = {
+  success: boolean;
+  changed?: boolean;
+  order?: StoreOrder;
+};
+
+export type StoreOrderRealtimeEvent = {
+  type: `order.${string}` | "sync.completed";
+  orderId?: string | null;
+  remoteOrderId?: string | null;
+  source: "salla_webhook" | "salla_command" | "salla_sync" | "crm";
+  at: string;
 };
 
 export type StoreOrderClassificationResult = {
@@ -1062,9 +1176,13 @@ function requestOutboundCode() {
   return code.trim();
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function getApiAuthorizationToken() {
   const user = getCurrentAppUser();
-  const token = user?.local ? await buildLocalToken(user.uid) : await user?.getIdToken?.();
+  return user?.local ? buildLocalToken(user.uid) : user?.getIdToken?.();
+}
+
+async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = await getApiAuthorizationToken();
   if (!token) throw new Error("يجب تسجيل الدخول أولا.");
 
   const headers = new Headers(init.headers);
@@ -3049,13 +3167,169 @@ export const prepareDailyOperations = async (data: { syncSalla?: boolean } = {})
   });
 };
 
-export const getStoreOrders = async (params: { type?: string } = {}) => {
+const emptyStoreOrderPage = (params: StoreOrderListParams = {}): StoreOrderPage => ({
+  data: [],
+  total: 0,
+  page: params.page || 1,
+  pageSize: params.pageSize || 50,
+  totalPages: 1,
+  hasNext: false,
+  hasPrevious: false,
+  capped: false,
+  warning: null,
+});
+
+export const getStoreOrders = async (params: StoreOrderListParams = {}): Promise<StoreOrderPage> => {
   const user = getCurrentAppUser();
-  if (!user) return [] as StoreOrder[];
+  if (!user) return emptyStoreOrderPage(params);
   const search = new URLSearchParams();
+  if (params.search?.trim()) search.set("search", params.search.trim());
   if (params.type && params.type !== "all") search.set("type", params.type);
-  return apiFetch<StoreOrder[]>(`/api/store/orders${search.toString() ? `?${search.toString()}` : ""}`);
+  if (params.journey && params.journey !== "all") search.set("journey", params.journey);
+  if (params.status && params.status !== "all") search.set("status", params.status);
+  if (params.city?.trim()) search.set("city", params.city.trim());
+  if (params.product?.trim()) search.set("product", params.product.trim());
+  if (typeof params.min_total === "number" && Number.isFinite(params.min_total)) {
+    search.set("min_total", String(params.min_total));
+  }
+  if (typeof params.max_total === "number" && Number.isFinite(params.max_total)) {
+    search.set("max_total", String(params.max_total));
+  }
+  if (params.page) search.set("page", String(params.page));
+  if (params.pageSize) search.set("page_size", String(params.pageSize));
+  const response = await apiFetch<StoreOrderPage | StoreOrder[]>(
+    `/api/store/orders${search.toString() ? `?${search.toString()}` : ""}`,
+  );
+  if (!Array.isArray(response)) return response;
+  return {
+    ...emptyStoreOrderPage(params),
+    data: response,
+    total: response.length,
+  };
 };
+
+export const getSallaOrderStatuses = async (): Promise<SallaOrderStatus[]> => {
+  const response = await apiFetch<
+    SallaOrderStatus[] | { data?: SallaOrderStatus[]; statuses?: SallaOrderStatus[] }
+  >("/api/integrations/salla/order-statuses");
+  if (Array.isArray(response)) return response;
+  return response.data || response.statuses || [];
+};
+
+export const updateSallaOrderStatus = async (
+  id: string,
+  data: ({ slug: string; status_id?: never } | { status_id: number; slug?: never }) & { restore_items?: boolean },
+) =>
+  apiFetch<SallaOrderStatusUpdateResult>(`/api/integrations/salla/orders/${encodeURIComponent(id)}/status`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export const updateSallaOrder = async (id: string, data: SallaOrderUpdatePayload) =>
+  apiFetch<SallaOrderUpdateResult>(`/api/integrations/salla/orders/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export function subscribeStoreOrderEvents(
+  onEvent: (event: StoreOrderRealtimeEvent) => void,
+  options: { onError?: (error: Error) => void; retryDelayMs?: number; maxRetryDelayMs?: number } = {},
+) {
+  const initialRetryDelay = Math.max(500, Math.min(options.retryDelayMs || 1_000, 10_000));
+  const maxRetryDelay = Math.max(initialRetryDelay, Math.min(options.maxRetryDelayMs || 15_000, 60_000));
+  let retryDelay = initialRetryDelay;
+  let stopped = false;
+  let controller: AbortController | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleReconnect = () => {
+    if (stopped || retryTimer) return;
+    const delay = retryDelay;
+    retryDelay = Math.min(maxRetryDelay, retryDelay * 2);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connect();
+    }, delay);
+  };
+
+  const dispatchFrame = (frame: string) => {
+    let eventType = "";
+    const dataLines: string[] = [];
+    for (const line of frame.split(/\r?\n/)) {
+      if (!line || line.startsWith(":")) continue;
+      if (line.startsWith("event:")) {
+        eventType = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).replace(/^ /, ""));
+      }
+    }
+    if (!dataLines.length) return;
+
+    try {
+      const parsed = JSON.parse(dataLines.join("\n")) as Partial<StoreOrderRealtimeEvent>;
+      const type = String(parsed.type || eventType);
+      if (!type.startsWith("order.") && type !== "sync.completed") return;
+      onEvent({ ...parsed, type } as StoreOrderRealtimeEvent);
+    } catch (error) {
+      options.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  const connect = async () => {
+    if (stopped) return;
+    try {
+      const token = await getApiAuthorizationToken();
+      if (!token) throw new Error("يجب تسجيل الدخول أولا.");
+      if (stopped) return;
+
+      controller = new AbortController();
+      const response = await fetch("/api/store/orders/events", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          Authorization: `Bearer ${token}`,
+        },
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`تعذر فتح قناة تحديث الطلبات (HTTP ${response.status}).`);
+      if (!response.body) throw new Error("المتصفح لا يدعم قناة تحديث الطلبات اللحظية.");
+
+      retryDelay = initialRetryDelay;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundary = buffer.match(/\r?\n\r?\n/);
+        while (boundary?.index !== undefined) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary[0].length);
+          dispatchFrame(frame);
+          boundary = buffer.match(/\r?\n\r?\n/);
+        }
+      }
+      if (!stopped) throw new Error("انقطعت قناة تحديث الطلبات اللحظية.");
+    } catch (error) {
+      if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
+      options.onError?.(error instanceof Error ? error : new Error(String(error)));
+      scheduleReconnect();
+    } finally {
+      controller = null;
+    }
+  };
+
+  void connect();
+  return () => {
+    stopped = true;
+    controller?.abort();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+}
 
 export const getStoreOrder = async (id: string) => apiFetch<StoreOrder>(`/api/store/orders/${id}`);
 

@@ -22,6 +22,8 @@ const collectionPrefixes: Record<string, string> = {
   reminders: "rem",
   store_orders: "store",
   store_webhook_events: "swe",
+  salla_order_inbox: "soi",
+  salla_order_commands: "soc",
   technician_notifications: "tn",
 };
 
@@ -31,9 +33,35 @@ const primaryKeyByTable: Record<string, string> = {
 
 const fieldToColumn: Record<string, string> = {
   createdBy: "owner_uid",
+  ownerUid: "owner_uid",
   createdAt: "created_at",
   updatedAt: "updated_at",
   maxDaily: "max_daily",
+  merchantId: "merchant_id",
+  remoteOrderId: "remote_order_id",
+  payloadHash: "payload_hash",
+  receivedAt: "received_at",
+  processedAt: "processed_at",
+  nextAttemptAt: "next_attempt_at",
+  errorCode: "error_code",
+  orderDocId: "order_doc_id",
+  commandType: "command_type",
+  desiredHash: "desired_hash",
+  attemptCount: "attempt_count",
+  beforeHash: "before_hash",
+  afterHash: "after_hash",
+  resultStatus: "result_status",
+  lastError: "last_error",
+  actorUid: "actor_uid",
+  completedAt: "completed_at",
+  leaseToken: "lease_token",
+  remoteStatusId: "remote_status_id",
+  remoteStatusName: "remote_status_name",
+  remoteStatusSlug: "remote_status_slug",
+  remoteUpdatedAt: "remote_updated_at",
+  remoteSyncedAt: "remote_synced_at",
+  syncOrigin: "sync_origin",
+  remoteDeletedAt: "remote_deleted_at",
 };
 
 const columnToField: Record<string, string> = {
@@ -41,6 +69,31 @@ const columnToField: Record<string, string> = {
   created_at: "createdAt",
   updated_at: "updatedAt",
   max_daily: "maxDaily",
+  merchant_id: "merchantId",
+  remote_order_id: "remoteOrderId",
+  payload_hash: "payloadHash",
+  received_at: "receivedAt",
+  processed_at: "processedAt",
+  next_attempt_at: "nextAttemptAt",
+  error_code: "errorCode",
+  order_doc_id: "orderDocId",
+  command_type: "commandType",
+  desired_hash: "desiredHash",
+  attempt_count: "attemptCount",
+  before_hash: "beforeHash",
+  after_hash: "afterHash",
+  result_status: "resultStatus",
+  last_error: "lastError",
+  actor_uid: "actorUid",
+  completed_at: "completedAt",
+  lease_token: "leaseToken",
+  remote_status_id: "remoteStatusId",
+  remote_status_name: "remoteStatusName",
+  remote_status_slug: "remoteStatusSlug",
+  remote_updated_at: "remoteUpdatedAt",
+  remote_synced_at: "remoteSyncedAt",
+  sync_origin: "syncOrigin",
+  remote_deleted_at: "remoteDeletedAt",
 };
 
 function configured() {
@@ -203,7 +256,18 @@ class SupabaseDocRef {
     return new SupabaseDocSnapshot(this.table, this.id, rows[0] || null);
   }
 
-  async set(data: Record<string, unknown>, _options?: { merge?: boolean }) {
+  async set(data: Record<string, unknown>, options?: { merge?: boolean }) {
+    if (options?.merge) {
+      const patchParams = new URLSearchParams();
+      patchParams.append(this.primaryKey(), formatFilterValue("==", this.id));
+      const patched = await request<Record<string, unknown>[]>(this.table, patchParams, {
+        method: "PATCH",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify(toDbRecord(data, this.table)),
+      });
+      if (patched.length) return;
+    }
+
     const params = new URLSearchParams();
     params.set("on_conflict", this.primaryKey());
     await request<Record<string, unknown>[]>(this.table, params, {
@@ -211,6 +275,37 @@ class SupabaseDocRef {
       headers: { Prefer: "resolution=merge-duplicates,return=representation" },
       body: JSON.stringify([toDbRecord(data, this.table, this.id)]),
     });
+  }
+
+  async create(data: Record<string, unknown>) {
+    try {
+      await request<Record<string, unknown>[]>(this.table, new URLSearchParams(), {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify([toDbRecord(data, this.table, this.id)]),
+      });
+    } catch (error) {
+      if (/Supabase 409:|duplicate key|already exists/i.test(error instanceof Error ? error.message : String(error))) {
+        const conflict = new Error(`Document ${this.id} already exists.`) as Error & { code?: string };
+        conflict.code = "ALREADY_EXISTS";
+        throw conflict;
+      }
+      throw error;
+    }
+  }
+
+  async compareAndSet(expected: Record<string, unknown>, data: Record<string, unknown>) {
+    const params = new URLSearchParams();
+    params.append(this.primaryKey(), formatFilterValue("==", this.id));
+    for (const [field, value] of Object.entries(expected)) {
+      params.append(columnName(field), formatFilterValue("==", value));
+    }
+    const rows = await request<Record<string, unknown>[]>(this.table, params, {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify(toDbRecord(data, this.table)),
+    });
+    return rows.length === 1;
   }
 
   async update(data: Record<string, unknown>) {

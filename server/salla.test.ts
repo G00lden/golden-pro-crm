@@ -24,8 +24,11 @@ const {
   getSallaStatus,
   handleSallaAppWebhook,
   syncSallaCustomersForUser,
+  syncSallaOrdersForUser,
 } = sallaModule;
 const { adminDb } = await import("./firebaseAdmin");
+const { getStoreOrderDocId, projectStoreOrderForUser } = await import("./storeWebhook");
+const { subscribeStoreOrderChanges } = await import("./storeOrderRealtime");
 const originalFetch = globalThis.fetch;
 const baselineSallaEnv = Object.fromEntries([
   "SALLA_SCOPES",
@@ -78,6 +81,15 @@ async function linkSallaOwner(uid: string) {
 async function customersForOwner(uid: string) {
   const snapshot = await adminDb
     .collection("customers")
+    .where("createdBy", "==", uid)
+    .limit(10_000)
+    .get();
+  return snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) })) as Array<Record<string, any>>;
+}
+
+async function recordsForOwner(collection: string, uid: string) {
+  const snapshot = await adminDb
+    .collection(collection)
     .where("createdBy", "==", uid)
     .limit(10_000)
     .get();
@@ -148,7 +160,253 @@ test("caps Salla pagination at 30 even when configuration requests 50", () => {
   }
 });
 
-test("uses independent customer pagination and always requests customers.read", () => {
+test("order pagination is fixed at 30 rows and 200 pages independently of other sync settings", () => {
+  process.env.SALLA_SYNC_PAGE_SIZE = "10";
+  process.env.SALLA_SYNC_MAX_PAGES = "3";
+  assert.equal(salla.orderPageSize(), 30);
+  assert.equal(salla.orderMaxSyncPages(), 200);
+  assert.equal(salla.pageSize(), 10);
+});
+
+test("collects all 2,618 orders across 88 sequential pages before projection", async () => {
+  const total = 2_618;
+  const totalPages = 88;
+  const requestedPages: number[] = [];
+  const result = await salla.collectCompleteSallaOrderPages(async (page: number) => {
+    requestedPages.push(page);
+    const start = (page - 1) * 30;
+    const size = Math.min(30, total - start);
+    return {
+      data: Array.from({ length: size }, (_, index) => ({ id: start + index + 1 })),
+      pagination: { total, totalPages, currentPage: page, perPage: 30 },
+    };
+  });
+
+  assert.equal(result.fetched, total);
+  assert.equal(result.orders.length, total);
+  assert.equal(result.pages, totalPages);
+  assert.equal(result.advertisedTotal, total);
+  assert.equal(result.advertisedPages, totalPages);
+  assert.deepEqual(requestedPages, Array.from({ length: totalPages }, (_, index) => index + 1));
+});
+
+test("rejects early empty, capped, and duplicate order snapshots as incomplete", async () => {
+  await assert.rejects(
+    salla.collectCompleteSallaOrderPages(async (page: number) => ({
+      data: page === 2
+        ? []
+        : Array.from({ length: 30 }, (_, index) => ({ id: (page - 1) * 30 + index + 1 })),
+      pagination: { total: 61, totalPages: 3 },
+    })),
+    /page 2 was empty/i,
+  );
+
+  let capCalls = 0;
+  await assert.rejects(
+    salla.collectCompleteSallaOrderPages(async () => {
+      capCalls += 1;
+      return {
+        data: Array.from({ length: 30 }, (_, index) => ({ id: index + 1 })),
+        pagination: { total: 6_030, totalPages: 201 },
+      };
+    }),
+    /exceeds the 200-page safety cap/i,
+  );
+  assert.equal(capCalls, 1);
+
+  await assert.rejects(
+    salla.collectCompleteSallaOrderPages(async (page: number) => ({
+      data: page === 1
+        ? Array.from({ length: 30 }, (_, index) => ({ id: index + 1 }))
+        : [{ id: 30 }],
+      pagination: { total: 31, totalPages: 2 },
+    })),
+    /duplicate remote order 30/i,
+  );
+});
+
+test("historical projection preserves local workflow state and creates no operational records", async () => {
+  const uid = "owner-order-projection";
+  const remoteOrderId = "remote-order-projection";
+  const orderDocId = getStoreOrderDocId(uid, "salla", remoteOrderId);
+  const orderRef = adminDb.collection("store_orders").doc(orderDocId);
+  await orderRef.set({
+    createdBy: uid,
+    provider: "salla",
+    order_id: remoteOrderId,
+    order_number: "LOCAL-1",
+    journey_status: "completed",
+    current_step: "completed",
+    scheduled_date: "2026-08-20",
+    scheduled_time: "14:30",
+    installation_ids: ["installation-local"],
+    booking_ids: ["booking-local"],
+    items: [{
+      name: "Old item name",
+      sku: "OLD-SKU",
+      remote_item_id: "line-1",
+      quantity: 1,
+      order_type: "install_maintenance",
+      detected_type: "install_maintenance",
+      manual_type: "install_maintenance",
+      status: "booking_created",
+      product_id: "product-local",
+      installation_id: "installation-local",
+      booking_id: "booking-local",
+    }],
+    imported_at: "2026-07-01T00:00:00.000Z",
+    last_event_at: "2026-07-01T00:00:00.000Z",
+  });
+
+  const events: Array<{ type: string; source: string }> = [];
+  const unsubscribe = subscribeStoreOrderChanges(uid, (event) => events.push(event));
+  try {
+    await projectStoreOrderForUser(uid, {
+      provider: "salla",
+      eventType: "salla.api.sync",
+      eventId: "sync:projection",
+      orderId: remoteOrderId,
+      orderNumber: "REMOTE-1",
+      status: "in_progress",
+      customerName: "Projection Customer",
+      customerPhone: "966500000101",
+      customerCity: "Riyadh",
+      orderDate: "2026-07-10",
+      scheduledDate: "2026-09-01",
+      scheduledTime: "09:00",
+      total: 125,
+      items: [{
+        name: "Renamed remote item",
+        sku: "NEW-SKU",
+        remoteItemId: "line-1",
+        quantity: 1,
+        maintenanceMonths: 3,
+        orderType: "install_maintenance",
+        tags: [],
+        unitPrice: 125,
+        totalPrice: 125,
+        currency: "SAR",
+      }],
+    }, {
+      last_event_at: "2026-07-10T10:15:00.000Z",
+      remote_updated_at: "2026-07-10T10:15:00.000Z",
+      remote_synced_at: "2026-07-13T12:00:00.000Z",
+      remote_status_id: "status-1",
+      remote_status_name: "In progress",
+      remote_status_slug: "in_progress",
+      sync_origin: "salla_sync",
+    });
+  } finally {
+    unsubscribe();
+  }
+
+  const projected = (await orderRef.get()).data() || {};
+  const item = projected.items[0];
+  assert.equal(item.remote_item_id, "line-1");
+  assert.equal(item.sku, "NEW-SKU");
+  assert.equal(item.manual_type, "install_maintenance");
+  assert.equal(item.installation_id, "installation-local");
+  assert.equal(item.booking_id, "booking-local");
+  assert.equal(projected.scheduled_date, "2026-08-20");
+  assert.equal(projected.scheduled_time, "14:30");
+  assert.equal(projected.journey_status, "completed");
+  assert.equal(projected.current_step, "completed");
+  assert.equal(projected.last_event_at, "2026-07-10T10:15:00.000Z");
+  assert.equal(projected.remote_updated_at, "2026-07-10T10:15:00.000Z");
+  assert.equal(projected.remote_synced_at, "2026-07-13T12:00:00.000Z");
+  assert.equal(projected.remote_status_slug, "in_progress");
+  assert.equal(projected.sync_origin, "salla_sync");
+  assert.equal((await recordsForOwner("installations", uid)).length, 0);
+  assert.equal((await recordsForOwner("bookings", uid)).length, 0);
+  assert.equal((await recordsForOwner("reminders", uid)).length, 0);
+  assert.equal((await recordsForOwner("communication_jobs", uid)).length, 0);
+  assert.deepEqual(events.map((event) => [event.type, event.source]), [["order.updated", "salla_sync"]]);
+});
+
+test("full order sync suppresses per-order realtime noise and publishes one completion event", async () => {
+  const uid = "owner-order-sync-complete";
+  await linkSallaOwner(uid);
+  await adminDb.collection("store_orders").doc(getStoreOrderDocId(uid, "salla", "order-sync-1")).set({
+    createdBy: uid,
+    provider: "salla",
+    order_id: "order-sync-1",
+    order_number: "SYNC-1",
+    total: 1,
+    items: [{
+      name: "Old sync item",
+      sku: "INSTALL-SYNC-1",
+      remote_item_id: "line-sync-1",
+      quantity: 1,
+      unit_price: 1,
+      total_price: 1,
+      order_type: "install_maintenance",
+      status: "awaiting_schedule",
+    }],
+    last_event_at: "2026-07-12T11:00:00.000Z",
+    imported_at: "2026-07-12T10:00:00.000Z",
+  });
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.pathname, "/admin/v2/orders");
+    assert.equal(url.searchParams.get("page"), "1");
+    assert.equal(url.searchParams.get("per_page"), "30");
+    return jsonResponse({
+      data: [{
+        id: "order-sync-1",
+        reference_id: "SYNC-1",
+        created_at: "2026-07-12T10:00:00.000Z",
+        updated_at: "2026-07-12T11:00:00.000Z",
+        status: { id: "status-2", name: "Under review", slug: "under_review" },
+        customer: { name: "Sync Customer", mobile_code: "+966", mobile: "500000102" },
+        items: [{ id: "line-sync-1", name: "Install item", sku: "INSTALL-SYNC-1", quantity: 1 }],
+      }],
+      pagination: { total: 1, totalPages: 1, currentPage: 1, perPage: 30 },
+    });
+  }) as typeof fetch;
+
+  const events: Array<{ type: string; source: string }> = [];
+  const unsubscribe = subscribeStoreOrderChanges(uid, (event) => events.push(event));
+  let result;
+  try {
+    result = await syncSallaOrdersForUser(uid);
+  } finally {
+    unsubscribe();
+  }
+
+  assert.equal(result.success, true);
+  assert.equal(result.complete, true);
+  assert.equal(result.imported, 0);
+  assert.equal(result.updated, 1);
+  assert.equal(result.fetched, 1);
+  assert.equal(result.advertised_count, 1);
+  assert.equal(result.advertised_pages, 1);
+  assert.deepEqual(events.map((event) => [event.type, event.source]), [["sync.completed", "salla_sync"]]);
+  assert.equal((await recordsForOwner("installations", uid)).length, 0);
+  assert.equal((await recordsForOwner("bookings", uid)).length, 0);
+
+  const stored = (await salla.readLocalIntegrationStore())[uid];
+  assert.equal(stored.last_order_sync_status, "success");
+  assert.equal(stored.last_order_sync_complete, true);
+  assert.equal(stored.last_order_sync_count, 1);
+  assert.equal(stored.last_order_sync_advertised_count, 1);
+  assert.equal(stored.last_order_sync_advertised_pages, 1);
+  assert.equal(stored.last_order_sync_warning, null);
+
+  const orderDoc = await adminDb
+    .collection("store_orders")
+    .doc(getStoreOrderDocId(uid, "salla", "order-sync-1"))
+    .get();
+  const orderData = orderDoc.data() || {};
+  assert.equal(orderData.items[0].remote_item_id, "line-sync-1");
+  assert.equal(orderData.remote_status_id, "status-2");
+  assert.equal(orderData.remote_status_name, "Under review");
+  assert.equal(orderData.remote_status_slug, "under_review");
+  assert.equal(orderData.remote_updated_at, "2026-07-12T11:00:00.000Z");
+  assert.equal(orderData.last_event_at, "2026-07-12T11:00:00.000Z");
+  assert.equal(orderData.sync_origin, "salla_sync");
+});
+
+test("uses independent customer pagination and requests bidirectional Salla scopes", () => {
   process.env.SALLA_SYNC_PAGE_SIZE = "10";
   process.env.SALLA_SYNC_MAX_PAGES = "3";
   process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE = "99";
@@ -158,7 +416,10 @@ test("uses independent customer pagination and always requests customers.read", 
   assert.equal(salla.pageSize(), 10);
   assert.equal(salla.customerPageSize(), 60);
   assert.equal(salla.customerMaxSyncPages(), 200);
-  assert.equal(salla.defaultScopes(), "offline_access orders.read products.read customers.read");
+  assert.equal(
+    salla.defaultScopes(),
+    "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write",
+  );
 });
 
 test("syncs 4,610 customers across all 77 advertised pages", async () => {
@@ -593,7 +854,7 @@ test("never retries a token POST after an explicit transient HTTP response", asy
   ));
   assert.equal(calls, 1);
   assert.equal(salla.isTransientSallaError(error), true);
-  assert.equal(salla.statusAfterSyncFailure(error), "connected");
+  assert.equal(salla.statusAfterSyncFailure(error), "error");
 });
 
 test("only authentication failures latch the integration into error", async () => {
