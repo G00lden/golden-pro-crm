@@ -23,9 +23,13 @@ const sharedEnv = {
   SMOKE_TEST_UID: "ci-owner",
   DISABLE_OUTBOUND: "true",
   DISABLE_HMR: "true",
+  NODE_ENV: "development",
+  ENABLE_VITE_DEV_SERVER: "true",
 };
 
-const server = spawn(process.execPath, ["scripts/start-server.mjs", "--dev"], {
+// Start the actual server process instead of the npm/start wrapper. On Windows,
+// killing the wrapper could leave the tsx child orphaned after CI completed.
+const server = spawn(process.execPath, ["--import", "tsx", "server.ts"], {
   cwd: root,
   env: sharedEnv,
   stdio: ["ignore", "pipe", "pipe"],
@@ -72,10 +76,16 @@ try {
   console.log(`CI integration passed against ${appUrl}`);
 } finally {
   if (process.platform === "win32" && server.pid) {
-    spawnSync("taskkill.exe", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore" });
+    const result = spawnSync("taskkill.exe", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore" });
+    if (result.status !== 0 && server.exitCode === null) server.kill();
   } else {
     server.kill("SIGTERM");
   }
-  await Promise.race([new Promise((resolve) => server.once("exit", resolve)), delay(3000)]);
+  if (server.exitCode === null) {
+    await Promise.race([new Promise((resolve) => server.once("exit", resolve)), delay(3000)]);
+  }
   rmSync(directory, { recursive: true, force: true });
+  if (server.exitCode === null) {
+    throw new Error(`CI test server ${server.pid} did not stop cleanly.`);
+  }
 }
