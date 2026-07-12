@@ -11,6 +11,10 @@ services:
     restart: unless-stopped
     env_file:
       - ../.env.production
+    environment:
+      # The deploy command must override any stale BUILD_COMMIT left in the
+      # env file so /api/health identifies the exact packaged source.
+      BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
     expose:
       - "8080"
     ports:

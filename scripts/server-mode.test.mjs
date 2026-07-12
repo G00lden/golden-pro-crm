@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { resolveServerMode, serverEnvironment } from "./lib/server-mode.mjs";
 
@@ -20,4 +21,9 @@ test("development requires the explicit --dev flag", () => {
 
 test("an explicit environment file is preserved", () => {
   assert.equal(serverEnvironment("production", { ENV_FILE: "custom.env" }).ENV_FILE, "custom.env");
+});
+
+test("Docker runtime commit overrides stale env-file metadata", () => {
+  const compose = readFileSync(new URL("../deploy/docker-compose.yml", import.meta.url), "utf8");
+  assert.match(compose, /environment:\s*[\s\S]*?BUILD_COMMIT:\s*\$\{BUILD_COMMIT:-unknown\}/);
 });
