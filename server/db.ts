@@ -771,10 +771,198 @@ db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices
 for (const col of [
   ["store_provider", "TEXT"],
   ["store_customer_id", "TEXT"],
+  ["customer_type", "TEXT DEFAULT 'unknown'"],
+  ["odoo_id", "TEXT"],
 ] as const) {
   if (!hasColumn("customers", col[0])) {
     db.exec(`ALTER TABLE customers ADD COLUMN ${col[0]} ${col[1]}`);
   }
+}
+
+// Product-level service policy. `service_tasks` is a JSON array so one device
+// can carry independent schedules (for example pre-filters every 3 months and
+// a membrane every 24 months) without creating duplicate product records.
+for (const col of [
+  ["service_mode", "TEXT DEFAULT 'none'"],
+  ["policy_active", "INTEGER DEFAULT 0"],
+  ["service_tasks", "TEXT DEFAULT '[]'"],
+  ["compatibility_group", "TEXT DEFAULT ''"],
+  ["warranty_months", "INTEGER DEFAULT 0"],
+  ["warranty_enabled", "INTEGER DEFAULT 0"],
+  ["reminder_media_type", "TEXT DEFAULT 'none'"],
+  ["reminder_media_url", "TEXT DEFAULT ''"],
+  ["reminder_cta", "TEXT DEFAULT 'auto'"],
+] as const) {
+  if (!hasColumn("products", col[0])) {
+    db.exec(`ALTER TABLE products ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+// Align the legacy SQLite reminder table with the Firestore/Supabase shape.
+// Keeping `remind_type` preserves old rows while new code writes
+// `reminder_type`; readers accept either.
+for (const col of [
+  ["product_id", "TEXT"],
+  ["reminder_type", "TEXT"],
+  ["trigger", "TEXT"],
+  ["error", "TEXT"],
+  ["whatsapp_jid", "TEXT"],
+  ["whatsapp_message_id", "TEXT"],
+  ["asset_id", "TEXT"],
+  ["service_cycle_id", "TEXT"],
+] as const) {
+  if (!hasColumn("reminders", col[0])) {
+    db.exec(`ALTER TABLE reminders ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS customer_assets (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    asset_code TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unassigned',
+    origin TEXT NOT NULL DEFAULT 'sold',
+    customer_id TEXT,
+    customer_name TEXT DEFAULT '',
+    customer_phone TEXT DEFAULT '',
+    product_id TEXT,
+    product_name TEXT DEFAULT '',
+    product_sku TEXT DEFAULT '',
+    manufacturer_serial TEXT DEFAULT '',
+    location_label TEXT DEFAULT '',
+    purchase_date TEXT,
+    installation_date TEXT,
+    warranty_months INTEGER DEFAULT 0,
+    warranty_start TEXT,
+    warranty_end TEXT,
+    store_provider TEXT,
+    store_order_id TEXT,
+    store_order_number TEXT,
+    store_item_index INTEGER,
+    store_order_item_key TEXT,
+    source TEXT DEFAULT 'manual',
+    notes TEXT DEFAULT '',
+    activated_at TEXT,
+    activated_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, asset_code)
+  );
+  CREATE INDEX IF NOT EXISTS idx_customer_assets_owner_status ON customer_assets(owner_uid, status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_customer_assets_customer ON customer_assets(owner_uid, customer_id, status);
+  CREATE INDEX IF NOT EXISTS idx_customer_assets_product ON customer_assets(owner_uid, product_id, status);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_assets_serial ON customer_assets(owner_uid, manufacturer_serial)
+    WHERE manufacturer_serial IS NOT NULL AND manufacturer_serial <> '';
+
+  CREATE TABLE IF NOT EXISTS service_cycles (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    customer_id TEXT,
+    customer_name TEXT DEFAULT '',
+    customer_phone TEXT DEFAULT '',
+    product_id TEXT,
+    product_name TEXT DEFAULT '',
+    task_key TEXT NOT NULL,
+    task_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    start_date TEXT NOT NULL,
+    due_date TEXT NOT NULL,
+    interval_value INTEGER NOT NULL DEFAULT 1,
+    interval_unit TEXT NOT NULL DEFAULT 'months',
+    lead_days INTEGER NOT NULL DEFAULT 14,
+    reminder_template TEXT DEFAULT '',
+    reminder_media_type TEXT DEFAULT 'none',
+    reminder_media_url TEXT DEFAULT '',
+    reminder_cta TEXT DEFAULT 'auto',
+    reminder_count INTEGER DEFAULT 0,
+    intensive_count INTEGER DEFAULT 0,
+    last_reminder_at TEXT,
+    next_reminder_at TEXT,
+    completed_at TEXT,
+    completed_by TEXT,
+    completion_notes TEXT DEFAULT '',
+    source_cycle_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_service_cycles_owner_due ON service_cycles(owner_uid, status, due_date);
+  CREATE INDEX IF NOT EXISTS idx_service_cycles_next_reminder ON service_cycles(status, next_reminder_at);
+  CREATE INDEX IF NOT EXISTS idx_service_cycles_asset ON service_cycles(owner_uid, asset_id, status);
+
+  CREATE TABLE IF NOT EXISTS asset_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    service_cycle_id TEXT,
+    event_type TEXT NOT NULL,
+    summary TEXT DEFAULT '',
+    metadata TEXT DEFAULT '{}',
+    performed_by TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_asset_events_asset ON asset_events(owner_uid, asset_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS marketing_campaigns (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    message TEXT NOT NULL DEFAULT '',
+    media_type TEXT DEFAULT 'none',
+    media_url TEXT DEFAULT '',
+    selected_customer_ids TEXT DEFAULT '[]',
+    selected_product_ids TEXT DEFAULT '[]',
+    sent_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
+    sent_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_owner ON marketing_campaigns(owner_uid, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS odoo_import_runs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'preview',
+    imported INTEGER DEFAULT 0,
+    updated INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    summary TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_odoo_import_runs_owner ON odoo_import_runs(owner_uid, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS replacement_links (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    customer_id TEXT,
+    customer_name TEXT DEFAULT '',
+    customer_phone TEXT DEFAULT '',
+    product_id TEXT NOT NULL,
+    product_name TEXT DEFAULT '',
+    compatibility_group TEXT DEFAULT '',
+    candidate_asset_ids TEXT DEFAULT '[]',
+    selected_asset_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    purchase_date TEXT,
+    store_order_id TEXT,
+    store_order_number TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_replacement_links_owner_status ON replacement_links(owner_uid, status, created_at DESC);
+`);
+
+for (const col of [
+  ["store_provider", "TEXT"],
+  ["store_order_number", "TEXT"],
+  ["store_item_index", "INTEGER"],
+] as const) {
+  if (!hasColumn("customer_assets", col[0])) db.exec(`ALTER TABLE customer_assets ADD COLUMN ${col[0]} ${col[1]}`);
 }
 
 // Seller identity is saved per-owner via PUT /api/settings (defaultSettings

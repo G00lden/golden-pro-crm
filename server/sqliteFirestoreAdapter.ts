@@ -30,6 +30,12 @@ const collectionPrefixes: Record<string, string> = {
   crm_tasks: "task",
   crm_notes: "note",
   audit_logs: "audit",
+  customer_assets: "asset",
+  service_cycles: "cycle",
+  asset_events: "aevt",
+  marketing_campaigns: "camp",
+  odoo_import_runs: "odoo",
+  replacement_links: "repl",
 };
 
 const primaryKeyByTable: Record<string, string> = {
@@ -219,6 +225,8 @@ const fieldToColumn: Record<string, string> = {
   sellerVatNumber: "seller_vat_number",
   sellerAddress: "seller_address",
   qrCode: "qr_code",
+  assetId: "asset_id",
+  serviceCycleId: "service_cycle_id",
 };
 
 const jsonColumns = new Set([
@@ -231,6 +239,11 @@ const jsonColumns = new Set([
   "order_types",
   "permissions",
   "product_ids",
+  "service_tasks",
+  "selected_customer_ids",
+  "selected_product_ids",
+  "summary",
+  "candidate_asset_ids",
 ]);
 
 function mapToColumn(key: string): string {
@@ -238,6 +251,7 @@ function mapToColumn(key: string): string {
 }
 
 function serializeValue(value: unknown) {
+  if (typeof value === "boolean") return value ? 1 : 0;
   if (
     value &&
     typeof value === "object" &&
@@ -271,6 +285,7 @@ function mapRecord(record: Record<string, unknown>, table?: string): Record<stri
     if (value === undefined) continue;
     const col = mapToColumn(key);
     if (col === "id" && skipId) continue;
+    if (table && !isValidColumn(table, col)) continue;
     mapped[col] = serializeValue(value);
   }
   return mapped;

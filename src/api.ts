@@ -25,7 +25,9 @@ export type Customer = {
   name: string;
   phone: string;
   city?: string;
-  source?: "manual" | "salla";
+  source?: "manual" | "salla" | "odoo" | "import";
+  customer_type?: "retail" | "wholesale" | "unknown";
+  odoo_id?: string | null;
   store_provider?: string;
   store_customer_id?: string | null;
   createdBy?: string;
@@ -51,9 +53,75 @@ export type Product = {
   store_status?: string;
   last_synced_at?: string;
   product_type?: "sale_only" | "install_maintenance" | "maintenance_existing" | "external_maintenance" | "needs_review";
+  service_mode?: "none" | "asset_maintenance" | "consumable_replacement" | "service";
+  policy_active?: boolean;
+  service_tasks?: ServiceTask[] | string;
+  compatibility_group?: string;
+  warranty_enabled?: boolean;
+  warranty_months?: number;
+  reminder_media_type?: "none" | "image" | "video";
+  reminder_media_url?: string;
+  reminder_cta?: string;
   createdBy?: string;
   createdAt?: string;
   updatedAt?: string;
+};
+
+export type ServiceTask = {
+  key: string;
+  name: string;
+  interval_value: number;
+  interval_unit: "days" | "months";
+  lead_days: number;
+  start_event: "purchase" | "delivery" | "installation" | "service_completion";
+  template: string;
+  media_type: "none" | "image" | "video";
+  media_url: string;
+  cta: "auto" | "reorder" | "booking" | "both" | "contact";
+  active: boolean;
+};
+
+export type CustomerAsset = {
+  id: string;
+  asset_code: string;
+  status: "unassigned" | "active" | "paused" | "retired";
+  origin?: "sold" | "legacy" | "external";
+  customer_id?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  product_id?: string;
+  product_name?: string;
+  manufacturer_serial?: string;
+  location_label?: string;
+  purchase_date?: string;
+  installation_date?: string;
+  warranty_end?: string | null;
+  warranty_days_remaining?: number | null;
+  public_url: string;
+  createdAt?: string;
+};
+
+export type ServiceCycle = {
+  id: string;
+  asset_id: string;
+  task_name: string;
+  customer_name?: string;
+  product_name?: string;
+  due_date: string;
+  status: string;
+  computed_status?: string;
+  days_until?: number;
+  reminder_count?: number;
+};
+
+export type AssetWorkspace = {
+  assets: CustomerAsset[];
+  cycles: ServiceCycle[];
+  products: Product[];
+  customers: Customer[];
+  campaigns: Array<Record<string, unknown> & { id: string }>;
+  replacement_links: Array<Record<string, unknown> & { id: string }>;
+  stats: { unassigned: number; active_assets: number; due: number; overdue: number; warranty_expiring: number };
 };
 
 export type Installation = {
@@ -2071,6 +2139,82 @@ export const updateProduct = (id: string, data: Partial<Product>) => {
     `products/${id}`,
   );
 };
+
+/* ── Assets, maintenance cycles, warranty and campaigns ── */
+
+export const getAssetWorkspace = () => apiFetch<AssetWorkspace>("/api/assets/workspace");
+
+export const createAssetLabels = (count: number, productId?: string) =>
+  apiFetch<{ items: CustomerAsset[] }>("/api/assets/labels", {
+    method: "POST",
+    body: JSON.stringify({ count, product_id: productId || null }),
+  });
+
+export type AssetActivationPayload = {
+  customer_id?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_city?: string;
+  customer_type?: "retail" | "wholesale" | "unknown";
+  product_id: string;
+  manufacturer_serial?: string;
+  location_label?: string;
+  purchase_date?: string;
+  installation_date?: string;
+  origin?: "sold" | "legacy" | "external";
+  source?: "manual" | "salla" | "odoo" | "import";
+  notes?: string;
+};
+
+export const activateAsset = (id: string, payload: AssetActivationPayload) =>
+  apiFetch(`/api/assets/${id}/activate`, { method: "POST", body: JSON.stringify(payload) });
+
+export const setAssetStatus = (id: string, status: "active" | "paused" | "retired") =>
+  apiFetch(`/api/assets/${id}/status`, { method: "PUT", body: JSON.stringify({ status }) });
+
+export const completeServiceCycle = (id: string, completedDate: string, notes = "") =>
+  apiFetch(`/api/service-cycles/${id}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ completed_date: completedDate, notes }),
+  });
+
+export const updateProductServicePolicy = (id: string, policy: Partial<Product>) =>
+  apiFetch(`/api/products/${id}/service-policy`, { method: "PUT", body: JSON.stringify(policy) });
+
+export const runAssetReminders = () =>
+  apiFetch<{ sent: number; failed: number; skipped: number }>("/api/asset-reminders/run", {
+    method: "POST",
+    body: JSON.stringify({ limit: 100 }),
+  });
+
+export const selectReplacementAsset = (id: string, assetId: string) =>
+  apiFetch(`/api/replacement-links/${id}/select`, { method: "POST", body: JSON.stringify({ asset_id: assetId }) });
+
+export const createMarketingCampaign = (payload: {
+  name: string;
+  message: string;
+  selected_customer_ids: string[];
+  media_type?: "none" | "image" | "video";
+  media_url?: string;
+}) => apiFetch<{ id: string }>("/api/marketing-campaigns", { method: "POST", body: JSON.stringify(payload) });
+
+export const sendMarketingCampaign = (id: string) =>
+  apiFetch<{ sent: number; failed: number }>(`/api/marketing-campaigns/${id}/send`, { method: "POST" });
+
+export const importOdooCustomers = (rows: Array<Record<string, unknown>>, commit: boolean) =>
+  apiFetch<{ created: number; updated: number; skipped: number; preview: Array<Record<string, unknown>> }>("/api/odoo/import", {
+    method: "POST",
+    body: JSON.stringify({ rows, commit }),
+  });
+
+export const getOdooExternalStatus = () =>
+  apiFetch<{ configured: boolean; url: string | null; database: string | null; username: string | null; customer_type_field: string | null }>("/api/odoo/external/status");
+
+export const syncOdooCustomers = () =>
+  apiFetch<{ fetched: number; created: number; updated: number; skipped: number }>("/api/odoo/external/sync-customers", {
+    method: "POST",
+    body: JSON.stringify({ limit: 500 }),
+  });
 
 export const deleteProduct = (id: string) => {
   const user = getUserOrThrow();

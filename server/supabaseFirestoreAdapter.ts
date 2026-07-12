@@ -21,6 +21,12 @@ const collectionPrefixes: Record<string, string> = {
   store_orders: "store",
   store_webhook_events: "swe",
   technician_notifications: "tn",
+  customer_assets: "asset",
+  service_cycles: "cycle",
+  asset_events: "aevt",
+  marketing_campaigns: "camp",
+  odoo_import_runs: "odoo",
+  replacement_links: "repl",
 };
 
 const primaryKeyByTable: Record<string, string> = {

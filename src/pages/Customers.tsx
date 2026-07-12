@@ -9,6 +9,7 @@ import {
   IconButton,
   Loading,
   PageHeader,
+  SelectInput,
   TextInput,
   phoneLabel,
   useData,
@@ -79,6 +80,7 @@ export default function CustomersPage({
               <div className="row-main">
                 <strong>{customer.name}</strong>
                 <span>{phoneLabel(customer.phone)} · {customer.city || "بدون مدينة"}</span>
+                <span>{customer.customer_type === "wholesale" ? "عميل جملة" : customer.customer_type === "retail" ? "عميل أفراد" : "النوع غير محدد"} · المصدر: {customer.source === "salla" ? "سلة" : customer.source === "odoo" ? "أودو" : "يدوي"}</span>
               </div>
               <div className="row-actions">
                 <IconButton title="تعديل" onClick={() => openForm(customer)}><Edit3 size={15} /></IconButton>
@@ -105,13 +107,14 @@ function CustomerForm({
   const [name, setName] = useState(initial?.name || "");
   const [phone, setPhone] = useState(initial?.phone || "");
   const [city, setCity] = useState(initial?.city || "");
+  const [customerType, setCustomerType] = useState<"retail" | "wholesale" | "unknown">(initial?.customer_type || "unknown");
   const [saving, setSaving] = useState(false);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
     try {
-      await onSave({ name: name.trim(), phone: phone.trim(), city: city.trim() });
+      await onSave({ name: name.trim(), phone: phone.trim(), city: city.trim(), customer_type: customerType });
     } finally {
       setSaving(false);
     }
@@ -122,6 +125,13 @@ function CustomerForm({
       <Field label="الاسم"><TextInput required value={name} onChange={(e) => setName(e.target.value)} /></Field>
       <Field label="الجوال"><TextInput required value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="05xxxxxxxx" /></Field>
       <Field label="المدينة"><TextInput value={city} onChange={(e) => setCity(e.target.value)} /></Field>
+      <Field label="نوع العميل">
+        <SelectInput value={customerType} onChange={(e) => setCustomerType(e.target.value as typeof customerType)}>
+          <option value="unknown">غير محدد</option>
+          <option value="retail">أفراد</option>
+          <option value="wholesale">جملة</option>
+        </SelectInput>
+      </Field>
       <div className="form-actions">
         <Button type="submit" loading={saving}><Save size={16} /> حفظ</Button>
         <Button tone="muted" onClick={onCancel}>إلغاء</Button>
