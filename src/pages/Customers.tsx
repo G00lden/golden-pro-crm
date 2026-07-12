@@ -1,5 +1,5 @@
-import { Plus, Search, Edit3, Trash2, Save } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { ChevronLeft, ChevronRight, Plus, Search, Edit3, Trash2, Save } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
 import * as api from "../api";
 import {
   Button,
@@ -15,6 +15,8 @@ import {
   type ModalState,
 } from "../shared";
 
+const CUSTOMER_PAGE_SIZE = 50;
+
 export default function CustomersPage({
   notify,
   refreshStats,
@@ -25,7 +27,22 @@ export default function CustomersPage({
   setModal: (modal: ModalState) => void;
 }) {
   const [search, setSearch] = useState("");
-  const customers = useData(() => api.getCustomers(search), [search]);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const customers = useData(
+    () => api.getCustomers(debouncedSearch, { page, pageSize: CUSTOMER_PAGE_SIZE }),
+    [debouncedSearch, page],
+  );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    const lastPage = customers.data?.totalPages;
+    if (lastPage && page > lastPage) setPage(lastPage);
+  }, [customers.data?.totalPages, page]);
 
   const openForm = (customer?: api.Customer) => {
     setModal({
@@ -70,8 +87,21 @@ export default function CustomersPage({
       />
       <div className="toolbar">
         <Search size={16} />
-        <TextInput placeholder="بحث بالاسم أو الجوال أو المدينة" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <TextInput
+          aria-label="بحث العملاء"
+          placeholder="بحث بالاسم أو الجوال أو المدينة"
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setPage(1);
+          }}
+        />
       </div>
+      {customers.data?.capped && (
+        <div className="inline-error" role="status">
+          عدد العملاء يتجاوز حد التصفح الآمن؛ تُعرض أول 10,000 نتيجة فقط حفاظًا على أداء النظام.
+        </div>
+      )}
       {customers.loading ? <Loading /> : customers.error ? <ErrorBlock message={customers.error} retry={customers.refresh} /> : (
         <div className="list">
           {(customers.data?.data || []).map((customer) => (
@@ -87,6 +117,35 @@ export default function CustomersPage({
             </article>
           ))}
           {!customers.data?.data.length && <Empty title="لا يوجد عملاء بعد" action={<Button onClick={() => openForm()}><Plus size={16} /> إضافة أول عميل</Button>} />}
+          {Boolean(customers.data?.data.length) && (
+            <nav className="panel-head" aria-label="التنقل بين صفحات العملاء">
+              <span className="note" aria-live="polite">
+                صفحة {customers.data?.page || 1} من {customers.data?.totalPages || 1}
+                {" · "}
+                عرض {((customers.data?.page || 1) - 1) * (customers.data?.pageSize || CUSTOMER_PAGE_SIZE) + 1}
+                -{Math.min(
+                  (customers.data?.page || 1) * (customers.data?.pageSize || CUSTOMER_PAGE_SIZE),
+                  customers.data?.total || 0,
+                )} من {customers.data?.total || 0}
+              </span>
+              <div className="form-actions">
+                <Button
+                  tone="muted"
+                  disabled={!customers.data?.hasPrevious || customers.loading}
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                >
+                  <ChevronRight size={16} aria-hidden="true" /> السابق
+                </Button>
+                <Button
+                  tone="muted"
+                  disabled={!customers.data?.hasNext || customers.loading}
+                  onClick={() => setPage((current) => current + 1)}
+                >
+                  التالي <ChevronLeft size={16} aria-hidden="true" />
+                </Button>
+              </div>
+            </nav>
+          )}
         </div>
       )}
     </>

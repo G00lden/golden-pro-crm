@@ -19,6 +19,16 @@ import {
   getCurrentAppUser,
   buildLocalToken,
 } from "./firebase";
+import { serverDataEnabled } from "./dataProvider";
+import {
+  calculateDocumentTotals,
+  type DiscountMode,
+} from "../shared/financial";
+import { resolveInvoiceTaxType, type InvoiceTaxType } from "../shared/zatca";
+
+export type { DiscountMode } from "../shared/financial";
+export type { InvoiceTaxType } from "../shared/zatca";
+import { addCalendarMonths } from "../shared/date";
 
 export type Customer = {
   id: string;
@@ -31,6 +41,23 @@ export type Customer = {
   createdBy?: string;
   createdAt?: string;
   updatedAt?: string;
+};
+
+export type CustomerListOptions = {
+  page?: number;
+  pageSize?: number;
+  all?: boolean;
+};
+
+export type CustomerListResult = {
+  data: Customer[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  capped?: boolean;
 };
 
 export type Product = {
@@ -151,6 +178,8 @@ export type Settings = {
 export type WhatsAppStatus = {
   status: string;
   provider?: "web" | "cloud_api";
+  configured?: boolean;
+  verifiedAt?: string;
   qr?: string;
   lastError?: string;
   user?: string;
@@ -279,6 +308,7 @@ export type StoreJourneyStatus =
 export type StoreOrderItem = {
   name: string;
   sku: string;
+  remote_item_id?: string | number | null;
   quantity: number;
   unit_price?: number | null;
   total_price?: number | null;
@@ -301,6 +331,13 @@ export type StoreOrder = {
   order_id: string;
   order_number: string;
   status?: string;
+  remote_status_id?: string | number | null;
+  remote_status_name?: string | null;
+  remote_status_slug?: string | null;
+  remote_updated_at?: string | null;
+  remote_synced_at?: string | null;
+  sync_origin?: string | null;
+  remote_deleted_at?: string | null;
   external_order_id?: string;
   external_status?: string;
   journey_status: StoreJourneyStatus;
@@ -323,6 +360,112 @@ export type StoreOrder = {
   last_remote_update_at?: string;
   updatedAt?: string;
   createdBy?: string;
+};
+
+export type StoreOrderPage = {
+  data: StoreOrder[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  capped: boolean;
+  warning: string | null;
+};
+
+export type StoreOrderListParams = {
+  search?: string;
+  type?: string;
+  journey?: string;
+  status?: string;
+  city?: string;
+  product?: string;
+  min_total?: number;
+  max_total?: number;
+  page?: number;
+  pageSize?: number;
+};
+
+export type SallaOrderStatus = {
+  id: string | number;
+  name: string;
+  slug: string;
+  sort?: number | null;
+  type?: string | null;
+  original?: string | null;
+  parent?: string | null;
+  message?: string | null;
+  is_active?: boolean;
+};
+
+export type SallaOrderStatusUpdateResult = {
+  success: boolean;
+  changed?: boolean;
+  order?: StoreOrder;
+  status?: SallaOrderStatus | string | null;
+};
+
+export type SallaOrderReceiverUpdate = {
+  name?: string;
+  country_code?: string;
+  phone?: string;
+  email?: string;
+  notify?: boolean;
+};
+
+export type SallaOrderNationalAddressUpdate = {
+  country: number;
+  city: number;
+  address_line: string;
+  street_number: string;
+  block: string;
+  short_address: string;
+  building_number: string;
+  additional_number: string;
+  postal_code: string;
+  geo_coordinates: {
+    lat: number;
+    lng: number;
+  };
+};
+
+export type SallaOrderUpdatePayload = {
+  customer?: {
+    id?: string | number;
+    name?: string;
+    mobile?: string;
+    email?: string;
+  };
+  receiver?: SallaOrderReceiverUpdate;
+  delivery_method?: string;
+  branch_id?: number;
+  courier_id?: number;
+  ship_to?: SallaOrderNationalAddressUpdate;
+  payment?: {
+    status?: string;
+    method?: string;
+    store_bank_id?: number;
+    receipt_image_path?: string;
+    accepted_methods?: string[];
+    cash_on_delivery?: { amount: number; currency: string };
+  };
+  coupon_code?: string;
+  employees?: number[];
+};
+
+export type SallaOrderUpdateResult = {
+  success: boolean;
+  changed?: boolean;
+  order?: StoreOrder;
+};
+
+export type StoreOrderRealtimeEvent = {
+  type: `order.${string}` | "sync.completed";
+  orderId?: string | null;
+  remoteOrderId?: string | null;
+  source: "salla_webhook" | "salla_command" | "salla_sync" | "crm";
+  at: string;
 };
 
 export type StoreOrderClassificationResult = {
@@ -359,6 +502,7 @@ export type SallaIntegrationStatus = {
   scopes: string;
   sync_schedule: string;
   sync_enabled: boolean;
+  customer_sync_interval_minutes?: number;
   store_name?: string | null;
   store_url?: string | null;
   merchant_id?: string | number | null;
@@ -374,6 +518,13 @@ export type SallaIntegrationStatus = {
   last_product_sync_at?: string | null;
   last_product_sync_count?: number;
   last_product_sync_error?: string | null;
+  last_customer_sync_at?: string | null;
+  last_customer_sync_status?: "success" | "failed" | "error" | "idle" | null;
+  last_customer_sync_count?: number;
+  last_customer_sync_error?: string | null;
+  last_customer_sync_complete?: boolean;
+  last_customer_sync_advertised_count?: number | null;
+  last_customer_sync_warning?: string | null;
 };
 
 export type SallaConnectResponse = {
@@ -410,6 +561,22 @@ export type SallaSyncResult = {
     fetched: number;
     last_sync_at: string;
     last_error?: string | null;
+  };
+  customers?: {
+    success: boolean;
+    imported: number;
+    updated: number;
+    failed: number;
+    pages: number;
+    fetched: number;
+    last_sync_at: string;
+    last_error?: string | null;
+    partial?: boolean;
+    cap_reached?: boolean;
+    skipped?: boolean;
+    advertised_count?: number | null;
+    unique_fetched?: number;
+    warning?: string | null;
   };
 };
 
@@ -489,7 +656,12 @@ export type Quote = {
   follow_up_date?: string | null;
   subtotal: number;
   discount: number;
+  discount_mode?: DiscountMode;
+  discount_value?: number;
   tax: number;
+  vat_percent?: number;
+  vat_amount?: number;
+  total_without_vat?: number;
   total: number;
   currency: string;
   payment_method?: string;
@@ -556,6 +728,7 @@ export type Invoice = {
   customer_city?: string;
   customer_vat?: string;
   title?: string;
+  invoice_type?: InvoiceTaxType;
   status: InvoiceStatus;
   issue_date: string;
   due_date?: string | null;
@@ -563,6 +736,8 @@ export type Invoice = {
   payment_method?: string;
   subtotal: number;
   discount: number;
+  discount_mode?: DiscountMode;
+  discount_value?: number;
   vat_percent: number;  // 15 for ZATCA standard
   vat_amount: number;
   total_with_vat: number;
@@ -580,9 +755,10 @@ export type Invoice = {
   updatedAt?: string;
 };
 
-export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "subtotal" | "vat_amount" | "total_with_vat" | "total_without_vat" | "createdBy" | "createdAt" | "updatedAt" | "qr_code">> & {
+export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "invoice_type" | "subtotal" | "vat_amount" | "total_with_vat" | "total_without_vat" | "createdBy" | "createdAt" | "updatedAt" | "qr_code">> & {
   customer_name: string;
   items: InvoiceItem[];
+  invoice_type?: InvoiceTaxType | "auto";
 };
 
 export type InvoiceStats = {
@@ -617,18 +793,6 @@ const localDayWindow = () => ({
 const addDays = (date: string, days: number) => {
   const d = new Date(`${date}T00:00:00`);
   d.setDate(d.getDate() + days);
-  return d.toLocaleDateString("en-CA");
-};
-const addMonths = (date: string, months: number) => {
-  const d = new Date(`${date}T00:00:00`);
-  const targetDay = d.getDate();
-  d.setMonth(d.getMonth() + Number(months || 1));
-  // setMonth overflows month-end dates (Jan 31 + 1 month => Mar 3, not Feb 28).
-  // If the day rolled into the following month, clamp to the intended month's
-  // last day.
-  if (d.getDate() !== targetDay) {
-    d.setDate(0);
-  }
   return d.toLocaleDateString("en-CA");
 };
 
@@ -1012,9 +1176,13 @@ function requestOutboundCode() {
   return code.trim();
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function getApiAuthorizationToken() {
   const user = getCurrentAppUser();
-  const token = user?.local ? buildLocalToken(user.uid) : await user?.getIdToken?.();
+  return user?.local ? buildLocalToken(user.uid) : user?.getIdToken?.();
+}
+
+async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = await getApiAuthorizationToken();
   if (!token) throw new Error("يجب تسجيل الدخول أولا.");
 
   const headers = new Headers(init.headers);
@@ -1034,10 +1202,6 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   return body as T;
 }
-
-const serverDataEnabled = () =>
-  ["sqlite", "supabase"].includes(import.meta.env.VITE_DATA_PROVIDER || "") ||
-  ["sqlite", "supabase"].includes(import.meta.env.VITE_DB_PROVIDER || "");
 
 export const logout = firebaseLogout;
 export const isAuthenticated = () => !!getCurrentAppUser();
@@ -1190,35 +1354,125 @@ export const getStats = async (): Promise<DashboardStats> => {
   };
 };
 
-export const getCustomers = async (search = "") => {
+const CUSTOMER_SCAN_LIMIT = 10_000;
+const DEFAULT_CUSTOMER_PAGE_SIZE = 50;
+const MAX_CUSTOMER_PAGE_SIZE = 100;
+
+function boundedCustomerInteger(value: unknown, fallback: number, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+}
+
+function customerListFromRecords(
+  records: Customer[],
+  options: Required<Pick<CustomerListOptions, "page" | "pageSize" | "all">>,
+  total = records.length,
+  capped = false,
+): CustomerListResult {
+  const accessible = records.slice(0, CUSTOMER_SCAN_LIMIT);
+  const isCapped = capped || records.length > CUSTOMER_SCAN_LIMIT;
+  if (options.all) {
+    return {
+      data: accessible,
+      total,
+      page: 1,
+      pageSize: Math.max(1, accessible.length),
+      totalPages: 1,
+      hasNext: false,
+      hasPrevious: false,
+      capped: isCapped,
+    };
+  }
+
+  const totalPages = Math.max(1, Math.ceil(accessible.length / options.pageSize));
+  const page = Math.min(options.page, totalPages);
+  const start = (page - 1) * options.pageSize;
+  return {
+    data: accessible.slice(start, start + options.pageSize),
+    total,
+    page,
+    pageSize: options.pageSize,
+    totalPages,
+    hasNext: page < totalPages,
+    hasPrevious: page > 1,
+    capped: isCapped,
+  };
+}
+
+export const getCustomers = async (
+  search = "",
+  requested: CustomerListOptions = {},
+): Promise<CustomerListResult> => {
   const user = getCurrentAppUser();
-  if (!user) return { data: [] as Customer[], total: 0 };
+  const all = requested.all ?? (requested.page === undefined && requested.pageSize === undefined);
+  const options = {
+    all,
+    page: boundedCustomerInteger(requested.page, 1, 1, CUSTOMER_SCAN_LIMIT),
+    pageSize: boundedCustomerInteger(
+      requested.pageSize,
+      DEFAULT_CUSTOMER_PAGE_SIZE,
+      1,
+      MAX_CUSTOMER_PAGE_SIZE,
+    ),
+  };
+  if (!user) return customerListFromRecords([], options, 0);
   const uid = user.uid;
   if (user.local) {
     const cleanSearch = search.trim();
-    let data = loadLocalDb(uid).customers.sort((a, b) => a.name.localeCompare(b.name));
+    let data = [...loadLocalDb(uid).customers].sort((a, b) => a.name.localeCompare(b.name));
     if (cleanSearch) data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
-    return { data, total: data.length };
+    return customerListFromRecords(data, options);
   }
   if (serverDataEnabled()) {
     const params = new URLSearchParams();
     if (search.trim()) params.set("search", search.trim());
-    return apiFetch<{ data: Customer[]; total: number }>(`/api/customers${params.toString() ? `?${params}` : ""}`);
+    if (options.all) {
+      params.set("all", "true");
+    } else {
+      params.set("page", String(options.page));
+      params.set("page_size", String(options.pageSize));
+    }
+    return apiFetch<CustomerListResult>(`/api/customers${params.toString() ? `?${params}` : ""}`);
   }
   const baseQ = query(collection(db, "customers"), where("createdBy", "==", uid));
-  const [snap, countSnap] = await Promise.all([
-    getDocs(query(baseQ, orderBy("name"), limit(100))),
-    getCountFromServer(baseQ),
-  ]);
-
-  let data = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+  const countSnap = await getCountFromServer(baseQ);
+  const ownerTotal = countSnap.data().count;
   const cleanSearch = search.trim();
-  if (cleanSearch) {
-    data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
+  if (cleanSearch || options.all) {
+    const snap = await getDocs(query(baseQ, orderBy("name"), limit(CUSTOMER_SCAN_LIMIT)));
+    let data = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+    if (cleanSearch) {
+      data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
+    }
+    return customerListFromRecords(
+      data,
+      options,
+      cleanSearch ? data.length : ownerTotal,
+      ownerTotal > CUSTOMER_SCAN_LIMIT,
+    );
   }
 
-  return { data, total: countSnap.data().count };
+  const accessibleTotal = Math.min(ownerTotal, CUSTOMER_SCAN_LIMIT);
+  const totalPages = Math.max(1, Math.ceil(accessibleTotal / options.pageSize));
+  const page = Math.min(options.page, totalPages);
+  const end = Math.min(page * options.pageSize, CUSTOMER_SCAN_LIMIT);
+  const snap = await getDocs(query(baseQ, orderBy("name"), limit(end)));
+  const leading = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+  const start = (page - 1) * options.pageSize;
+  return {
+    data: leading.slice(start, start + options.pageSize),
+    total: ownerTotal,
+    page,
+    pageSize: options.pageSize,
+    totalPages,
+    hasNext: page < totalPages,
+    hasPrevious: page > 1,
+    capped: ownerTotal > CUSTOMER_SCAN_LIMIT,
+  };
 };
+
+export const getAllCustomers = (search = "") => getCustomers(search, { all: true });
 
 export const createCustomer = (data: Omit<Customer, "id">) => {
   const user = getUserOrThrow();
@@ -1328,15 +1582,30 @@ function normalizeQuoteItems(items: QuoteItem[] = []) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function quoteTotals(items: QuoteItem[], discount = 0, tax = 0) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const cleanTax = Math.max(0, Number(tax || 0));
+function quoteTotals(
+  items: QuoteItem[],
+  discountValue = 0,
+  tax = 0,
+  discountMode: DiscountMode = "fixed",
+  vatPercent = 15,
+) {
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue,
+    discountMode,
+    vatPercent,
+    additionalTax: tax,
+  });
   return {
-    subtotal,
-    discount: cleanDiscount,
-    tax: cleanTax,
-    total: Math.max(0, subtotal - cleanDiscount + cleanTax),
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
+    tax: totals.additionalTax,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_without_vat: totals.totalWithoutVat,
+    total: totals.total,
   };
 }
 
@@ -1390,7 +1659,13 @@ function filterQuotes(quotes: Quote[], filter: { search?: string; status?: strin
 
 function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quote {
   const items = normalizeQuoteItems(data.items);
-  const totals = quoteTotals(items, data.discount, data.tax);
+  const totals = quoteTotals(
+    items,
+    data.discount_value ?? data.discount,
+    data.tax,
+    data.discount_mode,
+    data.vat_percent,
+  );
   const now = nowIso();
   return {
     id: existing?.id || localId("quote"),
@@ -1526,7 +1801,13 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
       items,
       notes: String(data.notes || "").trim(),
       terms: String(data.terms || "").trim(),
-      ...quoteTotals(items, data.discount, data.tax),
+      ...quoteTotals(
+        items,
+        data.discount_value ?? data.discount,
+        data.tax,
+        data.discount_mode,
+        data.vat_percent,
+      ),
       updatedAt: nowIso(),
     }),
     OperationType.UPDATE,
@@ -1647,29 +1928,22 @@ function normalizeInvoiceItems(items: InvoiceItem[] = []) {
 // Treat an explicit 0 (zero-rated) as a valid VAT rate. Only an unset value
 // (undefined / null / "") or a non-numeric value falls back to the default —
 // `0 || 15` would otherwise turn a 0% invoice into 15%.
-function resolveVatPercent(value: unknown, fallback = 15): number {
-  if (value === undefined || value === null || value === "") return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
-function invoiceTotals(items: InvoiceItem[], discount = 0, vat_percent = 15) {
-  const cleanVatPercent = resolveVatPercent(vat_percent);
-  const vatRate = cleanVatPercent / 100;
-  const subtotal = items.reduce((sum, item) => {
-    const total = Number(item.total || 0);
-    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
-  }, 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const withoutVat = Math.max(0, subtotal - cleanDiscount);
-  const vatAmount = withoutVat * vatRate;
+function invoiceTotals(items: InvoiceItem[], discountValue = 0, vat_percent = 15, discountMode: DiscountMode = "fixed") {
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue,
+    discountMode,
+    vatPercent: vat_percent,
+  });
   return {
-    subtotal: Math.round(subtotal * 100) / 100,
-    discount: cleanDiscount,
-    vat_percent: cleanVatPercent,
-    vat_amount: Math.round(vatAmount * 100) / 100,
-    total_with_vat: Math.round((withoutVat + vatAmount) * 100) / 100,
-    total_without_vat: Math.round(withoutVat * 100) / 100,
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_with_vat: totals.total,
+    total_without_vat: totals.totalWithoutVat,
   };
 }
 
@@ -1700,7 +1974,9 @@ function invoiceStats(invoices: Invoice[]): InvoiceStats {
 
 function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings, existing?: Invoice): Invoice {
   const items = normalizeInvoiceItems(data.items);
-  const totals = invoiceTotals(items, data.discount, data.vat_percent);
+  const discountMode: DiscountMode = (data.discount_mode ?? existing?.discount_mode) === "percent" ? "percent" : "fixed";
+  const discountValue = data.discount_value ?? data.discount ?? existing?.discount_value ?? existing?.discount ?? 0;
+  const totals = invoiceTotals(items, discountValue, data.vat_percent ?? existing?.vat_percent, discountMode);
   const now = nowIso();
   return {
     id: existing?.id || localId("inv"),
@@ -1712,6 +1988,11 @@ function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings
     customer_city: String(data.customer_city || existing?.customer_city || "").trim(),
     customer_vat: String(data.customer_vat || existing?.customer_vat || "").trim(),
     title: String(data.title || existing?.title || "").trim(),
+    invoice_type: resolveInvoiceTaxType({
+      requested: data.invoice_type ?? existing?.invoice_type,
+      buyerVat: data.customer_vat ?? existing?.customer_vat,
+      taxableAmount: totals.total_without_vat,
+    }),
     status: (data.status || existing?.status || "issued") as InvoiceStatus,
     issue_date: data.issue_date || existing?.issue_date || today(),
     due_date: data.due_date ?? existing?.due_date ?? addDays(today(), 30),
@@ -1816,7 +2097,13 @@ export const updateInvoice = async (id: string, data: InvoiceInput) => {
       seller_name: String(data.seller_name || "").trim(),
       seller_vat_number: String(data.seller_vat_number || "").trim(),
       seller_address: String(data.seller_address || "").trim(),
-      ...invoiceTotals(items, data.discount, data.vat_percent),
+      invoice_type: resolveInvoiceTaxType({
+        requested: data.invoice_type,
+        buyerVat: data.customer_vat,
+        taxableAmount: invoiceTotals(items, data.discount_value ?? data.discount, data.vat_percent, data.discount_mode).total_without_vat,
+      }),
+      customer_vat: String(data.customer_vat || "").trim(),
+      ...invoiceTotals(items, data.discount_value ?? data.discount, data.vat_percent, data.discount_mode),
       updatedAt: nowIso(),
     }),
     OperationType.UPDATE,
@@ -2513,7 +2800,7 @@ export const completeBooking = async (id: string) => {
         booking.booking_type === "installation" || booking.booking_type === "external_maintenance"
           ? booking.date
           : installation.install_date || booking.date;
-      installation.next_maintenance = addMonths(booking.date, months);
+      installation.next_maintenance = addCalendarMonths(booking.date, months);
       installation.remind_count = 0;
       installation.next_remind_type = "first";
       installation.completed_date = null;
@@ -2560,7 +2847,7 @@ export const getCustomerCareQueue = async () => {
   }
   if (serverDataEnabled()) {
     const [customers, installations, reminders, bookings] = await Promise.all([
-      getCustomers(""),
+      getAllCustomers(),
       getInstallations(),
       getReminders(),
       getBookings(),
@@ -2880,13 +3167,169 @@ export const prepareDailyOperations = async (data: { syncSalla?: boolean } = {})
   });
 };
 
-export const getStoreOrders = async (params: { type?: string } = {}) => {
+const emptyStoreOrderPage = (params: StoreOrderListParams = {}): StoreOrderPage => ({
+  data: [],
+  total: 0,
+  page: params.page || 1,
+  pageSize: params.pageSize || 50,
+  totalPages: 1,
+  hasNext: false,
+  hasPrevious: false,
+  capped: false,
+  warning: null,
+});
+
+export const getStoreOrders = async (params: StoreOrderListParams = {}): Promise<StoreOrderPage> => {
   const user = getCurrentAppUser();
-  if (!user) return [] as StoreOrder[];
+  if (!user) return emptyStoreOrderPage(params);
   const search = new URLSearchParams();
+  if (params.search?.trim()) search.set("search", params.search.trim());
   if (params.type && params.type !== "all") search.set("type", params.type);
-  return apiFetch<StoreOrder[]>(`/api/store/orders${search.toString() ? `?${search.toString()}` : ""}`);
+  if (params.journey && params.journey !== "all") search.set("journey", params.journey);
+  if (params.status && params.status !== "all") search.set("status", params.status);
+  if (params.city?.trim()) search.set("city", params.city.trim());
+  if (params.product?.trim()) search.set("product", params.product.trim());
+  if (typeof params.min_total === "number" && Number.isFinite(params.min_total)) {
+    search.set("min_total", String(params.min_total));
+  }
+  if (typeof params.max_total === "number" && Number.isFinite(params.max_total)) {
+    search.set("max_total", String(params.max_total));
+  }
+  if (params.page) search.set("page", String(params.page));
+  if (params.pageSize) search.set("page_size", String(params.pageSize));
+  const response = await apiFetch<StoreOrderPage | StoreOrder[]>(
+    `/api/store/orders${search.toString() ? `?${search.toString()}` : ""}`,
+  );
+  if (!Array.isArray(response)) return response;
+  return {
+    ...emptyStoreOrderPage(params),
+    data: response,
+    total: response.length,
+  };
 };
+
+export const getSallaOrderStatuses = async (): Promise<SallaOrderStatus[]> => {
+  const response = await apiFetch<
+    SallaOrderStatus[] | { data?: SallaOrderStatus[]; statuses?: SallaOrderStatus[] }
+  >("/api/integrations/salla/order-statuses");
+  if (Array.isArray(response)) return response;
+  return response.data || response.statuses || [];
+};
+
+export const updateSallaOrderStatus = async (
+  id: string,
+  data: ({ slug: string; status_id?: never } | { status_id: number; slug?: never }) & { restore_items?: boolean },
+) =>
+  apiFetch<SallaOrderStatusUpdateResult>(`/api/integrations/salla/orders/${encodeURIComponent(id)}/status`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export const updateSallaOrder = async (id: string, data: SallaOrderUpdatePayload) =>
+  apiFetch<SallaOrderUpdateResult>(`/api/integrations/salla/orders/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export function subscribeStoreOrderEvents(
+  onEvent: (event: StoreOrderRealtimeEvent) => void,
+  options: { onError?: (error: Error) => void; retryDelayMs?: number; maxRetryDelayMs?: number } = {},
+) {
+  const initialRetryDelay = Math.max(500, Math.min(options.retryDelayMs || 1_000, 10_000));
+  const maxRetryDelay = Math.max(initialRetryDelay, Math.min(options.maxRetryDelayMs || 15_000, 60_000));
+  let retryDelay = initialRetryDelay;
+  let stopped = false;
+  let controller: AbortController | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleReconnect = () => {
+    if (stopped || retryTimer) return;
+    const delay = retryDelay;
+    retryDelay = Math.min(maxRetryDelay, retryDelay * 2);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connect();
+    }, delay);
+  };
+
+  const dispatchFrame = (frame: string) => {
+    let eventType = "";
+    const dataLines: string[] = [];
+    for (const line of frame.split(/\r?\n/)) {
+      if (!line || line.startsWith(":")) continue;
+      if (line.startsWith("event:")) {
+        eventType = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).replace(/^ /, ""));
+      }
+    }
+    if (!dataLines.length) return;
+
+    try {
+      const parsed = JSON.parse(dataLines.join("\n")) as Partial<StoreOrderRealtimeEvent>;
+      const type = String(parsed.type || eventType);
+      if (!type.startsWith("order.") && type !== "sync.completed") return;
+      onEvent({ ...parsed, type } as StoreOrderRealtimeEvent);
+    } catch (error) {
+      options.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  const connect = async () => {
+    if (stopped) return;
+    try {
+      const token = await getApiAuthorizationToken();
+      if (!token) throw new Error("يجب تسجيل الدخول أولا.");
+      if (stopped) return;
+
+      controller = new AbortController();
+      const response = await fetch("/api/store/orders/events", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          Authorization: `Bearer ${token}`,
+        },
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`تعذر فتح قناة تحديث الطلبات (HTTP ${response.status}).`);
+      if (!response.body) throw new Error("المتصفح لا يدعم قناة تحديث الطلبات اللحظية.");
+
+      retryDelay = initialRetryDelay;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundary = buffer.match(/\r?\n\r?\n/);
+        while (boundary?.index !== undefined) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary[0].length);
+          dispatchFrame(frame);
+          boundary = buffer.match(/\r?\n\r?\n/);
+        }
+      }
+      if (!stopped) throw new Error("انقطعت قناة تحديث الطلبات اللحظية.");
+    } catch (error) {
+      if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
+      options.onError?.(error instanceof Error ? error : new Error(String(error)));
+      scheduleReconnect();
+    } finally {
+      controller = null;
+    }
+  };
+
+  void connect();
+  return () => {
+    stopped = true;
+    controller?.abort();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+}
 
 export const getStoreOrder = async (id: string) => apiFetch<StoreOrder>(`/api/store/orders/${id}`);
 
@@ -3106,6 +3549,76 @@ export type WhatsAppDevice = {
 
 export type WhatsAppTemplateInfo = { name: string; sample: string };
 
+export type CommunicationJob = {
+  id: string;
+  event_key: string;
+  kind: string;
+  recipient_phone: string;
+  template_name?: string | null;
+  role: string;
+  call_id?: string | null;
+  status: "pending" | "processing" | "retry" | "sent" | "failed" | "blocked" | "expired";
+  attempts: number;
+  max_attempts: number;
+  last_error?: string | null;
+  sent_at?: string | null;
+  created_at: string;
+};
+
+export type CommunicationQueueSummary = Record<CommunicationJob["status"], number> & {
+  waiting: number;
+  attention: number;
+  total: number;
+};
+
+export type CampaignStats = {
+  total: number;
+  eligible: number;
+  queued: number;
+  processing: number;
+  sent: number;
+  delivered: number;
+  read: number;
+  retry: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  cancelled: number;
+};
+
+export type CommunicationCampaign = {
+  id: string;
+  name: string;
+  template_name: string;
+  status: "draft" | "scheduled" | "running" | "paused" | "completed" | "cancelled";
+  audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+  template_vars: Record<string, string | number>;
+  scheduled_at?: string | null;
+  rate_limit_per_minute: number;
+  frequency_cap_days: number;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  stats: CampaignStats;
+};
+
+export type CampaignPreview = {
+  campaign: CommunicationCampaign;
+  audience: number;
+  eligible: number;
+  excluded: Record<string, number>;
+  sample: Array<{ customer_id: string; name: string; phone: string; eligible: boolean; reason?: string | null }>;
+};
+
+export type CommunicationSuppression = {
+  id: string;
+  phone: string;
+  channel: "whatsapp" | "sms";
+  reason: string;
+  source: string;
+  created_at: string;
+};
+
 export const listRecentWhatsAppMessages = (limit = 50) =>
   apiFetch<{ count: number; items: WhatsAppMessage[] }>(`/api/whatsapp/messages?limit=${limit}`);
 
@@ -3116,6 +3629,53 @@ export const getWhatsAppDevices = () =>
 
 export const getWhatsAppTemplates = () =>
   apiFetch<{ templates: WhatsAppTemplateInfo[] }>("/api/whatsapp/templates");
+
+export const getWhatsAppJobs = (limit = 50) =>
+  apiFetch<{ summary: CommunicationQueueSummary; jobs: CommunicationJob[] }>(`/api/whatsapp/jobs?limit=${limit}`);
+
+export const listCommunicationCampaigns = (limit = 100) =>
+  apiFetch<{ campaigns: CommunicationCampaign[] }>(`/api/whatsapp/campaigns?limit=${limit}`);
+
+export const createCommunicationCampaign = (data: {
+  name: string;
+  template_name: string;
+  audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+  template_vars?: Record<string, string | number>;
+  rate_limit_per_minute?: number;
+  frequency_cap_days?: number;
+}) => apiFetch<{ campaign: CommunicationCampaign }>("/api/whatsapp/campaigns", {
+  method: "POST",
+  body: JSON.stringify(data),
+});
+
+export const previewCommunicationCampaign = (id: string) =>
+  apiFetch<CampaignPreview>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/preview`);
+
+export const launchCommunicationCampaign = (id: string, scheduledAt?: string | null) =>
+  apiFetch<{ campaign: CommunicationCampaign }>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/launch`, {
+    method: "POST",
+    body: JSON.stringify({ scheduled_at: scheduledAt || null }),
+  });
+
+export const changeCommunicationCampaign = (id: string, action: "pause" | "resume" | "cancel") =>
+  apiFetch<{ campaign: CommunicationCampaign }>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  });
+
+export const listCommunicationSuppressions = (limit = 100) =>
+  apiFetch<{ suppressions: CommunicationSuppression[] }>(`/api/whatsapp/suppressions?limit=${limit}`);
+
+export const updateCommunicationPreference = (data: {
+  phone: string;
+  channel?: "whatsapp" | "sms";
+  status: "granted" | "withdrawn";
+  source?: string;
+  evidence: string;
+  lift_suppression?: boolean;
+}) => apiFetch<{ preference: Record<string, unknown>; eligibility: { eligible: boolean; reason?: string } }>(
+  "/api/whatsapp/preferences",
+  { method: "PUT", body: JSON.stringify(data) },
+);
 
 export const sendWhatsAppTemplateMessage = (data: {
   phone: string;

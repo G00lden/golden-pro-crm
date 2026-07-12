@@ -2,6 +2,13 @@ import crypto from "crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import db from "./db";
 import type { AuthedRequest } from "./auth";
+import { validate, validateParams, validateQuery } from "./validation";
+import {
+  managedUserCreateSchema,
+  managedUserIdParamsSchema,
+  managedUserListQuerySchema,
+  managedUserUpdateSchema,
+} from "./userValidation";
 
 export type UserRole = "admin" | "manager" | "sales" | "technician" | "user";
 
@@ -89,7 +96,7 @@ export function getUserByUid(uid: string): ManagedUser | null {
 }
 
 export function getUserByEmail(email: string): ManagedUser | null {
-  const row = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as Row | undefined;
+  const row = db.prepare("SELECT * FROM users WHERE LOWER(email) = LOWER(?)").get(email.trim()) as Row | undefined;
   return rowToUser(row);
 }
 
@@ -106,13 +113,6 @@ export function countUsers(): number {
 // Count admins of ANY provider. The seed-admin rule must not auto-promote a new
 // sign-in whenever *this* provider has no admin yet — if a local-dev owner or a
 // manually-invited admin already exists, the system already has an administrator.
-function countAdmins(): number {
-  const row = db
-    .prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'")
-    .get() as { c: number };
-  return Number(row?.c || 0);
-}
-
 // Active admins only — used to block removing/demoting the last one (lockout guard).
 function countActiveAdmins(): number {
   const row = db
@@ -166,13 +166,14 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
 
   const provider = input.provider || "firebase";
   const isLocalDev = provider === "local-dev";
+  const normalizedEmail = input.email ? input.email.trim().toLowerCase() : null;
   // An email is only trustworthy for linking/seeding when the provider verified
   // it (local-dev is trusted by its shared secret, not an email).
-  const emailTrusted = isLocalDev || input.emailVerified === true;
+  const emailTrusted = !isLocalDev && input.emailVerified === true;
 
   // Link to a pre-provisioned (invited) row by email — ONLY for a verified
   // email, so an unverified email matching an invite can't inherit its role.
-  const byEmail = emailTrusted && input.email ? getUserByEmail(input.email) : null;
+  const byEmail = emailTrusted && normalizedEmail ? getUserByEmail(normalizedEmail) : null;
   if (byEmail && !byEmail.uid) {
     db.prepare(
       "UPDATE users SET uid = ?, last_login_at = ?, updated_at = ?, provider = COALESCE(provider, ?) WHERE id = ?",
@@ -181,17 +182,22 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
   }
 
   const localOwnerUid = process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
-  // Seed-admin rule:
-  //   * The configured local-dev owner remains admin for single-tenant demos.
-  //   * Arbitrary local-dev:<uid> identities join as users.
-  //   * The FIRST real Firebase/Google sign-in becomes admin if NO admin exists
-  //     yet (any provider) — but only when its email is VERIFIED. Once any admin
-  //     exists (local-dev owner or a manual invite included), new sign-ins do not
-  //     self-promote.
-  //   * Everyone afterwards joins as "user" and must be promoted by an admin.
+  const configuredAdminUids = new Set(
+    String(process.env.ADMIN_UIDS || "").split(",").map((value) => value.trim()).filter(Boolean),
+  );
+  const bootstrapAdminEmails = new Set(
+    String(process.env.BOOTSTRAP_ADMIN_EMAILS || "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  // Admin assignment is explicit: the loopback-only test owner, an allowlisted
+  // Firebase UID, a verified bootstrap email, or a pre-provisioned invitation.
+  // Being the first registrant never grants elevated privileges.
   const role: UserRole =
     (isLocalDev && input.uid === localOwnerUid) ||
-    (!isLocalDev && input.emailVerified === true && countAdmins() === 0)
+    configuredAdminUids.has(input.uid) ||
+    (!isLocalDev && input.emailVerified === true && normalizedEmail !== null && bootstrapAdminEmails.has(normalizedEmail))
       ? "admin"
       : "user";
   const id = newId();
@@ -201,8 +207,8 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
   ).run(
     id,
     input.uid,
-    (input.name || input.email || "").trim() || "مستخدم",
-    input.email || null,
+    (input.name || normalizedEmail || "").trim() || "مستخدم",
+    normalizedEmail,
     "",
     role,
     provider,
@@ -310,7 +316,7 @@ export function registerUserAdminRoutes(app: Express) {
     });
   });
 
-  app.get("/api/admin/users", requireRole(["admin", "manager"]), (req, res) => {
+  app.get("/api/admin/users", requireRole(["admin", "manager"]), validateQuery(managedUserListQuerySchema), (req, res) => {
     const search = typeof req.query.search === "string" ? req.query.search : undefined;
     const role = typeof req.query.role === "string" ? req.query.role : undefined;
     const activeQ = typeof req.query.active === "string" ? req.query.active : undefined;
@@ -320,7 +326,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.json({ users: users.map(publicUser) });
   });
 
-  app.post("/api/admin/users", requireRole(["admin"]), (req, res) => {
+  app.post("/api/admin/users", requireRole(["admin"]), validate(managedUserCreateSchema), (req, res) => {
     const body = (req.body || {}) as {
       name?: string;
       email?: string;
@@ -361,7 +367,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.status(201).json({ user: getUserById(id) });
   });
 
-  app.put("/api/admin/users/:id", requireRole(["admin"]), (req, res) => {
+  app.put("/api/admin/users/:id", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), validate(managedUserUpdateSchema), (req, res) => {
     const id = req.params.id;
     const target = getUserById(id);
     if (!target) {
@@ -390,11 +396,18 @@ export function registerUserAdminRoutes(app: Express) {
       res.status(400).json({ error: "لا يمكن إزالة آخر مسؤول نشط في النظام." });
       return;
     }
+    if (body.email) {
+      const emailOwner = getUserByEmail(body.email);
+      if (emailOwner && emailOwner.id !== target.id) {
+        res.status(409).json({ error: "هذا البريد مسجّل بالفعل." });
+        return;
+      }
+    }
     const updated = updateUserFields(id, body);
     res.json({ user: updated });
   });
 
-  app.post("/api/admin/users/:id/deactivate", requireRole(["admin"]), (req, res) => {
+  app.post("/api/admin/users/:id/deactivate", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), (req, res) => {
     const id = req.params.id;
     const target = getUserById(id);
     if (!target) {
@@ -414,7 +427,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.json({ user: updated });
   });
 
-  app.post("/api/admin/users/:id/activate", requireRole(["admin"]), (req, res) => {
+  app.post("/api/admin/users/:id/activate", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), (req, res) => {
     const id = req.params.id;
     if (!getUserById(id)) {
       res.status(404).json({ error: "المستخدم غير موجود." });
@@ -424,7 +437,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.json({ user: updated });
   });
 
-  app.delete("/api/admin/users/:id", requireRole(["admin"]), (req, res) => {
+  app.delete("/api/admin/users/:id", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), (req, res) => {
     const id = req.params.id;
     const target = getUserById(id);
     if (!target) {

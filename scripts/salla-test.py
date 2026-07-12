@@ -23,19 +23,23 @@ import sys
 import time
 import urllib.parse as parse
 from urllib import error, request
+from local_test_auth import get_local_test_token
 
-ADMIN_TOKEN = "local-dev:local-dev-owner"
+ADMIN_TOKEN = ""
+_DEFAULT_TOKEN = object()
 
 
 def http(
     method: str,
     url: str,
     *,
-    token: str | None = ADMIN_TOKEN,
+    token: str | None | object = _DEFAULT_TOKEN,
     body: dict | None = None,
     extra_headers: dict | None = None,
     timeout: float = 30.0,
 ) -> tuple[int, dict | list | str, dict]:
+    if token is _DEFAULT_TOKEN:
+        token = ADMIN_TOKEN
     headers: dict[str, str] = {"Accept": "application/json"}
     data: bytes | None = None
     if body is not None:
@@ -147,7 +151,7 @@ def probe(base: str, env: dict[str, str]) -> dict:
             "client_id": env["SALLA_CLIENT_ID"],
             "response_type": "code",
             "redirect_uri": env.get("SALLA_REDIRECT_URI", ""),
-            "scope": env.get("SALLA_SCOPES", "offline_access orders.read"),
+            "scope": env.get("SALLA_SCOPES", "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write"),
             "state": "probe",
         })
         try:
@@ -238,14 +242,17 @@ class NoRedirectHandler(request.HTTPRedirectHandler):
 
 
 def main() -> int:
+    global ADMIN_TOKEN
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("CRM_BASE_URL", "http://localhost:3000"))
     parser.add_argument("--env-file", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
     parser.add_argument("--report", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "salla-test-results.json"))
     args = parser.parse_args()
 
+    base_url = args.base_url.rstrip("/")
+    ADMIN_TOKEN = get_local_test_token(base_url, os.environ.get("LOCAL_AUTH_SHARED_UID", "local-dev-owner"))
     env = read_env(args.env_file)
-    output = probe(args.base_url.rstrip("/"), env)
+    output = probe(base_url, env)
 
     with open(args.report, "w", encoding="utf-8") as fh:
         json.dump(output, fh, ensure_ascii=False, indent=2)

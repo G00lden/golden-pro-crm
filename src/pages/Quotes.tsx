@@ -22,6 +22,11 @@ import { jsPDF } from "jspdf";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import * as api from "../api";
+import {
+  calculateDocumentTotals,
+  calculateInstallmentAmounts,
+  validateInstallments,
+} from "../../shared/financial";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -160,6 +165,13 @@ const paymentForQuote = (quote: api.Quote) => {
         { percent: Number(quote.payment_down_percent ?? defaultPayment.downPercent), label: quote.payment_down_text || defaultPayment.downText },
         { percent: Number(quote.payment_final_percent ?? defaultPayment.finalPercent), label: quote.payment_final_text || defaultPayment.finalText },
       ];
+  const amounts = (() => {
+    try {
+      return calculateInstallmentAmounts(quote.total || 0, installments);
+    } catch {
+      return installments.map((item) => ({ ...item, amount: 0 }));
+    }
+  })();
   return {
     method: quote.payment_method || defaultPayment.method,
     downPercent: Number(quote.payment_down_percent ?? defaultPayment.downPercent),
@@ -170,7 +182,7 @@ const paymentForQuote = (quote: api.Quote) => {
     account: quote.payment_account || defaultPayment.account,
     iban: quote.payment_iban || defaultPayment.iban,
     note: quote.payment_note || defaultPayment.note,
-    installments,
+    installments: amounts,
   };
 };
 
@@ -367,6 +379,9 @@ function quoteSummaryRows(stats: api.QuoteStats) {
 function quoteShareText(quote: api.Quote) {
   const lines = quote.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, quote.currency)}`);
   const payment = paymentForQuote(quote);
+  const installmentLines = payment.installments.map((installment, index) =>
+    `${index === 0 ? "الدفعة الأولى" : index === payment.installments.length - 1 ? "الدفعة النهائية" : `الدفعة ${index + 1}`} ${installment.percent}%: ${money(installment.amount, quote.currency)}`,
+  );
   return [
     "عرض سعر من BreeXe Pro",
     `رقم العرض: ${quote.quote_number}`,
@@ -378,8 +393,7 @@ function quoteShareText(quote: api.Quote) {
     "",
     `الإجمالي: ${money(quote.total, quote.currency)}`,
     `طريقة الدفع: ${payment.method}`,
-    `الدفعة الأولى ${payment.downPercent}%: ${money((quote.total || 0) * payment.downPercent / 100, quote.currency)}`,
-    `الدفعة النهائية ${payment.finalPercent}%: ${money((quote.total || 0) * payment.finalPercent / 100, quote.currency)}`,
+    ...installmentLines,
     quote.terms ? `الشروط: ${quote.terms}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -733,10 +747,30 @@ function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: ()
           </tbody>
           <tfoot>
             <tr>
-              <td colSpan={2}>الإجمالي</td>
-              <td>{money(quote.subtotal, quote.currency)}</td>
-              <td>{money(quote.discount, quote.currency)}</td>
-              <td>{money(quote.total, quote.currency)}</td>
+              <td colSpan={2}>الإجمالي قبل الضريبة</td>
+              <td colSpan={3}>{money(quote.subtotal, quote.currency)}</td>
+            </tr>
+            {quote.discount > 0 && (
+              <tr>
+                <td colSpan={2}>الخصم {quote.discount_mode === "percent" ? `(${quote.discount_value ?? 0}%)` : ""}</td>
+                <td colSpan={3}>{money(quote.discount, quote.currency)}</td>
+              </tr>
+            )}
+            {(quote.vat_amount || 0) > 0 && (
+              <tr>
+                <td colSpan={2}>ضريبة القيمة المضافة ({quote.vat_percent ?? 15}%)</td>
+                <td colSpan={3}>{money(quote.vat_amount, quote.currency)}</td>
+              </tr>
+            )}
+            {(quote.tax || 0) > 0 && (
+              <tr>
+                <td colSpan={2}>رسوم إضافية</td>
+                <td colSpan={3}>{money(quote.tax, quote.currency)}</td>
+              </tr>
+            )}
+            <tr>
+              <td colSpan={2}>الإجمالي النهائي</td>
+              <td colSpan={3}>{money(quote.total, quote.currency)}</td>
             </tr>
           </tfoot>
           </table>
@@ -746,7 +780,7 @@ function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: ()
             <div className="quote-payment-summary">
               <article><span>الطريقة</span><strong>{payment.method}</strong></article>
               {payment.installments.map((inst, i) => (
-                <article key={i}><span>{i === 0 ? "الدفعة الأولى" : i === payment.installments.length - 1 ? "الدفعة النهائية" : `الدفعة ${i + 1}`}</span><strong>{inst.percent}% · {money((quote.total || 0) * inst.percent / 100, quote.currency)}</strong></article>
+                <article key={i}><span>{i === 0 ? "الدفعة الأولى" : i === payment.installments.length - 1 ? "الدفعة النهائية" : `الدفعة ${i + 1}`}</span><strong>{inst.percent}% · {money(inst.amount, quote.currency)}</strong></article>
               ))}
             </div>
             <div className="quote-payment-grid">
@@ -806,7 +840,9 @@ function QuoteForm({
   const [issueDate, setIssueDate] = useState(initial?.issue_date || today());
   const [validUntil, setValidUntil] = useState(initial?.valid_until || addDays(today(), 7));
   const [followUpDate, setFollowUpDate] = useState(initial?.follow_up_date || addDays(today(), 2));
-  const [discount, setDiscount] = useState(String(initial?.discount || 0));
+  const [discount, setDiscount] = useState(String(initial?.discount_value ?? initial?.discount ?? 0));
+  const [discountMode, setDiscountMode] = useState<api.DiscountMode>(initial?.discount_mode || "fixed");
+  const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent ?? 15));
   const [tax, setTax] = useState(String(initial?.tax || 0));
   const [notes, setNotes] = useState(initial?.notes || "");
   const [terms, setTerms] = useState(initial?.terms || "العرض صالح حسب التاريخ الموضح، والأسعار بالريال السعودي.");
@@ -827,8 +863,9 @@ function QuoteForm({
     initial?.installments?.length ? initial.installments : [...defaultPayment.installments],
   );
 
-  const installmentsTotal = installments.reduce((s, i) => s + i.percent, 0);
-  const canAddInstallment = installments.length < 6 && installmentsTotal < 100;
+  const installmentValidation = validateInstallments(installments);
+  const installmentsTotal = installmentValidation.totalPercent;
+  const canAddInstallment = installments.length < 6;
 
   const selectedCustomer = customers.data?.data.find((item) => item.id === customerId);
 
@@ -850,8 +887,13 @@ function QuoteForm({
       })),
     [items],
   );
-  const subtotal = normalizedItems.reduce((sum, item) => sum + item.total, 0);
-  const total = Math.max(0, subtotal - Number(discount || 0) + Number(tax || 0));
+  const financialTotals = useMemo(() => calculateDocumentTotals({
+    lines: normalizedItems,
+    discountValue: Number(discount || 0),
+    discountMode,
+    vatPercent: Number(vatPercent || 0),
+    additionalTax: Number(tax || 0),
+  }), [normalizedItems, discount, discountMode, vatPercent, tax]);
 
   const updateItem = (index: number, patch: Partial<api.QuoteItem>) => {
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
@@ -885,8 +927,11 @@ function QuoteForm({
         issue_date: issueDate,
         valid_until: validUntil || null,
         follow_up_date: followUpDate || null,
-        discount: Number(discount || 0),
+        discount: financialTotals.discountAmount,
+        discount_mode: discountMode,
+        discount_value: Number(discount || 0),
         tax: Number(tax || 0),
+        vat_percent: Number(vatPercent || 0),
         currency: "SAR",
         items: normalizedItems.filter((item) => item.description.trim()),
         notes: notes.trim(),
@@ -1044,17 +1089,34 @@ function QuoteForm({
       </div>
 
       <div className="quote-total-summary">
+        <div className="quote-price-mode">
+          <span>نوع الخصم</span>
+          <button type="button" className={discountMode === "fixed" ? "active" : ""} onClick={() => setDiscountMode("fixed")}>مبلغ</button>
+          <button type="button" className={discountMode === "percent" ? "active" : ""} onClick={() => setDiscountMode("percent")}>نسبة %</button>
+        </div>
         <label className="field">
-          <span>خصم</span>
-          <input className="input" type="number" min={0} step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} />
+          <span>{discountMode === "percent" ? "نسبة الخصم (%)" : "الخصم"}</span>
+          <input className="input" type="number" min={0} max={discountMode === "percent" ? 100 : undefined} step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} />
         </label>
         <label className="field">
-          <span>ضريبة / رسوم</span>
+          <span>ضريبة القيمة المضافة (%)</span>
+          <input className="input" type="number" min={0} max={100} step="0.01" value={vatPercent} onChange={(event) => setVatPercent(event.target.value)} />
+        </label>
+        <label className="field">
+          <span>رسوم إضافية</span>
           <input className="input" type="number" min={0} step="0.01" value={tax} onChange={(event) => setTax(event.target.value)} />
         </label>
         <article>
+          <span>الخصم الفعلي</span>
+          <strong>{money(financialTotals.discountAmount)}</strong>
+        </article>
+        <article>
+          <span>الضريبة</span>
+          <strong>{money(financialTotals.vatAmount)}</strong>
+        </article>
+        <article>
           <span>الإجمالي</span>
-          <strong>{money(total)}</strong>
+          <strong>{money(financialTotals.total)}</strong>
         </article>
       </div>
 
@@ -1154,8 +1216,8 @@ function QuoteForm({
       </fieldset>
 
       <div className="form-actions">
-        <button className="btn primary" type="submit" disabled={saving}>
-          <FileText size={16} /> {saving ? "جاري الحفظ..." : "حفظ العرض"}
+        <button className="btn primary" type="submit" disabled={saving || !installmentValidation.valid}>
+          <FileText size={16} /> {saving ? "جاري الحفظ..." : !installmentValidation.valid ? "مجموع الدفعات يجب أن يساوي 100%" : "حفظ العرض"}
         </button>
         <button className="btn muted" type="button" onClick={onCancel}>إلغاء</button>
       </div>

@@ -56,7 +56,7 @@ nano .env.production                   # املأ الأسرار (انظر .env.
 ```
 ملاحظات على `.env.production`:
 - `CRM_DOMAIN=crm.your-domain.com` (يستخدمه Caddy).
-- لو تستخدم الدخول المحلّي عبر النفق سابقًا: راجع `ALLOW_LOCAL_AUTH` و **`LOCAL_AUTH_TOKEN`** (وضعناه اختياريًا للأمان — إن فعّلته اضبط `VITE_LOCAL_AUTH_TOKEN` بنفس القيمة وأعد البناء).
+- الدخول المحلي ممنوع في الإنتاج وعبر النفق. أبقِ `ALLOW_LOCAL_AUTH=false` واستخدم Firebase Auth للمستخدمين الحقيقيين؛ `LOCAL_AUTH_TOKEN` مخصص لاختبارات loopback فقط ولا يوضع أبدًا في متغير `VITE_`.
 - أبقِ `OUTBOUND_MODE` على `dry_run` حتى تجهز، ثم انقله (انظر `server/outboundSafety.ts`).
 
 ---

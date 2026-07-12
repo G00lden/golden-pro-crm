@@ -2,14 +2,28 @@ import crypto from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import type { Request } from "express";
+import { normalizePhoneDigits } from "../shared/phone";
 import { adminDb } from "./firebaseAdmin";
 import {
   getStoreOrderDocId,
+  getStoreOrderForUser,
   importStoreOrderForUser,
-  normalizeStorePayload,
+  projectStoreOrderForUser,
   type StoreItemType,
   type StoreWebhookOrder,
 } from "./storeWebhook";
+import { publishStoreOrderChange } from "./storeOrderRealtime";
+import {
+  assertSallaOrderUpdatePermitted,
+  assertSallaOrderWriteScope,
+  normalizeSallaStatusCommand,
+  normalizeSallaStatuses,
+  sanitizeSallaOrderUpdate,
+  sallaRemoteStatus,
+} from "./sallaOrderControl";
+import { processSallaOrderInbox, SALLA_ORDER_EVENTS } from "./sallaOrderInbox";
+import { runAuditedSallaOrderCommand } from "./sallaOrderCommandJournal";
+import { compareAndSetDocument } from "./atomicDocumentUpdate";
 
 type SallaIntegrationRecord = {
   provider: "salla";
@@ -31,6 +45,14 @@ type SallaIntegrationRecord = {
   last_sync_status?: "success" | "error" | "idle" | null;
   last_sync_count?: number;
   last_sync_error?: string | null;
+  last_order_sync_at?: string | null;
+  last_order_sync_status?: "success" | "error" | "idle" | null;
+  last_order_sync_count?: number;
+  last_order_sync_error?: string | null;
+  last_order_sync_complete?: boolean;
+  last_order_sync_advertised_count?: number | null;
+  last_order_sync_advertised_pages?: number | null;
+  last_order_sync_warning?: string | null;
   last_product_sync_at?: string | null;
   last_product_sync_count?: number;
   last_product_sync_error?: string | null;
@@ -38,6 +60,9 @@ type SallaIntegrationRecord = {
   last_customer_sync_status?: "success" | "failed" | "error" | "idle" | null;
   last_customer_sync_count?: number;
   last_customer_sync_error?: string | null;
+  last_customer_sync_complete?: boolean;
+  last_customer_sync_advertised_count?: number | null;
+  last_customer_sync_warning?: string | null;
   last_remote_update_at?: string | null;
   updatedAt?: string;
   createdAt?: string;
@@ -51,6 +76,23 @@ type SallaTokenResponse = {
   token_type?: string;
 };
 
+type SallaAuthorizedSession = {
+  uid: string;
+  accessToken: string;
+};
+
+type SallaRequestOptions = {
+  timeoutMs?: number;
+  maxRetries?: number;
+  retryable?: boolean;
+};
+
+type SallaMerchantProfile = {
+  merchantId: string | null;
+  storeName: string | null;
+  storeUrl: string | null;
+};
+
 type SyncResult = {
   success: boolean;
   imported: number;
@@ -60,15 +102,51 @@ type SyncResult = {
   fetched: number;
   last_sync_at: string;
   last_error?: string | null;
+  partial?: boolean;
+  cap_reached?: boolean;
+  skipped?: boolean;
+  advertised_count?: number | null;
+  unique_fetched?: number;
+  warning?: string | null;
+  complete?: boolean;
+  advertised_pages?: number | null;
 };
 
 const SALLA_AUTHORIZE_URL = "https://accounts.salla.sa/oauth2/auth";
 const SALLA_TOKEN_URL = "https://accounts.salla.sa/oauth2/token";
 const SALLA_USERINFO_URL = "https://accounts.salla.sa/oauth2/user/info";
 const SALLA_API_BASE = "https://api.salla.dev/admin/v2";
+const SALLA_STOREINFO_URL = `${SALLA_API_BASE}/store/info`;
 const SALLA_CALLBACK_PATH = "/api/integrations/salla/callback";
 const SALLA_APP_WEBHOOK_PATH = "/api/integrations/salla/webhook";
-const LOCAL_SALLA_STORE_PATH = path.resolve(process.cwd(), ".runtime", "salla-integrations.json");
+const DEFAULT_LOCAL_SALLA_STORE_PATH = path.resolve(process.cwd(), ".runtime", "salla-integrations.json");
+const DEFAULT_SALLA_REQUEST_TIMEOUT_MS = 15_000;
+const TRANSIENT_SALLA_STATUSES = new Set([429, 500, 502, 503]);
+const REFRESH_OUTCOME_UNKNOWN_MESSAGE =
+  "Salla could not confirm token refresh. Reconnect the Salla app before syncing again.";
+const SALLA_ORDER_PAGE_SIZE = 30;
+const SALLA_ORDER_MAX_PAGES = 200;
+
+class SallaRequestError extends Error {
+  readonly status?: number;
+  readonly transient: boolean;
+  readonly outcomeUnknown: boolean;
+
+  constructor(
+    message: string,
+    options: { status?: number; transient?: boolean; outcomeUnknown?: boolean } = {},
+  ) {
+    super(message);
+    this.name = "SallaRequestError";
+    this.status = options.status;
+    this.transient = Boolean(options.transient);
+    this.outcomeUnknown = Boolean(options.outcomeUnknown);
+  }
+}
+
+const refreshLocks = new Map<string, Promise<unknown>>();
+const customerSyncLocks = new Map<string, Promise<SyncResult>>();
+let localIntegrationWriteLock: Promise<unknown> = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -92,19 +170,84 @@ function usingSupabaseAdapter() {
   return provider === "supabase" || provider === "sqlite";
 }
 
+function localSallaStorePath() {
+  const override = process.env.SALLA_INTEGRATION_STORE_PATH;
+  if (!override) return DEFAULT_LOCAL_SALLA_STORE_PATH;
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("SALLA_INTEGRATION_STORE_PATH is test-only and cannot override the production token store path.");
+  }
+  return path.resolve(override);
+}
+
 async function readLocalIntegrationStore(): Promise<Record<string, SallaIntegrationRecord>> {
+  const storePath = localSallaStorePath();
+  let raw: string;
   try {
-    const raw = await fs.readFile(LOCAL_SALLA_STORE_PATH, "utf8");
+    raw = await fs.readFile(storePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw new Error(`Unable to read the Salla integration store at ${storePath}.`, { cause: error });
+  }
+
+  try {
     const parsed = JSON.parse(raw) as Record<string, SallaIntegrationRecord>;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Expected a JSON object keyed by CRM owner.");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(
+      `The Salla integration store at ${storePath} is corrupted and was not replaced. Restore it from backup before continuing.`,
+      { cause: error },
+    );
   }
 }
 
 async function writeLocalIntegrationStore(data: Record<string, SallaIntegrationRecord>) {
-  await fs.mkdir(path.dirname(LOCAL_SALLA_STORE_PATH), { recursive: true });
-  await fs.writeFile(LOCAL_SALLA_STORE_PATH, JSON.stringify(data, null, 2), "utf8");
+  const storePath = localSallaStorePath();
+  const directory = path.dirname(storePath);
+  const tempPath = path.join(
+    directory,
+    `.${path.basename(storePath)}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+  );
+  await fs.mkdir(directory, { recursive: true });
+
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(tempPath, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(tempPath, storePath);
+    await fs.chmod(storePath, 0o600).catch((error) => {
+      if (process.platform !== "win32") throw error;
+    });
+
+    // Persist the rename across a host crash where the filesystem supports
+    // directory fsync (Linux VPS). Windows does not expose this consistently.
+    let directoryHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      directoryHandle = await fs.open(directory, "r");
+      await directoryHandle.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (process.platform !== "win32" && code !== "EINVAL" && code !== "ENOTSUP") throw error;
+    } finally {
+      await directoryHandle?.close().catch(() => undefined);
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await fs.unlink(tempPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    });
+  }
+}
+
+async function withLocalIntegrationWriteLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = localIntegrationWriteLock.catch(() => undefined).then(task);
+  localIntegrationWriteLock = run;
+  return run;
 }
 
 function fromSettingsShape(data: Record<string, any> | null | undefined): SallaIntegrationRecord | null {
@@ -112,6 +255,27 @@ function fromSettingsShape(data: Record<string, any> | null | undefined): SallaI
   const status = firstText(data.salla_status);
   const token = firstText(data.salla_access_token);
   const refresh = firstText(data.salla_refresh_token);
+  const advertisedCountValue = data.salla_last_customer_sync_advertised_count;
+  const parsedAdvertisedCount = Number(advertisedCountValue);
+  const advertisedCount = advertisedCountValue === null || advertisedCountValue === undefined || advertisedCountValue === ""
+    ? null
+    : Number.isFinite(parsedAdvertisedCount) && parsedAdvertisedCount >= 0
+      ? Math.trunc(parsedAdvertisedCount)
+      : null;
+  const orderAdvertisedCountValue = data.salla_last_order_sync_advertised_count;
+  const parsedOrderAdvertisedCount = Number(orderAdvertisedCountValue);
+  const orderAdvertisedCount = orderAdvertisedCountValue === null || orderAdvertisedCountValue === undefined || orderAdvertisedCountValue === ""
+    ? null
+    : Number.isFinite(parsedOrderAdvertisedCount) && parsedOrderAdvertisedCount >= 0
+      ? Math.trunc(parsedOrderAdvertisedCount)
+      : null;
+  const orderAdvertisedPagesValue = data.salla_last_order_sync_advertised_pages;
+  const parsedOrderAdvertisedPages = Number(orderAdvertisedPagesValue);
+  const orderAdvertisedPages = orderAdvertisedPagesValue === null || orderAdvertisedPagesValue === undefined || orderAdvertisedPagesValue === ""
+    ? null
+    : Number.isFinite(parsedOrderAdvertisedPages) && parsedOrderAdvertisedPages >= 0
+      ? Math.trunc(parsedOrderAdvertisedPages)
+      : null;
   if (!status && !token && !refresh) return null;
 
   return {
@@ -134,9 +298,24 @@ function fromSettingsShape(data: Record<string, any> | null | undefined): SallaI
     last_sync_status: (firstText(data.salla_last_sync_status) || "idle") as SallaIntegrationRecord["last_sync_status"],
     last_sync_count: Number(data.salla_last_sync_count || 0),
     last_sync_error: firstText(data.salla_last_sync_error) || null,
+    last_order_sync_at: firstText(data.salla_last_order_sync_at) || null,
+    last_order_sync_status: (firstText(data.salla_last_order_sync_status) || "idle") as SallaIntegrationRecord["last_order_sync_status"],
+    last_order_sync_count: Number(data.salla_last_order_sync_count || 0),
+    last_order_sync_error: firstText(data.salla_last_order_sync_error) || null,
+    last_order_sync_complete: data.salla_last_order_sync_complete === true || String(data.salla_last_order_sync_complete) === "true",
+    last_order_sync_advertised_count: orderAdvertisedCount,
+    last_order_sync_advertised_pages: orderAdvertisedPages,
+    last_order_sync_warning: firstText(data.salla_last_order_sync_warning) || null,
     last_product_sync_at: firstText(data.salla_last_product_sync_at) || null,
     last_product_sync_count: Number(data.salla_last_product_sync_count || 0),
     last_product_sync_error: firstText(data.salla_last_product_sync_error) || null,
+    last_customer_sync_at: firstText(data.salla_last_customer_sync_at) || null,
+    last_customer_sync_status: (firstText(data.salla_last_customer_sync_status) || "idle") as SallaIntegrationRecord["last_customer_sync_status"],
+    last_customer_sync_count: Number(data.salla_last_customer_sync_count || 0),
+    last_customer_sync_error: firstText(data.salla_last_customer_sync_error) || null,
+    last_customer_sync_complete: data.salla_last_customer_sync_complete === true || String(data.salla_last_customer_sync_complete) === "true",
+    last_customer_sync_advertised_count: advertisedCount,
+    last_customer_sync_warning: firstText(data.salla_last_customer_sync_warning) || null,
     last_remote_update_at: firstText(data.salla_last_remote_update_at) || null,
     updatedAt: firstText(data.salla_updatedAt || data.updatedAt) || undefined,
     createdAt: firstText(data.salla_createdAt || data.createdAt) || undefined,
@@ -170,8 +349,23 @@ function clientSecret() {
   return process.env.SALLA_CLIENT_SECRET || "";
 }
 
+function withRequiredSallaScopes(value: string) {
+  const scopes = String(value || "").split(/\s+/).map((scope) => scope.trim()).filter(Boolean);
+  const required = [
+    "offline_access",
+    "orders.read_write",
+    "products.read_write",
+    "customers.read_write",
+    "webhooks.read_write",
+  ];
+  const obsoleteReadOnly = new Set(["orders.read", "products.read", "customers.read", "webhooks.read"]);
+  return [...new Set([...scopes.filter((scope) => !obsoleteReadOnly.has(scope)), ...required])].join(" ");
+}
+
 function defaultScopes() {
-  return process.env.SALLA_SCOPES || "offline_access orders.read products.read";
+  return withRequiredSallaScopes(
+    process.env.SALLA_SCOPES || "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write",
+  );
 }
 
 function authMode(): "easy" | "custom" {
@@ -187,11 +381,49 @@ function syncEnabled() {
 }
 
 function maxSyncPages() {
-  return Math.max(1, Math.min(200, Number(process.env.SALLA_SYNC_MAX_PAGES || 3)));
+  return Math.max(1, Math.min(200, Number(process.env.SALLA_SYNC_MAX_PAGES || 200)));
+}
+
+function productMaxSyncPages() {
+  return boundedInteger(process.env.SALLA_PRODUCT_SYNC_MAX_PAGES, 200, 1, 200);
 }
 
 function pageSize() {
-  return Math.max(10, Math.min(100, Number(process.env.SALLA_SYNC_PAGE_SIZE || 50)));
+  // The current List Orders contract caps reliable sequential pagination at
+  // 30 rows. Using a larger requested size can make Salla return 30 while our
+  // loop mistakes that short page for the end of the collection.
+  return Math.max(10, Math.min(30, Number(process.env.SALLA_SYNC_PAGE_SIZE || 30)));
+}
+
+function orderPageSize() {
+  return SALLA_ORDER_PAGE_SIZE;
+}
+
+function orderMaxSyncPages() {
+  return SALLA_ORDER_MAX_PAGES;
+}
+
+function customerMaxSyncPages() {
+  return boundedInteger(process.env.SALLA_CUSTOMER_SYNC_MAX_PAGES, 200, 1, 200);
+}
+
+function customerPageSize() {
+  return boundedInteger(process.env.SALLA_CUSTOMER_SYNC_PAGE_SIZE, 60, 1, 60);
+}
+
+function customerSyncIntervalMinutes() {
+  return boundedInteger(process.env.SALLA_CUSTOMER_SYNC_INTERVAL_MINUTES, 360, 1, 10_080);
+}
+
+function customerSyncIsDue(integration: SallaIntegrationRecord | null, at = Date.now()) {
+  if (
+    !integration ||
+    integration.last_customer_sync_status !== "success" ||
+    integration.last_customer_sync_complete !== true
+  ) return true;
+  const lastSyncAt = Date.parse(integration.last_customer_sync_at || "");
+  if (!Number.isFinite(lastSyncAt)) return true;
+  return at - lastSyncAt >= customerSyncIntervalMinutes() * 60_000;
 }
 
 function configured() {
@@ -308,18 +540,6 @@ function cleanSignature(value?: string) {
   return String(value || "").trim().replace(/^sha256=/i, "");
 }
 
-// Canonical phone form (digits only, KSA-normalized to a 966 prefix) matching
-// server/whatsapp.ts (normalizePhone/toJid) and server/storeWebhook.ts, so
-// synced Salla orders dedupe against webhook imports and manual customers.
-function normalizePhone(phone: string) {
-  let digits = String(phone || "").trim().replace(/\D/g, "");
-  if (!digits) return "";
-  if (digits.startsWith("00")) digits = digits.slice(2);
-  if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
-  if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
-  return truncate(digits, 24);
-}
-
 // Salla splits the buyer number into `mobile` (551496683) and `mobile_code`
 // ("+966"); join them so the country code is never dropped.
 function joinCountryCode(code: unknown, number: unknown) {
@@ -397,22 +617,24 @@ async function readIntegration(uid: string): Promise<SallaIntegrationRecord | nu
 async function writeIntegration(uid: string, data: Partial<SallaIntegrationRecord>) {
   const now = nowIso();
   if (usingSupabaseAdapter()) {
-    const store = await readLocalIntegrationStore();
-    const previous = store[uid] || {
-      provider: "salla" as const,
-      createdBy: uid,
-      status: configured() ? "ready_to_connect" : "not_configured",
-      createdAt: now,
-    };
-    store[uid] = {
-      ...previous,
-      ...data,
-      provider: "salla",
-      createdBy: uid,
-      updatedAt: now,
-      createdAt: previous.createdAt || data.createdAt || now,
-    };
-    await writeLocalIntegrationStore(store);
+    await withLocalIntegrationWriteLock(async () => {
+      const store = await readLocalIntegrationStore();
+      const previous = store[uid] || {
+        provider: "salla" as const,
+        createdBy: uid,
+        status: configured() ? "ready_to_connect" : "not_configured",
+        createdAt: now,
+      };
+      store[uid] = {
+        ...previous,
+        ...data,
+        provider: "salla",
+        createdBy: uid,
+        updatedAt: now,
+        createdAt: previous.createdAt || data.createdAt || now,
+      };
+      await writeLocalIntegrationStore(store);
+    });
     return;
   }
   await adminDb.collection("settings").doc(uid).set({
@@ -454,96 +676,514 @@ function verifySallaAppWebhook(req: Request & { rawBody?: Buffer }) {
   throw err;
 }
 
+function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.max(minimum, Math.min(maximum, Math.trunc(parsed)))
+    : fallback;
+}
+
+function sallaRequestTimeoutMs() {
+  return boundedInteger(process.env.SALLA_FETCH_TIMEOUT_MS, DEFAULT_SALLA_REQUEST_TIMEOUT_MS, 1_000, 60_000);
+}
+
+function sallaGetMaxRetries() {
+  return boundedInteger(process.env.SALLA_FETCH_MAX_RETRIES, 2, 0, 4);
+}
+
+function sallaRetryBaseDelayMs() {
+  return boundedInteger(process.env.SALLA_FETCH_RETRY_BASE_DELAY_MS, 500, 0, 30_000);
+}
+
+function sallaRetryMaxDelayMs() {
+  return boundedInteger(process.env.SALLA_FETCH_RETRY_MAX_DELAY_MS, 30_000, 0, 60_000);
+}
+
+function parseRetryAfterMs(value: string | null) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : null;
+}
+
+function sallaResponseMessage(body: unknown, status: number) {
+  const record = asRecord(body);
+  const error = asRecord(record.error);
+  const message = firstText(record.error_description, error.message, record.message);
+  return message ? truncate(message, 500) : `Salla request failed (${status}).`;
+}
+
+function isTransientSallaError(error: unknown) {
+  return error instanceof SallaRequestError && error.transient;
+}
+
+function isUnknownRefreshOutcome(error: unknown) {
+  return error instanceof SallaRequestError && error.outcomeUnknown;
+}
+
+function isSallaAuthenticationRequired(error: unknown) {
+  if (isUnknownRefreshOutcome(error)) return true;
+  if (error instanceof SallaRequestError && error.status === 401) return true;
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    message.includes("invalid_grant") ||
+    message.includes("refresh token is missing") ||
+    message.includes("salla is not connected") ||
+    message.includes("salla is not linked")
+  );
+}
+
+function statusAfterSyncFailure(error: unknown): SallaIntegrationRecord["status"] {
+  // A failed sync is diagnostic state, not a permanent connection latch. Only
+  // explicit authentication failures require re-authorization.
+  return isSallaAuthenticationRequired(error) ? "error" : "connected";
+}
+
+function syncFailureMessage(error: unknown, fallback: string) {
+  if (isUnknownRefreshOutcome(error)) return REFRESH_OUTCOME_UNKNOWN_MESSAGE;
+  return error instanceof Error ? error.message : fallback;
+}
+
+async function waitForRetry(milliseconds: number) {
+  if (milliseconds <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function requestSallaJson<T = Record<string, unknown>>(
+  input: string | URL,
+  init: RequestInit = {},
+  options: SallaRequestOptions = {},
+): Promise<T> {
+  const method = String(init.method || "GET").toUpperCase();
+  const retryable = options.retryable ?? method === "GET";
+  const maxRetries = retryable
+    ? boundedInteger(options.maxRetries, sallaGetMaxRetries(), 0, 4)
+    : 0;
+  const timeoutMs = options.timeoutMs ?? sallaRequestTimeoutMs();
+
+  for (let attempt = 0; ; attempt += 1) {
+    const controller = new AbortController();
+    let timedOut = false;
+    let detachAbort: (() => void) | null = null;
+    if (init.signal) {
+      const forwardAbort = () => controller.abort(init.signal?.reason);
+      if (init.signal.aborted) forwardAbort();
+      else {
+        init.signal.addEventListener("abort", forwardAbort, { once: true });
+        detachAbort = () => init.signal?.removeEventListener("abort", forwardAbort);
+      }
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const response = await fetch(input, { ...init, signal: controller.signal });
+      const body = await response.json().catch(() => ({}));
+      if (response.ok) return body as T;
+
+      const transient = TRANSIENT_SALLA_STATUSES.has(response.status);
+      if (retryable && transient && attempt < maxRetries) {
+        const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"));
+        const backoff = sallaRetryBaseDelayMs() * 2 ** attempt;
+        await waitForRetry(Math.min(retryAfter ?? backoff, sallaRetryMaxDelayMs()));
+        continue;
+      }
+
+      throw new SallaRequestError(sallaResponseMessage(body, response.status), {
+        status: response.status,
+        transient,
+        outcomeUnknown: method !== "GET" && transient,
+      });
+    } catch (error) {
+      if (error instanceof SallaRequestError) throw error;
+      const externallyAborted = Boolean(init.signal?.aborted);
+      const transient = timedOut || !externallyAborted;
+      if (retryable && transient && attempt < maxRetries) {
+        const backoff = Math.min(sallaRetryBaseDelayMs() * 2 ** attempt, sallaRetryMaxDelayMs());
+        await waitForRetry(backoff);
+        continue;
+      }
+      throw new SallaRequestError(
+        timedOut ? `Salla request timed out after ${timeoutMs}ms.` : "Salla request could not be completed.",
+        {
+          transient,
+          outcomeUnknown: method !== "GET" && transient,
+        },
+      );
+    } finally {
+      clearTimeout(timer);
+      detachAbort?.();
+    }
+  }
+}
+
 async function exchangeToken(params: URLSearchParams) {
-  const response = await fetch(SALLA_TOKEN_URL, {
+  // OAuth authorization codes and refresh tokens are single-use. Retrying a
+  // POST after a lost response can reuse the grant and revoke the whole Salla
+  // session, so token exchange gets a timeout but never an automatic retry.
+  const body = await requestSallaJson<SallaTokenResponse>(SALLA_TOKEN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
     },
     body: params.toString(),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.error_description || body?.message || `Salla token exchange failed (${response.status}).`);
-  }
-  return body as SallaTokenResponse;
-}
-
-async function fetchUserInfo(token: string) {
-  const response = await fetch(SALLA_USERINFO_URL, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla user info failed (${response.status}).`);
+  }, { retryable: false });
+  if (!firstText(body.access_token)) {
+    throw new SallaRequestError("Salla token response did not include an access token.");
   }
   return body;
 }
 
-async function ensureFreshAccessToken(uid: string, integration: SallaIntegrationRecord) {
-  const expiry = integration.expires_at ? Date.parse(integration.expires_at) : NaN;
-  const stillValid = Number.isFinite(expiry) ? expiry - Date.now() > 120_000 : Boolean(integration.access_token);
-  if (stillValid && integration.access_token) return integration.access_token;
-  if (!integration.refresh_token) throw new Error("Salla refresh token is missing.");
+function unwrapSallaData(value: unknown) {
+  const body = asRecord(value);
+  const data = asRecord(body.data);
+  return Object.keys(data).length ? data : body;
+}
 
-  const token = await exchangeToken(new URLSearchParams({
-    grant_type: "refresh_token",
-    refresh_token: integration.refresh_token,
-    client_id: clientId(),
-    client_secret: clientSecret(),
-  }));
+function normalizeStorefrontUrl(value: unknown) {
+  const raw = firstText(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.protocol = "https:";
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractMerchantProfile(userInfo: unknown, storeInfo: unknown): SallaMerchantProfile {
+  const userData = unwrapSallaData(userInfo);
+  const merchant = asRecord(userData.merchant);
+  const store = unwrapSallaData(storeInfo);
+  return {
+    merchantId: firstText(store.id, merchant.id, userData.merchant_id) || null,
+    storeName: firstText(store.name, merchant.name, merchant.store_name, merchant.username) || null,
+    storeUrl: normalizeStorefrontUrl(firstText(store.domain, merchant.domain, merchant.url, merchant.permalink)),
+  };
+}
+
+function merchantProfilePatch(profile: SallaMerchantProfile, fallbackMerchantId?: string | null) {
+  const patch: Partial<SallaIntegrationRecord> = {};
+  const merchantId = profile.merchantId || fallbackMerchantId || null;
+  if (merchantId) patch.merchant_id = merchantId;
+  if (profile.storeName) patch.store_name = profile.storeName;
+  if (profile.storeUrl) patch.store_url = profile.storeUrl;
+  return patch;
+}
+
+async function fetchMerchantProfile(token: string) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
+  const [userInfo, storeInfo] = await Promise.allSettled([
+    requestSallaJson(SALLA_USERINFO_URL, { headers }),
+    requestSallaJson(SALLA_STOREINFO_URL, { headers }),
+  ]);
+  if (userInfo.status === "rejected" && storeInfo.status === "rejected") {
+    throw userInfo.reason;
+  }
+  return extractMerchantProfile(
+    userInfo.status === "fulfilled" ? userInfo.value : {},
+    storeInfo.status === "fulfilled" ? storeInfo.value : {},
+  );
+}
+
+function accessTokenStillValid(integration: SallaIntegrationRecord) {
+  const expiry = integration.expires_at ? Date.parse(integration.expires_at) : NaN;
+  return Number.isFinite(expiry)
+    ? expiry - Date.now() > 120_000 && Boolean(integration.access_token)
+    : Boolean(integration.access_token);
+}
+
+async function withOwnerRefreshLock<T>(uid: string, task: () => Promise<T>): Promise<T> {
+  const previous = refreshLocks.get(uid) || Promise.resolve();
+  const run = previous.catch(() => undefined).then(task);
+  refreshLocks.set(uid, run);
+  try {
+    return await run;
+  } finally {
+    if (refreshLocks.get(uid) === run) refreshLocks.delete(uid);
+  }
+}
+
+async function rotateAccessTokenLocked(uid: string, integration: SallaIntegrationRecord) {
+  if (!integration.refresh_token) throw new Error("Salla refresh token is missing.");
+  let token: SallaTokenResponse;
+  try {
+    token = await exchangeToken(new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: integration.refresh_token,
+      client_id: clientId(),
+      client_secret: clientSecret(),
+    }));
+  } catch (error) {
+    if (isUnknownRefreshOutcome(error)) {
+      // The single-use refresh grant may have reached Salla even though its
+      // response was lost. Quarantine it so no later request can reuse it and
+      // revoke the session.
+      await writeIntegration(uid, {
+        status: "error",
+        refresh_token: null,
+        last_sync_error: REFRESH_OUTCOME_UNKNOWN_MESSAGE,
+      });
+    }
+    throw error;
+  }
 
   await writeIntegration(uid, {
     status: "connected",
     access_token: token.access_token,
-    refresh_token: token.refresh_token || integration.refresh_token,
+    // Never retain a refresh token that has just been consumed. Salla rotates
+    // it on every successful refresh; a missing replacement requires a later
+    // re-authorization instead of unsafe token reuse.
+    refresh_token: firstText(token.refresh_token) || null,
     expires_at: expiresAt(token.expires_in),
     scope: token.scope || integration.scope,
     token_type: token.token_type || integration.token_type || "Bearer",
     last_sync_error: null,
   });
 
+  // Backfill canonical store metadata for records created by older builds.
+  // Token persistence above is deliberately completed first so a slow profile
+  // request can never lose the newly rotated single-use credential pair.
+  const profile = await fetchMerchantProfile(token.access_token).catch(() => null);
+  if (profile) {
+    const profilePatch = merchantProfilePatch(profile);
+    if (Object.keys(profilePatch).length) {
+      await writeIntegration(uid, profilePatch).catch(() => undefined);
+    }
+  }
   return token.access_token;
 }
 
-async function fetchOrdersPage(token: string, page: number) {
-  const url = new URL(`${SALLA_API_BASE}/orders`);
-  url.searchParams.set("page", String(page));
-  url.searchParams.set("per_page", String(pageSize()));
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
+async function ensureFreshAccessToken(uid: string, integration: SallaIntegrationRecord) {
+  if (accessTokenStillValid(integration) && integration.access_token) return integration.access_token;
+  return withOwnerRefreshLock(uid, async () => {
+    const latest = await readIntegration(uid);
+    if (!latest) throw new Error("Salla is not linked for this CRM user.");
+    if (accessTokenStillValid(latest) && latest.access_token) return latest.access_token;
+    return rotateAccessTokenLocked(uid, latest);
   });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla orders sync failed (${response.status}).`);
-  }
-  return body;
 }
 
-async function fetchProductsPage(token: string, page: number) {
+async function refreshAfterUnauthorized(uid: string, failedAccessToken: string) {
+  return withOwnerRefreshLock(uid, async () => {
+    const latest = await readIntegration(uid);
+    if (!latest) throw new Error("Salla is not linked for this CRM user.");
+    if (latest.access_token && latest.access_token !== failedAccessToken && accessTokenStillValid(latest)) {
+      return latest.access_token;
+    }
+    return rotateAccessTokenLocked(uid, latest);
+  });
+}
+
+async function authorizedSallaGet<T = Record<string, unknown>>(
+  session: SallaAuthorizedSession,
+  input: string | URL,
+  options: SallaRequestOptions = {},
+): Promise<T> {
+  const request = (accessToken: string) => requestSallaJson<T>(input, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  }, options);
+
+  try {
+    return await request(session.accessToken);
+  } catch (error) {
+    if (!(error instanceof SallaRequestError) || error.status !== 401) throw error;
+    session.accessToken = await refreshAfterUnauthorized(session.uid, session.accessToken);
+    return request(session.accessToken);
+  }
+}
+
+async function authorizedSallaMutation<T = Record<string, unknown>>(
+  session: SallaAuthorizedSession,
+  input: string | URL,
+  method: "POST" | "PUT",
+  body: Record<string, unknown>,
+): Promise<T> {
+  const request = (accessToken: string) => requestSallaJson<T>(input, {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  }, { retryable: false });
+
+  try {
+    return await request(session.accessToken);
+  } catch (error) {
+    // An explicit 401 confirms Salla rejected the request, so refreshing and
+    // sending once with the new token cannot duplicate a successful mutation.
+    if (!(error instanceof SallaRequestError) || error.status !== 401) throw error;
+    session.accessToken = await refreshAfterUnauthorized(session.uid, session.accessToken);
+    return request(session.accessToken);
+  }
+}
+
+async function authorizedSessionForUser(currentUid: string, requireOrderWrite = false) {
+  if (!configured()) throw new Error("Salla integration is not configured on the server.");
+  const integration = await readIntegration(currentUid);
+  if (!integration || integration.status !== "connected" || (!integration.access_token && !integration.refresh_token)) {
+    const error = new Error("Salla is not connected for this CRM user.") as Error & { status?: number };
+    error.status = 412;
+    throw error;
+  }
+  if (requireOrderWrite) assertSallaOrderWriteScope(integration.scope);
+  const accessToken = await ensureFreshAccessToken(currentUid, integration);
+  return {
+    integration,
+    session: { uid: currentUid, accessToken } satisfies SallaAuthorizedSession,
+  };
+}
+
+async function fetchOrdersPage(session: SallaAuthorizedSession, page: number) {
+  const url = new URL(`${SALLA_API_BASE}/orders`);
+  url.searchParams.set("page", String(page));
+  url.searchParams.set("per_page", String(orderPageSize()));
+  return authorizedSallaGet(session, url);
+}
+
+async function fetchSallaOrderDetails(session: SallaAuthorizedSession, remoteOrderId: string) {
+  const payload = await authorizedSallaGet<Record<string, unknown>>(
+    session,
+    `${SALLA_API_BASE}/orders/${encodeURIComponent(remoteOrderId)}`,
+  );
+  return unwrapSallaData(payload) as Record<string, any>;
+}
+
+type CompleteOrderPages = {
+  orders: Record<string, any>[];
+  pages: number;
+  fetched: number;
+  advertisedTotal: number;
+  advertisedPages: number;
+};
+
+function requiredPaginationInteger(pagination: Record<string, any>, keys: string[], label: string) {
+  for (const key of keys) {
+    const value = pagination[key];
+    if (value === null || value === undefined || value === "") continue;
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  }
+  throw new Error(`Salla orders sync is incomplete: pagination.${label} is missing or invalid.`);
+}
+
+async function collectCompleteSallaOrderPages(
+  fetchPage: (page: number) => Promise<Record<string, any>>,
+): Promise<CompleteOrderPages> {
+  const collected: Record<string, any>[] = [];
+  const seenRemoteIds = new Set<string>();
+  let advertisedTotal: number | null = null;
+  let advertisedPages: number | null = null;
+  let pages = 0;
+
+  for (let page = 1; page <= orderMaxSyncPages(); page += 1) {
+    const payload = await fetchPage(page);
+    const pagination = asRecord(payload.pagination);
+    const totalPages = requiredPaginationInteger(
+      pagination,
+      ["totalPages", "total_pages", "lastPage", "last_page"],
+      "totalPages",
+    );
+    const total = requiredPaginationInteger(pagination, ["total"], "total");
+
+    if (page === 1) {
+      advertisedPages = totalPages;
+      advertisedTotal = total;
+      if (totalPages > orderMaxSyncPages()) {
+        throw new Error(
+          `Salla orders sync is incomplete: advertised ${totalPages} pages exceeds the ${orderMaxSyncPages()}-page safety cap.`,
+        );
+      }
+      if (total > 0 && totalPages < 1) {
+        throw new Error("Salla orders sync is incomplete: a non-empty result advertised zero pages.");
+      }
+      const pagesForRequestedSize = total > 0 ? Math.ceil(total / orderPageSize()) : totalPages;
+      if (total > 0 && pagesForRequestedSize !== totalPages) {
+        throw new Error(
+          `Salla orders sync is incomplete: total ${total} requires ${pagesForRequestedSize} pages at ${orderPageSize()} items, but Salla advertised ${totalPages}.`,
+        );
+      }
+    } else if (totalPages !== advertisedPages || total !== advertisedTotal) {
+      throw new Error(
+        `Salla orders sync is incomplete: pagination changed during the snapshot (${advertisedTotal}/${advertisedPages} to ${total}/${totalPages}).`,
+      );
+    }
+
+    const orders = asArray(payload.data || payload.orders || payload.items);
+    pages += 1;
+    if (orders.length > orderPageSize()) {
+      throw new Error(
+        `Salla orders sync is incomplete: page ${page} returned ${orders.length} orders, above the requested ${orderPageSize()}.`,
+      );
+    }
+    if (!orders.length) {
+      if (page === 1 && advertisedTotal === 0 && (advertisedPages === 0 || advertisedPages === 1)) break;
+      throw new Error(
+        `Salla orders sync is incomplete: page ${page} was empty before ${advertisedPages} advertised pages and ${advertisedTotal} orders were collected.`,
+      );
+    }
+
+    for (const remoteOrder of orders) {
+      const remoteId = firstText(remoteOrder.id, remoteOrder.order_id, remoteOrder.reference_id);
+      if (!remoteId) {
+        throw new Error(`Salla orders sync is incomplete: page ${page} contains an order without a stable remote id.`);
+      }
+      if (seenRemoteIds.has(remoteId)) {
+        throw new Error(`Salla orders sync is incomplete: duplicate remote order ${remoteId} was returned.`);
+      }
+      seenRemoteIds.add(remoteId);
+      collected.push(remoteOrder);
+    }
+
+    if (page >= (advertisedPages || 0)) break;
+  }
+
+  if (advertisedPages === null || advertisedTotal === null) {
+    throw new Error("Salla orders sync is incomplete: no pagination contract was received.");
+  }
+  if (advertisedPages > orderMaxSyncPages() || (advertisedPages > 0 && pages < advertisedPages)) {
+    throw new Error(
+      `Salla orders sync is incomplete: collected ${pages} of ${advertisedPages} advertised pages before the safety cap.`,
+    );
+  }
+  if (collected.length !== advertisedTotal) {
+    throw new Error(
+      `Salla orders sync is incomplete: collected ${collected.length} of ${advertisedTotal} advertised orders.`,
+    );
+  }
+
+  return {
+    orders: collected,
+    pages,
+    fetched: collected.length,
+    advertisedTotal,
+    advertisedPages,
+  };
+}
+
+async function fetchProductsPage(session: SallaAuthorizedSession, page: number) {
   const url = new URL(`${SALLA_API_BASE}/products`);
   url.searchParams.set("page", String(page));
   url.searchParams.set("per_page", String(pageSize()));
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla products sync failed (${response.status}).`);
-  }
-  return body;
+  return authorizedSallaGet(session, url);
 }
 
 function productDocId(uid: string, remoteProductId: string) {
@@ -656,6 +1296,7 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
     return {
       name: truncate(firstText(item.name, product.name, item.title) || "Salla item", 80),
       sku: truncate(sku, 80),
+      remoteItemId: truncate(firstText(item.id, item.order_item_id, item.item_id, item.uuid), 120) || null,
       quantity,
       unitPrice: unitPrice ?? null,
       totalPrice: totalPrice ?? null,
@@ -666,7 +1307,7 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
     };
   });
 
-  const phone = normalizePhone(
+  const phone = normalizePhoneDigits(
     firstText(
       joinCountryCode(customer.mobile_code, customer.mobile),
       customer.mobile,
@@ -681,8 +1322,6 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       billing.phone,
     ),
   );
-  if (!phone) return null;
-
   const statusRecord = asRecord(remoteOrder.status);
   const orderId = firstText(remoteOrder.id, remoteOrder.order_id, remoteOrder.reference_id);
   if (!orderId) return null;
@@ -730,6 +1369,7 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
     items: items.length ? items : [{
       name: "Salla order",
       sku: `SALLA-${orderId}`,
+      remoteItemId: null,
       quantity: 1,
       unitPrice: null,
       totalPrice: null,
@@ -786,8 +1426,9 @@ export async function getSallaStatus(currentUid: string, req: Request) {
     scopes: defaultScopes(),
     sync_schedule: syncSchedule(),
     sync_enabled: syncEnabled(),
+    customer_sync_interval_minutes: customerSyncIntervalMinutes(),
     store_name: integration?.store_name || null,
-    store_url: integration?.store_url || null,
+    store_url: normalizeStorefrontUrl(integration?.store_url),
     merchant_id: integration?.merchant_id || null,
     expires_at: integration?.expires_at || null,
     has_refresh_token: Boolean(integration?.refresh_token),
@@ -798,9 +1439,395 @@ export async function getSallaStatus(currentUid: string, req: Request) {
     last_sync_status: integration?.last_sync_status || "idle",
     last_sync_count: integration?.last_sync_count || 0,
     last_sync_error: integration?.last_sync_error || null,
+    last_order_sync_at: integration?.last_order_sync_at || null,
+    last_order_sync_status: integration?.last_order_sync_status || "idle",
+    last_order_sync_count: integration?.last_order_sync_count || 0,
+    last_order_sync_error: integration?.last_order_sync_error || null,
+    last_order_sync_complete: integration?.last_order_sync_complete ?? null,
+    last_order_sync_advertised_count: integration?.last_order_sync_advertised_count ?? null,
+    last_order_sync_advertised_pages: integration?.last_order_sync_advertised_pages ?? null,
+    last_order_sync_warning: integration?.last_order_sync_warning || null,
     last_product_sync_at: integration?.last_product_sync_at || null,
     last_product_sync_count: integration?.last_product_sync_count || 0,
     last_product_sync_error: integration?.last_product_sync_error || null,
+    last_customer_sync_at: integration?.last_customer_sync_at || null,
+    last_customer_sync_status: integration?.last_customer_sync_status || "idle",
+    last_customer_sync_count: integration?.last_customer_sync_count || 0,
+    last_customer_sync_error: integration?.last_customer_sync_error || null,
+    last_customer_sync_complete: integration?.last_customer_sync_complete === true,
+    last_customer_sync_advertised_count: integration?.last_customer_sync_advertised_count ?? null,
+    last_customer_sync_warning: integration?.last_customer_sync_warning || null,
+  };
+}
+
+function remoteOrderIdFromWebhook(body: Record<string, unknown>) {
+  const data = asRecord(body.data);
+  const order = asRecord(data.order);
+  const shipment = asRecord(data.shipment);
+  return firstText(
+    data.order_id,
+    order.id,
+    order.order_id,
+    shipment.order_id,
+    body.order_id,
+    eventOrderRecord(data).id,
+  ) || null;
+}
+
+function eventOrderRecord(data: Record<string, unknown>) {
+  const candidate = asRecord(data.order);
+  if (Object.keys(candidate).length) return candidate;
+  return data;
+}
+
+function remoteOrderProjectionExtras(remoteOrder: Record<string, any>, origin: "salla_webhook" | "salla_command") {
+  const status = asRecord(remoteOrder.status);
+  const remoteUpdatedAt = firstText(remoteOrder.updated_at, remoteOrder.created_at, remoteOrder.date) || nowIso();
+  return {
+    source: "salla",
+    provider: "salla",
+    last_event_at: remoteUpdatedAt,
+    remote_updated_at: remoteUpdatedAt,
+    remote_synced_at: nowIso(),
+    remote_status_id: firstText(status.id) || null,
+    remote_status_name: firstText(status.name, remoteOrder.status) || null,
+    remote_status_slug: firstText(status.slug) || null,
+    sync_origin: origin,
+    remote_deleted_at: null,
+  };
+}
+
+async function persistAuthoritativeSallaOrder(
+  currentUid: string,
+  remoteOrder: Record<string, any>,
+  options: { operationalCreate?: boolean; origin: "salla_webhook" | "salla_command" },
+) {
+  const normalized = mapSallaOrder(remoteOrder);
+  if (!normalized) {
+    const error = new Error("Salla order details are missing a stable id or usable customer phone.") as Error & { status?: number };
+    error.status = 422;
+    throw error;
+  }
+  const extras = {
+    ...remoteOrderProjectionExtras(remoteOrder, options.origin),
+    order_date: normalized.orderDate,
+  };
+  const imported = options.operationalCreate && Boolean(normalized.customerPhone)
+    ? await importStoreOrderForUser(currentUid, normalized, extras)
+    : await projectStoreOrderForUser(currentUid, normalized, extras);
+  return {
+    normalized,
+    imported,
+    orderDocId: getStoreOrderDocId(currentUid, "salla", normalized.orderId),
+    status: sallaRemoteStatus(remoteOrder),
+  };
+}
+
+async function markSallaOrderDeleted(currentUid: string, remoteOrderId: string, occurredAt: string, attempt = 0) {
+  const orderDocId = getStoreOrderDocId(currentUid, "salla", remoteOrderId);
+  const ref = adminDb.collection("store_orders").doc(orderDocId);
+  const snapshot = await ref.get();
+  if (!snapshot.exists) return { orderDocId, existed: false };
+  const data = snapshot.data() || {};
+  if (data.createdBy !== currentUid) {
+    const error = new Error("Salla order ownership mismatch.") as Error & { status?: number };
+    error.status = 403;
+    throw error;
+  }
+  const occurredMs = Date.parse(occurredAt);
+  const currentMs = Date.parse(String(data.remote_updated_at || data.remoteUpdatedAt || data.last_event_at || ""));
+  if (Number.isFinite(occurredMs) && Number.isFinite(currentMs) && occurredMs < currentMs) {
+    return { orderDocId, existed: true, stale: true };
+  }
+  const deleted = await compareAndSetDocument(ref, {
+    remote_updated_at: data.remote_updated_at ?? data.remoteUpdatedAt ?? null,
+  }, {
+    status: "deleted",
+    remote_status_slug: "deleted",
+    remote_status_name: "Deleted",
+    remote_deleted_at: occurredAt,
+    remote_updated_at: occurredAt,
+    remote_synced_at: nowIso(),
+    sync_origin: "salla_webhook",
+    updatedAt: nowIso(),
+  });
+  if (!deleted) {
+    if (attempt < 2) return markSallaOrderDeleted(currentUid, remoteOrderId, occurredAt, attempt + 1);
+    throw new Error(`Salla order ${orderDocId} changed concurrently while applying deletion.`);
+  }
+  publishStoreOrderChange(currentUid, {
+    type: "order.deleted",
+    orderId: orderDocId,
+    remoteOrderId,
+    source: "salla_webhook",
+  });
+  return { orderDocId, existed: true, stale: false };
+}
+
+async function ownedSallaOrderIdentity(currentUid: string, orderDocId: string) {
+  const order = await getStoreOrderForUser(currentUid, orderDocId) as Record<string, unknown>;
+  if (firstText(order.provider, order.store_provider, order.source) !== "salla") {
+    const error = new Error("This CRM order is not linked to Salla.") as Error & { status?: number };
+    error.status = 409;
+    throw error;
+  }
+  const remoteOrderId = firstText(order.order_id, order.remote_order_id);
+  if (!remoteOrderId) {
+    const error = new Error("The CRM order is missing its Salla order id.") as Error & { status?: number };
+    error.status = 422;
+    throw error;
+  }
+  return { order, remoteOrderId };
+}
+
+function remoteMatchesStatus(remoteOrder: Record<string, unknown>, desired: { id: string; slug: string }) {
+  const status = sallaRemoteStatus(remoteOrder);
+  return status.slug === desired.slug || status.id === desired.id;
+}
+
+function scalarMatches(actual: unknown, expected: unknown) {
+  if (typeof expected === "number") return Number(actual) === expected;
+  return String(actual ?? "").trim() === String(expected ?? "").trim();
+}
+
+function objectContains(actualValue: unknown, expectedValue: unknown): boolean {
+  if (Array.isArray(expectedValue)) {
+    return Array.isArray(actualValue) && expectedValue.length === actualValue.length &&
+      expectedValue.every((value, index) => objectContains(actualValue[index], value));
+  }
+  if (expectedValue && typeof expectedValue === "object") {
+    const actual = asRecord(actualValue);
+    return Object.entries(expectedValue as Record<string, unknown>)
+      .every(([key, value]) => objectContains(actual[key], value));
+  }
+  return scalarMatches(actualValue, expectedValue);
+}
+
+function remoteMatchesOrderUpdate(remoteOrder: Record<string, unknown>, desired: Record<string, unknown>) {
+  const shipping = asRecord(remoteOrder.shipping);
+  const coupon = asRecord(remoteOrder.coupon);
+  const aliases: Record<string, unknown> = {
+    ...remoteOrder,
+    delivery_method: remoteOrder.delivery_method ?? shipping.method ?? shipping.delivery_method,
+    branch_id: remoteOrder.branch_id ?? shipping.branch_id,
+    courier_id: remoteOrder.courier_id ?? shipping.courier_id,
+    ship_to: remoteOrder.ship_to ?? shipping.ship_to ?? shipping.address,
+    coupon_code: remoteOrder.coupon_code ?? coupon.code,
+    employees: remoteOrder.employees ?? remoteOrder.assigned_employees,
+  };
+  return Object.entries(desired).every(([key, value]) => {
+    if (key === "employees") {
+      const expectedIds = (Array.isArray(value) ? value : []).map((item) => String(item)).sort();
+      const actualIds = (Array.isArray(aliases.employees) ? aliases.employees : []).map((item) => {
+        const record = asRecord(item);
+        return String(record.id ?? item);
+      }).sort();
+      return expectedIds.length === actualIds.length && expectedIds.every((id, index) => id === actualIds[index]);
+    }
+    if (key === "receiver") {
+      const expectedReceiver = { ...asRecord(value) };
+      // notify is a one-time side-effect instruction and is not guaranteed to
+      // be echoed by Order Details.
+      delete expectedReceiver.notify;
+      return objectContains(aliases.receiver, expectedReceiver);
+    }
+    if (key === "payment") {
+      const expectedPayment = { ...asRecord(value) };
+      const actualPayment = { ...asRecord(aliases.payment) };
+      if (Array.isArray(expectedPayment.accepted_methods)) {
+        const expectedMethods = expectedPayment.accepted_methods.map(String).sort();
+        const actualMethods = (Array.isArray(actualPayment.accepted_methods) ? actualPayment.accepted_methods : [])
+          .map(String)
+          .sort();
+        if (expectedMethods.length !== actualMethods.length || expectedMethods.some((method, index) => method !== actualMethods[index])) {
+          return false;
+        }
+        delete expectedPayment.accepted_methods;
+        delete actualPayment.accepted_methods;
+      }
+      return objectContains(actualPayment, expectedPayment);
+    }
+    return objectContains(aliases[key], value);
+  });
+}
+
+function mutationReconciliationRequired(error: unknown) {
+  if (error instanceof SallaRequestError && error.outcomeUnknown) return error;
+  return Object.assign(new Error("Salla accepted a write request but its final order state still requires reconciliation."), {
+    name: "SallaMutationOutcomeUnknown",
+    code: "MUTATION_RECONCILIATION_REQUIRED",
+    outcomeUnknown: true,
+    cause: error,
+  });
+}
+
+async function readSallaOrderUntil(
+  session: SallaAuthorizedSession,
+  remoteOrderId: string,
+  matches: (remote: Record<string, any>) => boolean,
+) {
+  let latest: Record<string, any> | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const payload = await authorizedSallaGet<Record<string, unknown>>(
+        session,
+        `${SALLA_API_BASE}/orders/${encodeURIComponent(remoteOrderId)}`,
+        { timeoutMs: 4_000, maxRetries: 0 },
+      );
+      latest = unwrapSallaData(payload) as Record<string, any>;
+    } catch (error) {
+      if (attempt >= 1) throw error;
+      await waitForRetry(250);
+      continue;
+    }
+    if (matches(latest)) return latest;
+    if (attempt < 1) await waitForRetry(250);
+  }
+  return null;
+}
+
+export async function getSallaOrderStatusesForUser(currentUid: string) {
+  const { session } = await authorizedSessionForUser(currentUid);
+  const response = await authorizedSallaGet(session, `${SALLA_API_BASE}/orders/statuses`);
+  return normalizeSallaStatuses(response);
+}
+
+export async function updateSallaOrderStatusForUser(
+  currentUid: string,
+  actorUid: string,
+  orderDocId: string,
+  input: unknown,
+) {
+  const identity = await ownedSallaOrderIdentity(currentUid, orderDocId);
+  const { integration, session } = await authorizedSessionForUser(currentUid, true);
+  const statuses = normalizeSallaStatuses(
+    await authorizedSallaGet(session, `${SALLA_API_BASE}/orders/statuses`),
+  );
+  assertSallaOrderWriteScope(integration.scope);
+  const command = normalizeSallaStatusCommand(input, statuses);
+  const before = await fetchSallaOrderDetails(session, identity.remoteOrderId);
+  if (remoteMatchesStatus(before, command.desired)) {
+    await persistAuthoritativeSallaOrder(currentUid, before, { origin: "salla_command" });
+    return { success: true, changed: false, status: command.desired, order_id: orderDocId };
+  }
+
+  let lastRemoteSnapshot: Record<string, any> | null = null;
+  const audited = await runAuditedSallaOrderCommand({
+    ownerUid: currentUid,
+    actorUid,
+    orderDocId,
+    remoteOrderId: identity.remoteOrderId,
+    commandType: "status.update",
+    payload: command.request,
+    beforeSnapshot: before,
+    execute: async () => {
+      await authorizedSallaMutation(
+        session,
+        `${SALLA_API_BASE}/orders/${encodeURIComponent(identity.remoteOrderId)}/status`,
+        "POST",
+        command.request,
+      );
+      try {
+        lastRemoteSnapshot = await readSallaOrderUntil(
+          session,
+          identity.remoteOrderId,
+          (remote) => remoteMatchesStatus(remote, command.desired),
+        );
+        if (!lastRemoteSnapshot) throw mutationReconciliationRequired(null);
+        await persistAuthoritativeSallaOrder(currentUid, lastRemoteSnapshot, { origin: "salla_command" });
+        return lastRemoteSnapshot;
+      } catch (error) {
+        throw mutationReconciliationRequired(error);
+      }
+    },
+    reconcile: async () => {
+      const remote = await readSallaOrderUntil(
+        session,
+        identity.remoteOrderId,
+        (candidate) => remoteMatchesStatus(candidate, command.desired),
+      );
+      if (!remote) return { success: false, resultStatus: "not_applied" };
+      lastRemoteSnapshot = remote;
+      await persistAuthoritativeSallaOrder(currentUid, remote, { origin: "salla_command" });
+      return { success: true, result: remote, afterSnapshot: remote, resultStatus: "reconciled" };
+    },
+  });
+  const finalStatus = sallaRemoteStatus(lastRemoteSnapshot || audited.result || {});
+  return {
+    success: true,
+    changed: !audited.duplicate,
+    reconciled: audited.reconciled,
+    command_id: audited.commandId,
+    order_id: orderDocId,
+    status: finalStatus,
+  };
+}
+
+export async function updateSallaOrderForUser(
+  currentUid: string,
+  actorUid: string,
+  orderDocId: string,
+  input: unknown,
+) {
+  const identity = await ownedSallaOrderIdentity(currentUid, orderDocId);
+  const { integration, session } = await authorizedSessionForUser(currentUid, true);
+  assertSallaOrderWriteScope(integration.scope);
+  const desired = sanitizeSallaOrderUpdate(input);
+  const before = await fetchSallaOrderDetails(session, identity.remoteOrderId);
+  assertSallaOrderUpdatePermitted(before, desired);
+  if (remoteMatchesOrderUpdate(before, desired)) {
+    await persistAuthoritativeSallaOrder(currentUid, before, { origin: "salla_command" });
+    return { success: true, changed: false, order_id: orderDocId, status: sallaRemoteStatus(before) };
+  }
+
+  let lastRemoteSnapshot: Record<string, any> | null = null;
+  const audited = await runAuditedSallaOrderCommand({
+    ownerUid: currentUid,
+    actorUid,
+    orderDocId,
+    remoteOrderId: identity.remoteOrderId,
+    commandType: "order.update",
+    payload: desired,
+    beforeSnapshot: before,
+    execute: async () => {
+      await authorizedSallaMutation(
+        session,
+        `${SALLA_API_BASE}/orders/${encodeURIComponent(identity.remoteOrderId)}`,
+        "PUT",
+        desired,
+      );
+      try {
+        lastRemoteSnapshot = await readSallaOrderUntil(
+          session,
+          identity.remoteOrderId,
+          (remote) => remoteMatchesOrderUpdate(remote, desired),
+        );
+        if (!lastRemoteSnapshot) throw mutationReconciliationRequired(null);
+        await persistAuthoritativeSallaOrder(currentUid, lastRemoteSnapshot, { origin: "salla_command" });
+        return lastRemoteSnapshot;
+      } catch (error) {
+        throw mutationReconciliationRequired(error);
+      }
+    },
+    reconcile: async () => {
+      const remote = await readSallaOrderUntil(
+        session,
+        identity.remoteOrderId,
+        (candidate) => remoteMatchesOrderUpdate(candidate, desired),
+      );
+      if (!remote) return { success: false, resultStatus: "not_applied" };
+      lastRemoteSnapshot = remote;
+      await persistAuthoritativeSallaOrder(currentUid, remote, { origin: "salla_command" });
+      return { success: true, result: remote, afterSnapshot: remote, resultStatus: "reconciled" };
+    },
+  });
+  return {
+    success: true,
+    changed: !audited.duplicate,
+    reconciled: audited.reconciled,
+    command_id: audited.commandId,
+    order_id: orderDocId,
+    status: sallaRemoteStatus(lastRemoteSnapshot || audited.result || {}),
   };
 }
 
@@ -899,9 +1926,8 @@ export async function handleSallaCallback(req: Request) {
       client_secret: clientSecret(),
       redirect_uri: state.redirectUri,
     }));
-    const profile = await fetchUserInfo(token.access_token);
-    const merchant = asRecord(profile.merchant);
-
+    // Persist the one-time authorization grant before any metadata request.
+    // A store-info outage must never force the merchant to authorize again.
     await writeIntegration(state.uid, {
       status: "connected",
       access_token: token.access_token,
@@ -909,12 +1935,17 @@ export async function handleSallaCallback(req: Request) {
       expires_at: expiresAt(token.expires_in),
       scope: token.scope || defaultScopes(),
       token_type: token.token_type || "Bearer",
-      merchant_id: firstText(merchant.id, profile.merchant_id) || null,
-      store_name: firstText(merchant.name, merchant.store_name, profile.name) || null,
-      store_url: firstText(merchant.domain, merchant.url, merchant.permalink) || null,
       last_sync_status: "idle",
       last_sync_error: null,
     });
+
+    const profile = await fetchMerchantProfile(token.access_token).catch(() => null);
+    if (profile) {
+      const profilePatch = merchantProfilePatch(profile);
+      if (Object.keys(profilePatch).length) {
+        await writeIntegration(state.uid, profilePatch).catch(() => undefined);
+      }
+    }
 
     return {
       status: 200,
@@ -930,39 +1961,53 @@ export async function handleSallaCallback(req: Request) {
 }
 
 export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer }) {
-  verifySallaAppWebhook(req);
+  const verification = verifySallaAppWebhook(req);
 
   const body = asRecord(req.body);
   const event = firstText(body.event, body.type);
   const merchantId = firstText(body.merchant, body.merchant_id);
-  const occurredAt = firstText(body.created_at, body.updated_at) || nowIso();
+  const eventOccurredAt = firstText(body.created_at, body.updated_at) || null;
+  const observedAt = eventOccurredAt || nowIso();
   const uid = sallaAppOwnerUid();
 
   // Persistent audit trail of every accepted (signature-passed) Salla event,
   // so we can reconstruct exactly what arrived from the merchant. Logged AFTER
   // verifySallaAppWebhook so we never log unverified payloads.
-  try {
-    const line = JSON.stringify({
-      at: nowIso(),
-      event: event || "unknown",
-      merchant: merchantId || null,
-      has_access_token: Boolean(firstText(asRecord(body.data).access_token)),
-      data_keys: Object.keys(asRecord(body.data)).slice(0, 30),
-      body_keys: Object.keys(body).slice(0, 30),
-    }) + "\n";
-    const fsync = await import("fs");
-    fsync.appendFileSync(".runtime/salla-webhook.log", line, "utf8");
-  } catch {
-    // Logging best-effort; never fail the webhook handler over a log write.
+  if (process.env.NODE_ENV !== "test") {
+    try {
+      const line = JSON.stringify({
+        at: nowIso(),
+        event: event || "unknown",
+        merchant: merchantId || null,
+        has_access_token: Boolean(firstText(asRecord(body.data).access_token)),
+        data_keys: Object.keys(asRecord(body.data)).slice(0, 30),
+        body_keys: Object.keys(body).slice(0, 30),
+      }) + "\n";
+      const fsync = await import("fs");
+      fsync.appendFileSync(".runtime/salla-webhook.log", line, "utf8");
+    } catch {
+      // Logging best-effort; never fail the webhook handler over a log write.
+    }
   }
 
   if (!uid) {
     throw new Error("SALLA_APP_OWNER_UID is required before receiving app authorization events.");
   }
 
+  const linkedIntegration = await readIntegration(uid);
+  const linkedMerchantId = firstText(linkedIntegration?.merchant_id);
+  if (
+    linkedMerchantId &&
+    merchantId &&
+    linkedMerchantId !== merchantId
+  ) {
+    const error = new Error("Salla webhook merchant does not match the connected CRM store.") as Error & { status?: number };
+    error.status = 403;
+    throw error;
+  }
+
   await writeIntegration(uid, {
-    status: (await readIntegration(uid))?.status || (configured() ? "ready_to_connect" : "not_configured"),
-    last_event_at: occurredAt,
+    last_event_at: observedAt,
     last_event_type: event || "unknown",
   });
 
@@ -974,9 +2019,23 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
     }
 
     const refreshToken = firstText(data.refresh_token) || null;
-    const profile = await fetchUserInfo(accessToken).catch(() => ({}));
-    const merchant = asRecord(asRecord(profile).merchant);
-
+    let verifiedProfile: Awaited<ReturnType<typeof fetchMerchantProfile>> | null = null;
+    if (linkedMerchantId && !merchantId) {
+      verifiedProfile = await fetchMerchantProfile(accessToken).catch(() => null);
+      const verifiedMerchantId = firstText(verifiedProfile?.merchantId);
+      if (!verifiedMerchantId) {
+        const error = new Error("Cannot verify that this Salla authorization belongs to the connected CRM store.") as Error & { status?: number };
+        error.status = 409;
+        throw error;
+      }
+      if (verifiedMerchantId !== linkedMerchantId) {
+        const error = new Error("Salla authorization belongs to a different merchant than the connected CRM store.") as Error & { status?: number };
+        error.status = 403;
+        throw error;
+      }
+    }
+    // Easy Mode delivers the only durable copy of the authorization bundle in
+    // this webhook. Save it before making any outbound metadata request.
     await writeIntegration(uid, {
       status: "connected",
       access_token: accessToken,
@@ -984,20 +2043,26 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
       expires_at: expiresAtFromUnixOrSeconds(data.expires),
       scope: firstText(data.scope) || defaultScopes(),
       token_type: firstText(data.token_type) || "bearer",
-      merchant_id: firstText(merchant.id, profile && asRecord(profile).merchant_id, merchantId) || null,
-      store_name: firstText(merchant.name, merchant.store_name, asRecord(profile).name) || null,
-      store_url: firstText(merchant.domain, merchant.url, merchant.permalink) || null,
-      last_authorized_at: occurredAt,
+      last_authorized_at: observedAt,
       last_sync_status: "idle",
       last_sync_error: null,
     });
+
+    const profile = verifiedProfile || await fetchMerchantProfile(accessToken).catch(() => null);
+    const profilePatch = merchantProfilePatch(
+      profile || { merchantId: null, storeName: null, storeUrl: null },
+      merchantId,
+    );
+    if (Object.keys(profilePatch).length) {
+      await writeIntegration(uid, profilePatch).catch(() => undefined);
+    }
 
     return {
       success: true,
       event,
       owner_uid: uid,
-      merchant_id: firstText(merchant.id, merchantId) || null,
-      store_name: firstText(merchant.name, merchant.store_name, asRecord(profile).name) || null,
+      merchant_id: profile?.merchantId || merchantId || null,
+      store_name: profile?.storeName || null,
       linked: true,
     };
   }
@@ -1013,27 +2078,46 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
     return { success: true, event, owner_uid: uid, linked: false };
   }
 
-  // Salla pushes order.* lifecycle events to the app webhook URL. Forward
-  // them through the shared store-webhook normalizer so they land in
-  // store_orders alongside the records Salla sync imports later.
-  if (event === "order.created" || event === "order.updated" || event === "order.refunded" || event === "order.cancelled") {
-    try {
-      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body ?? ""));
-      const order = normalizeStorePayload(req, rawBody);
-      const imported = await importStoreOrderForUser(uid, order);
-      return {
-        success: true,
-        event,
-        owner_uid: uid,
-        order_id: order.orderId,
-        order_number: order.orderNumber,
-        imported,
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await writeIntegration(uid, { last_sync_error: message });
-      return { success: false, event, owner_uid: uid, error: message };
-    }
+  if (SALLA_ORDER_EVENTS.has(event)) {
+    const remoteOrderId = remoteOrderIdFromWebhook(body);
+    const inbox = await processSallaOrderInbox({
+      ownerUid: uid,
+      merchantId: merchantId || linkedMerchantId || null,
+      eventType: event,
+      remoteOrderId,
+      rawBody: verification.rawBody,
+      occurredAt: eventOccurredAt,
+    }, async () => {
+      if (!remoteOrderId) {
+        const error = new Error("Salla order event is missing the remote order id.") as Error & { status?: number };
+        error.status = 422;
+        throw error;
+      }
+      const { session } = await authorizedSessionForUser(uid);
+      if (event === "order.deleted") {
+        try {
+          const currentRemoteOrder = await fetchSallaOrderDetails(session, remoteOrderId);
+          return persistAuthoritativeSallaOrder(uid, currentRemoteOrder, { origin: "salla_webhook" });
+        } catch (error) {
+          if (!(error instanceof SallaRequestError) || (error.status !== 404 && error.status !== 410)) throw error;
+          return markSallaOrderDeleted(uid, remoteOrderId, observedAt);
+        }
+      }
+      const remoteOrder = await fetchSallaOrderDetails(session, remoteOrderId);
+      return persistAuthoritativeSallaOrder(uid, remoteOrder, {
+        operationalCreate: event === "order.created",
+        origin: "salla_webhook",
+      });
+    });
+    return {
+      success: true,
+      duplicate: inbox.duplicate,
+      inbox_id: inbox.inboxId,
+      event,
+      owner_uid: uid,
+      order_id: remoteOrderId,
+      result: inbox.result,
+    };
   }
 
   // Product lifecycle events: log only for now — the CRM products table is
@@ -1041,17 +2125,23 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
   if (event === "product.created" || event === "product.updated" || event === "product.deleted") {
     const data = asRecord(body.data);
     const productId = firstText(data.id, data.uuid) || null;
-    const sync = await syncSallaProductsForUser(uid).catch((error) => ({
-      success: false,
-      error: error instanceof Error ? error.message : String(error),
-    }));
+    const inbox = await processSallaOrderInbox({
+      ownerUid: uid,
+      merchantId: merchantId || linkedMerchantId || null,
+      eventType: event,
+      remoteOrderId: productId,
+      rawBody: verification.rawBody,
+      occurredAt: eventOccurredAt,
+    }, () => syncSallaProductsForUser(uid));
     return {
-      success: Boolean((sync as { success?: boolean }).success),
+      success: true,
+      duplicate: inbox.duplicate,
+      inbox_id: inbox.inboxId,
       event,
       owner_uid: uid,
       product_id: productId,
       product_name: firstText(data.name) || null,
-      sync,
+      sync: inbox.result,
     };
   }
 
@@ -1072,97 +2162,127 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
     throw new Error("Salla is not connected. Reinstall the Salla app or start the Salla connection again, then run sync.");
   }
 
-  const token = await ensureFreshAccessToken(currentUid, integration);
   const importedAt = nowIso();
   const existingOrdersSnap = await adminDb
     .collection("store_orders")
     .where("createdBy", "==", currentUid)
-    .limit(500)
+    .limit(10_000)
     .get();
   const existingOrders = new Map<string, Record<string, any>>(
     existingOrdersSnap.docs.map((doc: any) => [String(doc.id), doc.data() || {}] as [string, Record<string, any>]),
   );
-  const seen = new Set<string>();
   let imported = 0;
   let updated = 0;
   let failed = 0;
   let fetched = 0;
   let pages = 0;
+  let advertisedTotal: number | null = null;
+  let advertisedPages: number | null = null;
   let lastRemoteUpdate = integration.last_remote_update_at || null;
   let firstFailureMessage: string | null = null;
 
   try {
-    for (let page = 1; page <= maxSyncPages(); page += 1) {
-      const payload = await fetchOrdersPage(token, page);
-      const orders = asArray(payload.data || payload.orders || payload.items);
-      if (!orders.length) break;
-      pages += 1;
-      fetched += orders.length;
+    const token = await ensureFreshAccessToken(currentUid, integration);
+    const session: SallaAuthorizedSession = { uid: currentUid, accessToken: token };
+    const completePages = await collectCompleteSallaOrderPages((page) => fetchOrdersPage(session, page));
+    pages = completePages.pages;
+    fetched = completePages.fetched;
+    advertisedTotal = completePages.advertisedTotal;
+    advertisedPages = completePages.advertisedPages;
 
-      for (const remoteOrder of orders) {
-        const normalized = mapSallaOrder(remoteOrder);
-        if (!normalized) {
-          failed += 1;
-          continue;
-        }
-
-        const dedupeKey = `${normalized.provider}:${normalized.orderId}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-
-        const orderDocId = getStoreOrderDocId(currentUid, normalized.provider, normalized.orderId);
-        const existing = existingOrders.get(orderDocId);
-        const remoteUpdatedAt =
-          firstText(remoteOrder.updated_at, remoteOrder.created_at, remoteOrder.date, normalized.orderDate) || null;
-
-        const shouldRefreshMoney =
-          existing &&
-          normalizedOrderHasMoney(normalized) &&
-          existingOrderNeedsMoneyRefresh(existing as Record<string, unknown>);
-
-        if (existing && sameRemoteStamp((existing as Record<string, unknown>).last_event_at, remoteUpdatedAt) && !shouldRefreshMoney) {
-          updated += 1;
-          lastRemoteUpdate = remoteUpdatedAt || lastRemoteUpdate;
-          continue;
-        }
-
-        try {
-          await importStoreOrderForUser(currentUid, normalized, {
-            source: "salla",
-            provider: "salla",
-            order_date: normalized.orderDate,
-            last_event_at: remoteUpdatedAt,
-          });
-          if (existing) updated += 1;
-          else imported += 1;
-          lastRemoteUpdate = remoteUpdatedAt || lastRemoteUpdate;
-        } catch (orderImportError) {
-          failed += 1;
-          if (!firstFailureMessage) {
-            firstFailureMessage =
-              orderImportError instanceof Error
-                ? orderImportError.message
-                : "Unknown Salla order import failure.";
-          }
-        }
+    for (const remoteOrder of completePages.orders) {
+      const normalized = mapSallaOrder(remoteOrder);
+      if (!normalized) {
+        failed += 1;
+        if (!firstFailureMessage) firstFailureMessage = "Salla order was missing a usable customer phone or order id.";
+        continue;
       }
 
-      const pagination = asRecord(payload.pagination);
-      const totalPages = Number(pagination.total_pages || pagination.last_page || 0);
-      if (totalPages && page >= totalPages) break;
-      if (orders.length < pageSize()) break;
+      const orderDocId = getStoreOrderDocId(currentUid, normalized.provider, normalized.orderId);
+      const existing = existingOrders.get(orderDocId);
+      const remoteUpdatedAt =
+        firstText(remoteOrder.updated_at, remoteOrder.created_at, remoteOrder.date, normalized.orderDate) || null;
+      const remoteStatus = asRecord(remoteOrder.status);
+      const remoteStatusId = firstText(remoteStatus.id) || null;
+      const remoteStatusName = firstText(remoteStatus.name, normalized.status) || null;
+      const remoteStatusSlug = firstText(remoteStatus.slug) || null;
+
+      const shouldRefreshMoney =
+        existing &&
+        normalizedOrderHasMoney(normalized) &&
+        existingOrderNeedsMoneyRefresh(existing as Record<string, unknown>);
+      const shouldRefreshRemoteMetadata = Boolean(existing && (
+        !existing.remote_synced_at ||
+        !existing.sync_origin ||
+        (remoteStatusId && firstText(existing.remote_status_id) !== remoteStatusId) ||
+        (remoteStatusName && firstText(existing.remote_status_name) !== remoteStatusName) ||
+        (remoteStatusSlug && firstText(existing.remote_status_slug) !== remoteStatusSlug)
+      ));
+
+      if (
+        existing &&
+        sameRemoteStamp((existing as Record<string, unknown>).last_event_at, remoteUpdatedAt) &&
+        !shouldRefreshMoney &&
+        !shouldRefreshRemoteMetadata
+      ) {
+        updated += 1;
+        lastRemoteUpdate = remoteUpdatedAt || lastRemoteUpdate;
+        continue;
+      }
+
+      try {
+        await projectStoreOrderForUser(currentUid, normalized, {
+          source: "salla",
+          provider: "salla",
+          order_date: normalized.orderDate,
+          last_event_at: remoteUpdatedAt,
+          remote_updated_at: remoteUpdatedAt,
+          remote_synced_at: importedAt,
+          remote_status_id: remoteStatusId,
+          remote_status_name: remoteStatusName,
+          remote_status_slug: remoteStatusSlug,
+          sync_origin: "salla_sync",
+        }, { suppressRealtime: true });
+        if (existing) updated += 1;
+        else imported += 1;
+        lastRemoteUpdate = remoteUpdatedAt || lastRemoteUpdate;
+      } catch (orderImportError) {
+        failed += 1;
+        if (!firstFailureMessage) {
+          firstFailureMessage =
+            orderImportError instanceof Error
+              ? orderImportError.message
+              : "Unknown Salla order projection failure.";
+        }
+      }
     }
 
+    const warning = failed
+      ? `${failed} orders could not be projected.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
+      : null;
     await writeIntegration(currentUid, {
       status: "connected",
       last_sync_at: importedAt,
       last_sync_status: syncSummaryStatus(failed),
       last_sync_count: imported + updated,
-      last_sync_error: failed
-        ? `${failed} orders could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
-        : null,
+      last_sync_error: warning,
+      last_order_sync_at: importedAt,
+      last_order_sync_status: syncSummaryStatus(failed),
+      last_order_sync_count: imported + updated,
+      last_order_sync_error: warning,
+      last_order_sync_complete: failed === 0,
+      last_order_sync_advertised_count: advertisedTotal,
+      last_order_sync_advertised_pages: advertisedPages,
+      last_order_sync_warning: warning,
       last_remote_update_at: lastRemoteUpdate,
     });
+
+    if (failed === 0) {
+      publishStoreOrderChange(currentUid, {
+        type: "sync.completed",
+        source: "salla_sync",
+      });
+    }
 
     return {
       success: failed === 0,
@@ -1172,18 +2292,30 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
       pages,
       fetched,
       last_sync_at: importedAt,
-      last_error: failed
-        ? `${failed} orders could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
-        : null,
+      last_error: warning,
+      partial: failed > 0,
+      advertised_count: advertisedTotal,
+      advertised_pages: advertisedPages,
+      unique_fetched: fetched,
+      warning,
+      complete: failed === 0,
     };
   } catch (syncError) {
-    const message = syncError instanceof Error ? syncError.message : "Salla sync failed.";
+    const message = syncFailureMessage(syncError, "Salla sync failed.");
     await writeIntegration(currentUid, {
-      status: "error",
+      status: statusAfterSyncFailure(syncError),
       last_sync_at: importedAt,
       last_sync_status: "error",
       last_sync_count: imported + updated,
       last_sync_error: message,
+      last_order_sync_at: importedAt,
+      last_order_sync_status: "error",
+      last_order_sync_count: imported + updated,
+      last_order_sync_error: message,
+      last_order_sync_complete: false,
+      last_order_sync_advertised_count: advertisedTotal,
+      last_order_sync_advertised_pages: advertisedPages,
+      last_order_sync_warning: message,
     });
     throw syncError;
   }
@@ -1198,12 +2330,11 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
     throw new Error("Salla is not connected. Reinstall the Salla app or start the Salla connection again, then run sync.");
   }
 
-  const token = await ensureFreshAccessToken(currentUid, integration);
   const syncedAt = nowIso();
   const existingProductsSnap = await adminDb
     .collection("products")
     .where("createdBy", "==", currentUid)
-    .limit(1000)
+    .limit(10_000)
     .get();
   const existingByRemoteId = new Map<string, { id: string; data: Record<string, any> }>();
   const existingBySku = new Map<string, { id: string; data: Record<string, any> }>();
@@ -1220,13 +2351,37 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   let failed = 0;
   let fetched = 0;
   let pages = 0;
+  let advertisedPages: number | null = null;
+  let advertisedTotal: number | null = null;
+  const seenRemoteProductIds = new Set<string>();
   let firstFailureMessage: string | null = null;
 
   try {
-    for (let page = 1; page <= maxSyncPages(); page += 1) {
-      const payload = await fetchProductsPage(token, page);
+    const token = await ensureFreshAccessToken(currentUid, integration);
+    const session: SallaAuthorizedSession = { uid: currentUid, accessToken: token };
+    for (let page = 1; page <= productMaxSyncPages(); page += 1) {
+      const payload = await fetchProductsPage(session, page);
+      const pagination = asRecord(payload.pagination);
+      const totalPages = requiredPaginationInteger(
+        pagination,
+        ["totalPages", "total_pages", "lastPage", "last_page"],
+        "productTotalPages",
+      );
+      const total = requiredPaginationInteger(pagination, ["total"], "productTotal");
+      if (page === 1) {
+        advertisedPages = totalPages;
+        advertisedTotal = total;
+        if (totalPages > productMaxSyncPages()) {
+          throw new Error(`Salla products sync is incomplete: ${totalPages} pages exceeds the ${productMaxSyncPages()}-page cap.`);
+        }
+      } else if (advertisedPages !== totalPages || advertisedTotal !== total) {
+        throw new Error("Salla products sync is incomplete: pagination changed during the snapshot.");
+      }
       const products = asArray(payload.data || payload.products || payload.items);
-      if (!products.length) break;
+      if (!products.length) {
+        if (page === 1 && total === 0 && (totalPages === 0 || totalPages === 1)) break;
+        throw new Error(`Salla products sync is incomplete: page ${page} was empty before completion.`);
+      }
       pages += 1;
       fetched += products.length;
 
@@ -1236,6 +2391,10 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
           failed += 1;
           continue;
         }
+        if (seenRemoteProductIds.has(mapped.remoteId)) {
+          throw new Error(`Salla products sync is incomplete: duplicate remote product ${mapped.remoteId}.`);
+        }
+        seenRemoteProductIds.add(mapped.remoteId);
 
         try {
           const skuKey = firstText(mapped.data.sku).toLowerCase();
@@ -1264,10 +2423,17 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
         }
       }
 
-      const pagination = asRecord(payload.pagination);
-      const totalPages = Number(pagination.total_pages || pagination.last_page || 0);
-      if (totalPages && page >= totalPages) break;
-      if (products.length < pageSize()) break;
+      if (page >= totalPages) break;
+    }
+
+    if (advertisedPages === null || advertisedTotal === null) {
+      throw new Error("Salla products sync is incomplete: no pagination contract was received.");
+    }
+    if (advertisedPages > 0 && pages < advertisedPages) {
+      throw new Error(`Salla products sync is incomplete: collected ${pages} of ${advertisedPages} pages.`);
+    }
+    if (seenRemoteProductIds.size !== advertisedTotal) {
+      throw new Error(`Salla products sync is incomplete: collected ${seenRemoteProductIds.size} of ${advertisedTotal} products.`);
     }
 
     const errorMessage = failed
@@ -1289,11 +2455,15 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       fetched,
       last_sync_at: syncedAt,
       last_error: errorMessage,
+      advertised_count: advertisedTotal,
+      advertised_pages: advertisedPages,
+      unique_fetched: seenRemoteProductIds.size,
+      complete: failed === 0,
     };
   } catch (syncError) {
-    const message = syncError instanceof Error ? syncError.message : "Salla products sync failed.";
+    const message = syncFailureMessage(syncError, "Salla products sync failed.");
     await writeIntegration(currentUid, {
-      status: "error",
+      status: statusAfterSyncFailure(syncError),
       last_product_sync_at: syncedAt,
       last_product_sync_count: imported + updated,
       last_product_sync_error: message,
@@ -1302,25 +2472,182 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   }
 }
 
-async function fetchCustomersPage(token: string, page: number) {
+async function fetchCustomersPage(session: SallaAuthorizedSession, page: number) {
   const url = new URL(`${SALLA_API_BASE}/customers`);
   url.searchParams.set("page", String(page));
-  url.searchParams.set("per_page", String(pageSize()));
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body?.message || `Salla customers sync failed (${response.status}).`);
-  }
-  return body;
+  url.searchParams.set("per_page", String(customerPageSize()));
+  return authorizedSallaGet(session, url);
 }
 
-export async function syncSallaCustomersForUser(currentUid: string): Promise<SyncResult> {
+type MappedSallaCustomer = {
+  documentId: string;
+  remoteId: string | null;
+  name: string;
+  phone: string;
+  city: string;
+};
+
+function stableJson(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function mapSallaCustomer(currentUid: string, remoteCustomer: Record<string, any>): MappedSallaCustomer {
+  const mobile = asRecord(remoteCustomer.mobile);
+  const remoteId = firstText(remoteCustomer.id, remoteCustomer.customer_id, remoteCustomer.uuid) || null;
+  const phone = normalizePhoneDigits(firstText(
+    joinCountryCode(
+      firstText(remoteCustomer.mobile_code, mobile.code, mobile.country_code),
+      firstText(remoteCustomer.mobile, mobile.number, mobile.value),
+    ),
+    remoteCustomer.phone,
+    remoteCustomer.phone_number,
+    mobile.number,
+    mobile.value,
+  ));
+  const combinedName = [firstText(remoteCustomer.first_name), firstText(remoteCustomer.last_name)]
+    .filter(Boolean)
+    .join(" ");
+  const name = truncate(
+    firstText(remoteCustomer.name, remoteCustomer.full_name, combinedName) || "Salla customer",
+    120,
+  );
+  const cityRecord = asRecord(remoteCustomer.city);
+  const city = truncate(firstText(remoteCustomer.city, cityRecord.name, cityRecord.title), 80);
+  const email = firstText(remoteCustomer.email, remoteCustomer.email_address).toLowerCase();
+  const fallbackIdentity = phone
+    ? `phone:${phone}`
+    : email
+      ? `email:${email}`
+      : `record:${crypto.createHash("sha256").update(stableJson(remoteCustomer)).digest("hex")}`;
+  const identity = remoteId ? `id:${remoteId}` : fallbackIdentity;
+  const hash = crypto.createHash("sha1").update(`${currentUid}:salla:${identity}`).digest("hex").slice(0, 24);
+
+  return {
+    documentId: `cust_salla_${hash}`,
+    remoteId,
+    name,
+    phone,
+    city,
+  };
+}
+
+type IndexedSallaCustomer = { id: string; data: Record<string, any> };
+
+type SallaCustomerIndexes = {
+  byDocumentId: Map<string, IndexedSallaCustomer>;
+  byRemoteId: Map<string, IndexedSallaCustomer>;
+  legacyByPhone: Map<string, IndexedSallaCustomer>;
+};
+
+async function loadSallaCustomerIndexes(currentUid: string): Promise<SallaCustomerIndexes> {
+  const snapshot = await adminDb
+    .collection("customers")
+    .where("createdBy", "==", currentUid)
+    .limit(10_000)
+    .get();
+  const indexes: SallaCustomerIndexes = {
+    byDocumentId: new Map(),
+    byRemoteId: new Map(),
+    legacyByPhone: new Map(),
+  };
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data() || {};
+    const entry = { id: String(doc.id), data };
+    indexes.byDocumentId.set(entry.id, entry);
+    const remoteId = firstText(data.store_customer_id);
+    const isSallaCustomer = data.store_provider === "salla" || data.source === "salla";
+    if (remoteId && isSallaCustomer && !indexes.byRemoteId.has(remoteId)) {
+      indexes.byRemoteId.set(remoteId, entry);
+    }
+    const legacyPhone = normalizePhoneDigits(data.phone);
+    const isLegacySallaCustomer = !remoteId && isSallaCustomer;
+    if (legacyPhone && isLegacySallaCustomer && !indexes.legacyByPhone.has(legacyPhone)) {
+      indexes.legacyByPhone.set(legacyPhone, entry);
+    }
+  }
+  return indexes;
+}
+
+function resolveSallaCustomerTarget(indexes: SallaCustomerIndexes, customer: MappedSallaCustomer) {
+  const preferred = indexes.byDocumentId.get(customer.documentId);
+  if (preferred) return { ...preferred, exists: true, claimedLegacyPhone: null as string | null };
+
+  if (customer.remoteId) {
+    const byRemoteId = indexes.byRemoteId.get(customer.remoteId);
+    if (byRemoteId) return { ...byRemoteId, exists: true, claimedLegacyPhone: null as string | null };
+  }
+
+  // Older order-webhook customers may not have store_customer_id. Claim one
+  // matching Salla row at most once, then bind it to the immutable remote id.
+  if (customer.phone) {
+    const legacy = indexes.legacyByPhone.get(customer.phone);
+    if (legacy) return { ...legacy, exists: true, claimedLegacyPhone: customer.phone };
+  }
+
+  return {
+    id: customer.documentId,
+    data: {} as Record<string, any>,
+    exists: false,
+    claimedLegacyPhone: null as string | null,
+  };
+}
+
+function updateSallaCustomerIndexes(
+  indexes: SallaCustomerIndexes,
+  target: ReturnType<typeof resolveSallaCustomerTarget>,
+  customer: MappedSallaCustomer,
+  data: Record<string, unknown>,
+) {
+  const entry = { id: target.id, data: { ...target.data, ...data } };
+  indexes.byDocumentId.set(entry.id, entry);
+  if (customer.remoteId) indexes.byRemoteId.set(customer.remoteId, entry);
+  if (target.claimedLegacyPhone) indexes.legacyByPhone.delete(target.claimedLegacyPhone);
+}
+
+function customerCountWarning(
+  advertisedCount: number | null,
+  uniqueFetched: number,
+  advertisedPages: number,
+  incomplete: boolean,
+) {
+  if (advertisedCount === null || advertisedCount === uniqueFetched) return null;
+  const difference = advertisedCount - uniqueFetched;
+  const comparison = difference > 0
+    ? `${difference} fewer`
+    : `${Math.abs(difference)} more`;
+  if (incomplete) {
+    return `Salla advertised ${advertisedCount} customers but ${uniqueFetched} unique customers were fetched (${comparison}). The sync is incomplete and must be retried.`;
+  }
+  const pageSummary = advertisedPages > 0
+    ? `All ${advertisedPages} advertised pages were fetched`
+    : "The paginated result set reached its final page";
+  return `Salla advertised ${advertisedCount} customers but returned ${uniqueFetched} unique customers (${comparison}). ${pageSummary}; the paginated rows were accepted as complete.`;
+}
+
+function customerCountToleranceError(
+  advertisedCount: number | null,
+  uniqueFetched: number,
+  requestedPageSize: number,
+) {
+  if (advertisedCount === null || advertisedCount <= 0) return null;
+  if (uniqueFetched === 0) {
+    return `Salla advertised ${advertisedCount} customers but returned no unique customers.`;
+  }
+  const tolerance = Math.max(5, Math.min(requestedPageSize, Math.ceil(advertisedCount * 0.01)));
+  const difference = Math.abs(advertisedCount - uniqueFetched);
+  return difference > tolerance
+    ? `Salla customer count differs by ${difference}, exceeding the allowed tolerance of ${tolerance} (${advertisedCount} advertised, ${uniqueFetched} unique).`
+    : null;
+}
+
+async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<SyncResult> {
   if (!configured()) throw new Error("Salla integration is not configured on the server.");
 
   const integration = await readIntegration(currentUid);
@@ -1329,7 +2656,6 @@ export async function syncSallaCustomersForUser(currentUid: string): Promise<Syn
     throw new Error("Salla is not connected.");
   }
 
-  const token = await ensureFreshAccessToken(currentUid, integration);
   const syncedAt = nowIso();
 
   let imported = 0;
@@ -1338,76 +2664,169 @@ export async function syncSallaCustomersForUser(currentUid: string): Promise<Syn
   let fetched = 0;
   let pages = 0;
   let firstFailureMessage: string | null = null;
+  let partialMessage: string | null = null;
+  let capReached = false;
+  let expectedTotalPages = 0;
+  let expectedTotalCustomers: number | null = null;
+  let lastRequestedPage = 0;
+  const uniqueFetchedCustomerIds = new Set<string>();
+  const firstCustomerPageById = new Map<string, number>();
+  const duplicateCustomerIdsAcrossPages = new Set<string>();
 
   try {
-    for (let page = 1; page <= maxSyncPages(); page += 1) {
-      const payload = await fetchCustomersPage(token, page);
+    const token = await ensureFreshAccessToken(currentUid, integration);
+    const session: SallaAuthorizedSession = { uid: currentUid, accessToken: token };
+    const customerCollection = adminDb.collection("customers");
+    const customerIndexes = await loadSallaCustomerIndexes(currentUid);
+    const maximumPages = customerMaxSyncPages();
+    const requestedPageSize = customerPageSize();
+    for (let page = 1; page <= maximumPages; page += 1) {
+      const payload = await fetchCustomersPage(session, page);
+      lastRequestedPage = page;
+      const pagination = asRecord(payload.pagination);
+      const totalPages = Number(pagination.totalPages || pagination.total_pages || pagination.last_page || 0);
+      if (Number.isFinite(totalPages) && totalPages > 0) {
+        expectedTotalPages = Math.max(expectedTotalPages, Math.trunc(totalPages));
+      }
+      const totalValue = pagination.total;
+      if (totalValue !== undefined && totalValue !== null && totalValue !== "") {
+        const total = Number(totalValue);
+        if (Number.isFinite(total) && total >= 0) {
+          expectedTotalCustomers = Math.max(expectedTotalCustomers ?? 0, Math.trunc(total));
+        }
+      }
       const customers = asArray(payload.data || payload.customers || payload.items);
-      if (!customers.length) break;
+      if (!customers.length) {
+        if (expectedTotalPages > page) {
+          partialMessage = `Salla returned an empty customer page at page ${page} before the advertised result set was complete (${fetched} of ${expectedTotalCustomers ?? "unknown"} customers, ${expectedTotalPages || "unknown"} pages).`;
+        }
+        break;
+      }
       pages += 1;
       fetched += customers.length;
 
       for (const remoteCustomer of customers) {
-        const phone = firstText(
-          remoteCustomer.mobile, remoteCustomer.phone,
-          asRecord(remoteCustomer.mobile)?.number,
-        )?.replace(/[^\d]/g, "");
-        if (!phone) { failed += 1; continue; }
-
-        const name = firstText(remoteCustomer.name, remoteCustomer.full_name, remoteCustomer.first_name)
-          || "Salla customer";
-        const city = firstText(remoteCustomer.city);
-
         try {
-          const customerDocId = `cust_${crypto.createHash("sha1").update(`${currentUid}:salla:${phone}`).digest("hex").slice(0, 20)}`;
-
-          await adminDb.collection("customers").doc(customerDocId).set({
+          const mapped = mapSallaCustomer(currentUid, remoteCustomer);
+          const firstPage = firstCustomerPageById.get(mapped.documentId);
+          if (firstPage !== undefined) {
+            if (firstPage !== page) duplicateCustomerIdsAcrossPages.add(mapped.documentId);
+            continue;
+          }
+          firstCustomerPageById.set(mapped.documentId, page);
+          uniqueFetchedCustomerIds.add(mapped.documentId);
+          const target = resolveSallaCustomerTarget(customerIndexes, mapped);
+          const customerData: Record<string, unknown> = {
             createdBy: currentUid,
-            name,
-            phone,
-            city: city || null,
+            name: mapped.name,
+            phone: mapped.phone,
+            city: mapped.city,
             source: "salla",
             store_provider: "salla",
-            store_customer_id: String(remoteCustomer.id || ""),
-            createdAt: syncedAt,
+            store_customer_id: mapped.remoteId,
             updatedAt: syncedAt,
-          }, { merge: true });
+          };
+          if (!target.exists) customerData.createdAt = syncedAt;
 
-          imported += 1;
-        } catch {
+          await customerCollection.doc(target.id).set(customerData, { merge: true });
+          updateSallaCustomerIndexes(customerIndexes, target, mapped, customerData);
+
+          if (target.exists) updated += 1;
+          else imported += 1;
+        } catch (customerImportError) {
           failed += 1;
+          if (!firstFailureMessage) {
+            firstFailureMessage = customerImportError instanceof Error
+              ? customerImportError.message
+              : "Unknown Salla customer import failure.";
+          }
         }
       }
 
-      const pagination = asRecord(payload.pagination);
-      const totalPages = Number(pagination.total_pages || pagination.last_page || 0);
-      if (totalPages && page >= totalPages) break;
-      if (customers.length < pageSize()) break;
+      if (totalPages > 0) {
+        if (page >= totalPages) break;
+      } else if (customers.length < requestedPageSize) {
+        break;
+      }
+
+      if (page >= maximumPages) {
+        capReached = true;
+        partialMessage = totalPages > page
+          ? `Salla customer sync stopped at the configured page limit (${maximumPages} of ${totalPages} pages). Increase SALLA_CUSTOMER_SYNC_MAX_PAGES and run sync again.`
+          : `Salla customer sync reached the configured page limit (${maximumPages}) before the final page could be confirmed. Increase SALLA_CUSTOMER_SYNC_MAX_PAGES and run sync again.`;
+        break;
+      }
     }
 
+    if (!partialMessage && expectedTotalPages > 0 && lastRequestedPage < expectedTotalPages) {
+      partialMessage = `Salla customer sync stopped after page ${lastRequestedPage} before all ${expectedTotalPages} advertised pages were fetched.`;
+    }
+
+    const failureMessage = failed
+      ? `${failed} customers could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
+      : null;
+    const uniqueFetched = uniqueFetchedCustomerIds.size;
+    const duplicateMessage = duplicateCustomerIdsAcrossPages.size
+      ? `${duplicateCustomerIdsAcrossPages.size} duplicate Salla customer identities appeared across different pages; the sync is incomplete and must be retried.`
+      : null;
+    const toleranceMessage = customerCountToleranceError(
+      expectedTotalCustomers,
+      uniqueFetched,
+      requestedPageSize,
+    );
+    const errorMessage = [failureMessage, partialMessage, duplicateMessage, toleranceMessage].filter(Boolean).join(" ") || null;
+    const success = !errorMessage;
+    const warningMessage = customerCountWarning(
+      expectedTotalCustomers,
+      uniqueFetched,
+      expectedTotalPages,
+      !success,
+    );
+
     await writeIntegration(currentUid, {
+      status: "connected",
       last_customer_sync_at: syncedAt,
-      last_customer_sync_status: "success",
+      last_customer_sync_status: success ? "success" : "failed",
       last_customer_sync_count: imported + updated,
-      last_customer_sync_error: null,
+      last_customer_sync_error: errorMessage,
+      last_customer_sync_complete: success,
+      last_customer_sync_advertised_count: expectedTotalCustomers,
+      last_customer_sync_warning: warningMessage,
     });
 
     return {
-      success: true,
+      success,
       imported,
       updated,
       failed,
       fetched,
       pages,
       last_sync_at: syncedAt,
+      last_error: errorMessage,
+      partial: Boolean(partialMessage || duplicateMessage || toleranceMessage),
+      cap_reached: capReached,
+      advertised_count: expectedTotalCustomers,
+      unique_fetched: uniqueFetched,
+      warning: warningMessage,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = syncFailureMessage(error, "Salla customer sync failed.");
+    const uniqueFetched = uniqueFetchedCustomerIds.size;
+    const warningMessage = customerCountWarning(
+      expectedTotalCustomers,
+      uniqueFetched,
+      expectedTotalPages,
+      true,
+    );
     await writeIntegration(currentUid, {
+      status: statusAfterSyncFailure(error),
       last_customer_sync_at: syncedAt,
       last_customer_sync_status: "failed",
       last_customer_sync_count: imported + updated,
       last_customer_sync_error: message,
+      last_customer_sync_complete: false,
+      last_customer_sync_advertised_count: expectedTotalCustomers,
+      last_customer_sync_warning: warningMessage,
     });
     const syncError = new Error(`Salla customer sync failed: ${message}`);
     (syncError as any).detail = {
@@ -1419,31 +2838,89 @@ export async function syncSallaCustomersForUser(currentUid: string): Promise<Syn
       pages,
       last_sync_at: syncedAt,
       last_error: message,
+      advertised_count: expectedTotalCustomers,
+      unique_fetched: uniqueFetched,
+      warning: warningMessage,
     };
     throw syncError;
   }
 }
 
-export async function syncSallaStoreForUser(currentUid: string): Promise<SyncResult & { orders: SyncResult; products: SyncResult; customers: SyncResult }> {
-  const failedResult = (message: string): SyncResult => ({
+export async function syncSallaCustomersForUser(currentUid: string): Promise<SyncResult> {
+  // Coalesce overlapping manual and scheduled backfills for the same owner.
+  // The production topology is one Node process; multi-replica deployments
+  // still need a distributed lease before sharing the same integration store.
+  const existing = customerSyncLocks.get(currentUid);
+  if (existing) return existing;
+
+  const run = syncSallaCustomersForUserUnlocked(currentUid);
+  customerSyncLocks.set(currentUid, run);
+  try {
+    return await run;
+  } finally {
+    if (customerSyncLocks.get(currentUid) === run) customerSyncLocks.delete(currentUid);
+  }
+}
+
+function syncFailureResult(error: unknown): SyncResult {
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = asRecord(asRecord(error).detail);
+  const count = (field: string) => {
+    const value = Number(detail[field]);
+    return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+  };
+  const imported = count("imported");
+  const updated = count("updated");
+  const fetched = count("fetched");
+  const advertisedValue = detail.advertised_count;
+  const advertisedNumber = Number(advertisedValue);
+  const advertisedCount = advertisedValue === null || advertisedValue === undefined || advertisedValue === ""
+    ? null
+    : Number.isFinite(advertisedNumber) && advertisedNumber >= 0
+      ? Math.trunc(advertisedNumber)
+      : null;
+  const result: SyncResult = {
     success: false,
-    imported: 0,
-    updated: 0,
-    failed: 1,
-    pages: 0,
-    fetched: 0,
-    last_sync_at: nowIso(),
-    last_error: message,
-  });
-  const customers = await syncSallaCustomersForUser(currentUid).catch((error) =>
-    failedResult(error instanceof Error ? error.message : String(error)),
-  );
-  const products = await syncSallaProductsForUser(currentUid).catch((error) =>
-    failedResult(error instanceof Error ? error.message : String(error)),
-  );
-  const orders = await syncSallaOrdersForUser(currentUid).catch((error) =>
-    failedResult(error instanceof Error ? error.message : String(error)),
-  );
+    imported,
+    updated,
+    failed: Math.max(1, count("failed")),
+    pages: count("pages"),
+    fetched,
+    last_sync_at: firstText(detail.last_sync_at) || nowIso(),
+    last_error: firstText(detail.last_error) || message,
+    partial: Boolean(detail.partial) || fetched > 0 || imported + updated > 0,
+    cap_reached: Boolean(detail.cap_reached),
+  };
+  if (advertisedCount !== null) result.advertised_count = advertisedCount;
+  if (detail.unique_fetched !== undefined) result.unique_fetched = count("unique_fetched");
+  const warning = firstText(detail.warning);
+  if (warning) result.warning = warning;
+  return result;
+}
+
+export async function syncSallaStoreForUser(
+  currentUid: string,
+  options: { customerMode?: "always" | "if_due" } = {},
+): Promise<SyncResult & { orders: SyncResult; products: SyncResult; customers: SyncResult }> {
+  const integration = options.customerMode === "if_due" ? await readIntegration(currentUid) : null;
+  const customers = options.customerMode === "if_due" && !customerSyncIsDue(integration)
+    ? {
+        success: true,
+        imported: 0,
+        updated: 0,
+        failed: 0,
+        pages: 0,
+        fetched: 0,
+        last_sync_at: integration?.last_customer_sync_at || nowIso(),
+        last_error: null,
+        skipped: true,
+        advertised_count: integration?.last_customer_sync_advertised_count ?? null,
+        unique_fetched: integration?.last_customer_sync_count || 0,
+        warning: integration?.last_customer_sync_warning || null,
+      }
+    : await syncSallaCustomersForUser(currentUid).catch(syncFailureResult);
+  const products = await syncSallaProductsForUser(currentUid).catch(syncFailureResult);
+  const orders = await syncSallaOrdersForUser(currentUid).catch(syncFailureResult);
   if (!products.success && !orders.success && !customers.success) {
     throw new Error(orders.last_error || products.last_error || customers.last_error || "Salla sync failed.");
   }
@@ -1467,13 +2944,17 @@ export async function syncAllLinkedSallaIntegrations() {
   if (!configured()) return { checked: 0, synced: 0, failed: 0 };
   if (usingSupabaseAdapter()) {
     const store = await readLocalIntegrationStore();
-    const docs = Object.values(store).filter((item) => item?.status === "connected" && item?.createdBy);
+    // The JSON key is the authoritative owner identity. Older backups contain
+    // records whose embedded createdBy drifted during an owner migration; using
+    // that stale field makes the cron read a different (often error) record.
+    const docs = Object.entries(store).filter(([, item]) => item?.status === "connected");
     let synced = 0;
     let failed = 0;
-    for (const item of docs) {
+    for (const [ownerUid] of docs) {
       try {
-        await syncSallaStoreForUser(String(item.createdBy));
-        synced += 1;
+        const result = await syncSallaStoreForUser(ownerUid, { customerMode: "if_due" });
+        if (result.success) synced += 1;
+        else failed += 1;
       } catch {
         failed += 1;
       }
@@ -1493,8 +2974,9 @@ export async function syncAllLinkedSallaIntegrations() {
     const data = fromSettingsShape(doc.data()) as SallaIntegrationRecord | null;
     if (!data?.createdBy) continue;
     try {
-      await syncSallaStoreForUser(String(data.createdBy));
-      synced += 1;
+      const result = await syncSallaStoreForUser(String(data.createdBy), { customerMode: "if_due" });
+      if (result.success) synced += 1;
+      else failed += 1;
     } catch {
       failed += 1;
     }
@@ -1502,3 +2984,34 @@ export async function syncAllLinkedSallaIntegrations() {
 
   return { checked: snap.docs.length, synced, failed };
 }
+
+/** Internal, side-effect-free seams used by the Salla regression tests. */
+export const __sallaTestables = {
+  DEFAULT_SALLA_REQUEST_TIMEOUT_MS,
+  authorizedSallaGet,
+  customerMaxSyncPages,
+  customerPageSize,
+  customerSyncIntervalMinutes,
+  customerSyncIsDue,
+  collectCompleteSallaOrderPages,
+  defaultScopes,
+  ensureFreshAccessToken,
+  extractMerchantProfile,
+  isTransientSallaError,
+  normalizeStorefrontUrl,
+  mapSallaCustomer,
+  orderMaxSyncPages,
+  orderPageSize,
+  pageSize,
+  readLocalIntegrationStore,
+  readIntegration,
+  requestSallaJson,
+  statusAfterSyncFailure,
+  syncFailureResult,
+  writeIntegration,
+  resetLocks() {
+    refreshLocks.clear();
+    customerSyncLocks.clear();
+    localIntegrationWriteLock = Promise.resolve();
+  },
+};

@@ -3,12 +3,15 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { getLocalTestToken } from "./local-test-auth.mjs";
 
 const root = new URL("../", import.meta.url);
 const rootPath = fileURLToPath(root);
 const baseUrl = process.env.APP_URL || "http://localhost:3000";
+const smokeUid = process.env.SMOKE_TEST_UID || "smoke-test-owner";
 const results = [];
 let spawnedServer;
+let localAuthHeaders = {};
 
 function pathUrl(path) {
   return new URL(path, root);
@@ -50,7 +53,18 @@ async function ensureServer() {
   const args = process.platform === "win32" ? ["/d", "/s", "/c", "npm run dev"] : ["run", "dev"];
   spawnedServer = spawn(command, args, {
     cwd: rootPath,
-    env: { ...process.env, PORT: new URL(baseUrl).port || "3000" },
+    env: {
+      ...process.env,
+      PORT: new URL(baseUrl).port || "3000",
+      NODE_ENV: "test",
+      DATA_PROVIDER: process.env.DATA_PROVIDER || "sqlite",
+      DB_PROVIDER: process.env.DB_PROVIDER || "sqlite",
+      ALLOW_LOCAL_AUTH: "true",
+      LOCAL_AUTH_TOKEN: process.env.LOCAL_AUTH_TOKEN || "smoke-test-only-secret-with-at-least-32-characters",
+      LOCAL_AUTH_SHARED_UID: smokeUid,
+      DISABLE_OUTBOUND: "true",
+      DISABLE_HMR: "true",
+    },
     shell: false,
     stdio: "ignore",
     windowsHide: true,
@@ -81,6 +95,9 @@ function assertIncludes(text, needles, label) {
 
 try {
   await ensureServer();
+  localAuthHeaders = {
+    Authorization: `Bearer ${await getLocalTestToken(baseUrl, smokeUid)}`,
+  };
 
   await check("package scripts and dependencies", async () => {
     const pkg = await readJson("package.json");
@@ -94,10 +111,16 @@ try {
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.status, "ok");
-    assert.equal(body.timeZone, "Asia/Riyadh");
-    assert.ok(body.reminders && typeof body.reminders.enabled === "boolean");
-    assert.ok(body.reminders.schedule, "health response must expose reminder schedule");
-    assert.ok(body.storeWebhook && body.storeWebhook.endpoint === "/api/store/webhook");
+    assert.ok(body.release?.version, "public health must expose the release version");
+    assert.equal(body.reminders, undefined, "public health must not expose scheduler diagnostics");
+
+    const detailsResponse = await timedFetch("/api/health/details", { headers: localAuthHeaders });
+    assert.equal(detailsResponse.status, 200);
+    const details = await detailsResponse.json();
+    assert.equal(details.timeZone, "Asia/Riyadh");
+    assert.ok(details.reminders && typeof details.reminders.enabled === "boolean");
+    assert.ok(details.reminders.schedule, "authenticated health details must expose reminder schedule");
+    assert.ok(details.storeWebhook && details.storeWebhook.endpoint === "/api/store/webhook");
   });
 
   await check("protected API rejects anonymous requests", async () => {
@@ -313,7 +336,7 @@ try {
       "StoreWebhookOrder",
     ], "salla docs");
 
-    const headers = { Authorization: "Bearer local-dev:any" };
+    const headers = localAuthHeaders;
     const statusResponse = await timedFetch("/api/integrations/salla/status", { headers });
     assert.equal(statusResponse.status, 200);
     const statusBody = await statusResponse.json();
@@ -419,7 +442,7 @@ try {
       "سجل النشاط",
     ], "odoo page");
 
-    const headers = { Authorization: "Bearer local-dev:local-dev-owner" };
+    const headers = localAuthHeaders;
     const dashboardResponse = await timedFetch("/api/odoo/dashboard", { headers });
     assert.equal(dashboardResponse.status, 200);
     const dashboard = await dashboardResponse.json();

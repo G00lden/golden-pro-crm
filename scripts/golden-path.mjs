@@ -6,7 +6,7 @@
  *
  * Assumes:
  *   - dev server is running on http://localhost:3000 (or APP_URL)
- *   - ALLOW_LOCAL_AUTH=true (uses Bearer local-dev:<uid>)
+ *   - loopback test server with explicit, signed local auth enabled
  *
  * Exit codes:
  *   0 = all assertions passed
@@ -17,15 +17,16 @@
  */
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
+import { getLocalTestToken } from "./local-test-auth.mjs";
 
 const baseUrl = process.env.APP_URL || "http://localhost:3000";
 const uid = process.env.GOLDEN_PATH_UID || "golden-path-test";
-const authHeader = { Authorization: `Bearer local-dev:${uid}` };
+let authHeader = {};
 const json = { "Content-Type": "application/json" };
 const closeHeader = { Connection: "close" };
 
 const results = [];
-const created = { customerId: null, quoteId: null };
+const created = { customerId: null, quoteId: null, invoiceId: null };
 
 async function request(path, init = {}) {
   const url = new URL(path, baseUrl);
@@ -73,6 +74,9 @@ async function ensureHealthy() {
 }
 
 async function cleanup() {
+  if (created.invoiceId) {
+    try { await request(`/api/invoices/${created.invoiceId}`, { method: "DELETE" }); } catch {}
+  }
   if (created.quoteId) {
     try { await request(`/api/quotes/${created.quoteId}`, { method: "DELETE" }); } catch {}
   }
@@ -88,6 +92,7 @@ try {
   const health = await ensureHealthy();
   console.log(`Health ok. Timezone=${health.timeZone}. Outbound mode=${health.outbound?.mode}.`);
   console.log("");
+  authHeader = { Authorization: `Bearer ${await getLocalTestToken(baseUrl, uid)}` };
 
   // -- 1. Auth: anonymous is rejected on protected route
   await step("auth rejects anonymous on /api/customers", async () => {
@@ -102,6 +107,40 @@ try {
     assert.equal(r.status, 200, `expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
   });
 
+  await step("local identities remain distinct and least-privileged", async () => {
+    const owner = await request("/api/me");
+    assert.equal(owner.status, 200);
+    assert.equal(owner.body?.role, "admin");
+    assert.equal(owner.body?.email, null);
+
+    const secondToken = await getLocalTestToken(baseUrl, "golden-path-secondary");
+    const secondary = await fetch(new URL("/api/me", baseUrl), {
+      headers: { Authorization: `Bearer ${secondToken}`, ...closeHeader },
+    });
+    assert.equal(secondary.status, 200);
+    const body = await secondary.json();
+    assert.equal(body.role, "user");
+    assert.equal(body.email, null);
+  });
+
+  await step("validation rejects malformed CRM payloads", async () => {
+    const customer = await request("/api/customers", {
+      method: "POST",
+      body: JSON.stringify({ name: "", phone: "0500000000" }),
+    });
+    assert.equal(customer.status, 400);
+    const quote = await request("/api/quotes", {
+      method: "POST",
+      body: JSON.stringify({
+        customer_name: "Invalid",
+        discount_mode: "percent",
+        discount_value: 101,
+        items: [{ description: "X", quantity: 1, unit_price: 10 }],
+      }),
+    });
+    assert.equal(quote.status, 400);
+  });
+
   // -- 3. Create a customer
   await step("POST /api/customers creates a customer", async () => {
     const r = await request("/api/customers", {
@@ -110,12 +149,16 @@ try {
         name: `Golden Path ${Date.now()}`,
         phone: "+966500000000",
         city: "Riyadh",
-        source: "golden-path-test",
+        source: "manual",
+        role: "admin",
       }),
     });
     assert.equal(r.status, 201, `expected 201, got ${r.status}: ${JSON.stringify(r.body)}`);
     assert.ok(r.body?.id, "response must include id");
     created.customerId = r.body.id;
+    const list = await request("/api/customers");
+    const stored = (list.body?.data || []).find((item) => item.id === created.customerId);
+    assert.equal(stored?.role, undefined, "unknown privilege fields must be stripped");
   });
 
   // -- 4. Create a quote for that customer
@@ -130,6 +173,9 @@ try {
           { description: "Test item A", quantity: 1, unit_price: 100, total: 100 },
           { description: "Test item B", quantity: 2, unit_price: 50, total: 100 },
         ],
+        discount_mode: "percent",
+        discount_value: 10,
+        vat_percent: 15,
         currency: "SAR",
         notes: "Created by golden-path.mjs — safe to delete.",
       }),
@@ -137,7 +183,28 @@ try {
     assert.equal(r.status, 201, `expected 201, got ${r.status}: ${JSON.stringify(r.body)}`);
     assert.ok(r.body?.id, "response must include id");
     assert.ok(r.body?.quote, "response must include the quote object");
+    assert.equal(r.body.quote.discount, 20, "10% of 200 must persist as a 20 SAR discount");
+    assert.equal(r.body.quote.vat_amount, 27, "VAT must be calculated after discount");
+    assert.equal(r.body.quote.total, 207, "quote total must be 207 SAR");
     created.quoteId = r.body.id;
+  });
+
+  await step("POST /api/quotes/:id/convert-to-invoice preserves totals", async () => {
+    const r = await request(`/api/quotes/${created.quoteId}/convert-to-invoice`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    assert.equal(r.status, 201, `expected 201, got ${r.status}: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body?.invoice?.discount, 20);
+    assert.equal(r.body?.invoice?.discount_mode, "percent");
+    assert.equal(r.body?.invoice?.discount_value, 10);
+    assert.equal(r.body?.invoice?.vat_amount, 27);
+    assert.equal(r.body?.invoice?.total_with_vat, 207);
+    assert.equal(r.body?.invoice?.invoice_type, "simplified", "B2C invoices stay simplified regardless of total");
+    created.invoiceId = r.body?.id;
+    const qr = await request(`/api/invoices/${created.invoiceId}/qr`);
+    assert.equal(qr.status, 200);
+    assert.equal(qr.body?.fields?.length, 5);
   });
 
   // -- 5. Mark quote as confirmed (the conversion event)
@@ -178,6 +245,7 @@ try {
   console.log("\n--- cleanup ---");
   await cleanup();
   if (created.quoteId) console.log(`deleted quote ${created.quoteId}`);
+  if (created.invoiceId) console.log(`deleted invoice ${created.invoiceId}`);
   if (created.customerId) console.log(`deleted customer ${created.customerId}`);
 }
 

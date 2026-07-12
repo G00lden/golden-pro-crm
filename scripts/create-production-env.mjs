@@ -16,6 +16,10 @@ function keep(name, fallback = "") {
   return source[name] || fallback;
 }
 
+function requiredScopes(value) {
+  return [...new Set(String(value || "").split(/\s+/).filter(Boolean).concat("customers.read"))].join(" ");
+}
+
 const values = {
   APP_ENV: "production",
   PORT: "8080",
@@ -55,11 +59,19 @@ const values = {
   SALLA_CLIENT_ID: keep("SALLA_CLIENT_ID"),
   SALLA_CLIENT_SECRET: keep("SALLA_CLIENT_SECRET"),
   SALLA_REDIRECT_URI: `https://${domain}/api/integrations/salla/callback`,
-  SALLA_SCOPES: keep("SALLA_SCOPES", "offline_access orders.read"),
+  SALLA_SCOPES: requiredScopes(keep("SALLA_SCOPES", "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write")),
   SALLA_SYNC_CRON_ENABLED: "true",
   SALLA_SYNC_CRON_SCHEDULE: keep("SALLA_SYNC_CRON_SCHEDULE", "*/15 * * * *"),
-  SALLA_SYNC_MAX_PAGES: keep("SALLA_SYNC_MAX_PAGES", "3"),
-  SALLA_SYNC_PAGE_SIZE: keep("SALLA_SYNC_PAGE_SIZE", "50"),
+  SALLA_SYNC_MAX_PAGES: keep("SALLA_SYNC_MAX_PAGES", "200"),
+  SALLA_SYNC_PAGE_SIZE: keep("SALLA_SYNC_PAGE_SIZE", "30"),
+  SALLA_PRODUCT_SYNC_MAX_PAGES: keep("SALLA_PRODUCT_SYNC_MAX_PAGES", "200"),
+  SALLA_CUSTOMER_SYNC_MAX_PAGES: keep("SALLA_CUSTOMER_SYNC_MAX_PAGES", "200"),
+  SALLA_CUSTOMER_SYNC_PAGE_SIZE: keep("SALLA_CUSTOMER_SYNC_PAGE_SIZE", "60"),
+  SALLA_CUSTOMER_SYNC_INTERVAL_MINUTES: keep("SALLA_CUSTOMER_SYNC_INTERVAL_MINUTES", "360"),
+  SALLA_FETCH_TIMEOUT_MS: keep("SALLA_FETCH_TIMEOUT_MS", "15000"),
+  SALLA_FETCH_MAX_RETRIES: keep("SALLA_FETCH_MAX_RETRIES", "2"),
+  SALLA_FETCH_RETRY_BASE_DELAY_MS: keep("SALLA_FETCH_RETRY_BASE_DELAY_MS", "500"),
+  SALLA_FETCH_RETRY_MAX_DELAY_MS: keep("SALLA_FETCH_RETRY_MAX_DELAY_MS", "30000"),
   SALLA_STATE_SECRET: secret("SALLA_STATE_SECRET"),
   SALLA_APP_WEBHOOK_SECRET: keep("SALLA_APP_WEBHOOK_SECRET") || secret("STORE_WEBHOOK_SECRET"),
   SALLA_APP_OWNER_UID: keep("SALLA_APP_OWNER_UID") || keep("STORE_WEBHOOK_OWNER_UID"),

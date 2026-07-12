@@ -9,6 +9,7 @@ coverage
 .npm-cache
 .tools
 data
+backups
 *.db
 *.db-shm
 *.db-wal

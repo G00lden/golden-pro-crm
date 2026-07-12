@@ -3,9 +3,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { randomUUID } from "crypto";
 import cron from "node-cron";
 import path from "path";
-import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
-import { requireFirebaseUser } from "./server/auth";
+import { registerLocalDevAuthRoute, requireFirebaseUser } from "./server/auth";
 import { registerCrmApiRoutes } from "./server/crmApi";
 import { registerUserAdminRoutes } from "./server/userManagement";
 import { adminDb } from "./server/firebaseAdmin";
@@ -36,15 +34,17 @@ import {
 } from "./server/routes-gateway";
 import { registerPaymentRoutes, registerPaymentWebhookRoute } from "./server/routes-payment";
 import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
+import { startCommunicationWorker } from "./server/communicationWorker";
+import { whatsappService } from "./server/whatsapp";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
-import { logError } from "./server/logger";
+import { logError, logEvent } from "./server/logger";
+import { getLocalAuthPolicy } from "./server/localAuthPolicy";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const projectRoot = process.cwd();
 const timeZone = process.env.APP_TIMEZONE || "Asia/Riyadh";
 
 function httpError(status: number, message: string) {
@@ -143,6 +143,7 @@ function securityHeaders(_req: Request, res: Response, next: NextFunction) {
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
 
   if (process.env.NODE_ENV === "production") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     res.setHeader(
       "Content-Security-Policy",
       [
@@ -174,18 +175,18 @@ function adminUids(): string[] {
 }
 
 async function startServer() {
-  // Security (C3): the local-dev auth bypass forges identities with zero
-  // verification. It must NEVER be active in production — fail closed.
-  // Exception: SQLite mode requires local auth since Firebase is unavailable.
-  const dbProvider = process.env.DATA_PROVIDER || process.env.DB_PROVIDER || "firebase";
-  if (process.env.NODE_ENV === "production" && dbProvider !== "sqlite" && process.env.ALLOW_LOCAL_AUTH === "true") {
-    throw new Error(
-      "ALLOW_LOCAL_AUTH=true is forbidden in production. Unset it before deploying.",
-    );
+  const developmentServer = process.env.ENABLE_VITE_DEV_SERVER === "true";
+  if (developmentServer && process.env.NODE_ENV === "production") {
+    throw new Error("Vite development middleware cannot run in production.");
+  }
+  const localAuthPolicy = getLocalAuthPolicy();
+  if (localAuthPolicy.requested && !localAuthPolicy.enabled) {
+    throw new Error(`Unsafe local authentication configuration: ${localAuthPolicy.reason}`);
   }
 
   const app = express();
   const port = Number(process.env.PORT || 3000);
+  const listenHost = process.env.HOST || (developmentServer ? "127.0.0.1" : "0.0.0.0");
   const apiRateLimit = createRateLimiter({
     windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 60_000),
     max: Number(process.env.API_RATE_LIMIT_MAX || 240),
@@ -199,6 +200,16 @@ async function startServer() {
 
   app.disable("x-powered-by");
   app.use(securityHeaders);
+  if (developmentServer) {
+    app.use((req, res, next) => {
+      const hostname = req.hostname.toLowerCase();
+      if (hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1") {
+        res.status(421).json({ error: "Development server is available on loopback only." });
+        return;
+      }
+      next();
+    });
+  }
   app.use((req, res, next) => {
     const requestId = req.get("x-request-id") || randomUUID();
     (req as Request & { requestId?: string }).requestId = requestId;
@@ -236,6 +247,8 @@ async function startServer() {
       "/salla/callback",
       "/salla/webhook",
       "/api/health",
+      "/api/version",
+      "/api/dev/local-token",
       "/public/invoices",
       "/webhooks/whatsapp",
       "/webhooks/telephony",
@@ -246,13 +259,14 @@ async function startServer() {
 
   // ── Legal pages (served before API routes) ──
   // These static HTML pages are required by Meta / TikTok / Google ad policies.
-  const legalDir = path.join(__dirname, "public", "legal");
+  const legalDir = path.join(projectRoot, "public", "legal");
   app.get("/legal/terms", (_req, res) => res.sendFile(path.join(legalDir, "terms.html")));
   app.get("/legal/privacy", (_req, res) => res.sendFile(path.join(legalDir, "privacy.html")));
   app.get("/legal/refund", (_req, res) => res.sendFile(path.join(legalDir, "refund.html")));
 
   // ── Route modules ──
   registerHealthRoutes(app);
+  registerLocalDevAuthRoute(app);
 
   registerStoreRoutes(app, { webhookRateLimit });
 
@@ -274,6 +288,10 @@ async function startServer() {
 
   // Auto-reply on unanswered WhatsApp calls + route inbound WhatsApp replies.
   initWhatsAppAutoReply(__whatsappOwnerUid);
+  void whatsappService.verifyConnection().catch((error) => {
+    logError("whatsapp.startup_verification_failed", error);
+  });
+  startCommunicationWorker();
 
   // Salla OAuth callback + webhook (unauthenticated — these trigger token
   // exchanges or receive store-push events before any user is logged in).
@@ -469,7 +487,7 @@ async function startServer() {
       },
       { timezone: timeZone },
     );
-    console.log(`Reminder cron enabled: ${reminderSchedule} (${timeZone})`);
+    logEvent("info", "reminder_cron_enabled", { schedule: reminderSchedule, timeZone });
   }
 
   if (process.env.SALLA_SYNC_CRON_ENABLED === "true") {
@@ -485,7 +503,7 @@ async function startServer() {
       },
       { timezone: timeZone },
     );
-    console.log(`Salla sync cron enabled: ${sallaSchedule} (${timeZone})`);
+    logEvent("info", "salla_sync_cron_enabled", { schedule: sallaSchedule, timeZone });
   }
 
   // Technician pre-alert cron: scan every 10 minutes for confirmed bookings
@@ -503,17 +521,34 @@ async function startServer() {
       },
       { timezone: timeZone },
     );
-    console.log(`Technician pre-alert cron enabled: ${techSchedule} (${timeZone})`);
+    logEvent("info", "technician_prealert_cron_enabled", { schedule: techSchedule, timeZone });
   }
 
-  if (process.env.NODE_ENV !== "production") {
+  if (developmentServer) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: true },
+      server: { middlewareMode: true, allowedHosts: ["localhost", "127.0.0.1"] },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, "dist");
+    const distPath = path.join(projectRoot, "dist");
+    app.use((req, res, next) => {
+      const blockedSourcePath =
+        req.path === "/package.json" ||
+        req.path === "/package-lock.json" ||
+        req.path === "/vite.config.ts" ||
+        req.path === "/server.ts" ||
+        req.path.startsWith("/src/") ||
+        req.path.startsWith("/@vite/") ||
+        req.path.startsWith("/@react-refresh") ||
+        req.path.startsWith("/node_modules/");
+      if (blockedSourcePath) {
+        res.status(404).json({ error: "Not found." });
+        return;
+      }
+      next();
+    });
     // Cache policy so a new build is picked up WITHOUT a manual hard-refresh:
     //  - Vite emits content-hashed assets under /assets (index-<hash>.js) — these
     //    are immutable, so cache them for a year.
@@ -538,8 +573,12 @@ async function startServer() {
     });
   }
 
-  app.listen(port, "0.0.0.0", () => {
-    console.log(`Golden Pro CRM running on http://localhost:${port}`);
+  app.listen(port, listenHost, () => {
+    logEvent("info", "server_started", {
+      mode: developmentServer ? "development" : "production",
+      host: listenHost,
+      port,
+    });
   });
 }
 

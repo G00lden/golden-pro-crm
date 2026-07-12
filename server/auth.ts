@@ -1,8 +1,13 @@
-import crypto from "crypto";
-import type { NextFunction, Request, Response } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import { adminAuth } from "./firebaseAdmin";
 import { ensureUserRecord, getUserByUid, type UserRole } from "./userManagement";
-import { logError, logEvent } from "./logger";
+import { logError } from "./logger";
+import {
+  createSignedLocalToken,
+  getLocalAuthPolicy,
+  isAllowedLocalRequest,
+  verifySignedLocalToken,
+} from "./localAuthPolicy";
 
 const DEFAULT_LOCAL_UID = "local-dev-owner";
 
@@ -10,57 +15,22 @@ function localSharedUid() {
   return process.env.LOCAL_AUTH_SHARED_UID || DEFAULT_LOCAL_UID;
 }
 
-/** Constant-time string comparison that also hides length differences. */
-function safeEqual(a: string, b: string): boolean {
-  const ha = crypto.createHash("sha256").update(String(a)).digest();
-  const hb = crypto.createHash("sha256").update(String(b)).digest();
-  return crypto.timingSafeEqual(ha, hb);
-}
-
-let warnedOpenLocalAuth = false;
-
-/**
- * Resolve the uid carried by a `local-dev:` bearer token.
- *
- * Two modes, selected by whether LOCAL_AUTH_TOKEN is configured:
- *
- *  - LOCAL_AUTH_TOKEN unset (default — behavior unchanged): the token is
- *    `local-dev:<uid>` and any caller may pick any uid. Fine for a laptop-only
- *    dev box, but OPEN if the server is reachable beyond localhost (e.g. behind
- *    a public tunnel). We log a one-time warning nudging the operator to set a
- *    shared secret.
- *  - LOCAL_AUTH_TOKEN set (opt-in hardening): the token must be
- *    `local-dev:<uid>:<secret>` and <secret> must match LOCAL_AUTH_TOKEN
- *    (constant-time). Tokens without the correct secret are rejected — closing
- *    the "anyone can send local-dev:<owner> and become admin" hole. The secret
- *    must not contain a colon (use a hex / base64url token).
- *
- * Returns the resolved uid, or null when the token must be rejected.
- */
-function resolveLocalUid(token: string): string | null {
-  const rest = token.slice("local-dev:".length);
-  const requiredSecret = process.env.LOCAL_AUTH_TOKEN || "";
-
-  if (requiredSecret) {
-    const sep = rest.lastIndexOf(":");
-    const provided = sep >= 0 ? rest.slice(sep + 1) : "";
-    const uidPart = sep >= 0 ? rest.slice(0, sep) : "";
-    if (!provided || !safeEqual(provided, requiredSecret)) {
-      return null;
+export function registerLocalDevAuthRoute(app: Express) {
+  app.post("/api/dev/local-token", (req, res) => {
+    const policy = getLocalAuthPolicy();
+    if (!isAllowedLocalRequest(req.hostname, req.socket.remoteAddress, policy)) {
+      res.status(404).json({ error: "Not found." });
+      return;
     }
-    return uidPart.trim() || localSharedUid();
-  }
 
-  if (!warnedOpenLocalAuth) {
-    warnedOpenLocalAuth = true;
-    logEvent("warn", "auth.local_token_open", {
-      message:
-        "Local-dev auth accepts any uid because LOCAL_AUTH_TOKEN is unset. " +
-        "If this server is reachable beyond localhost (e.g. a tunnel), set " +
-        "LOCAL_AUTH_TOKEN (and VITE_LOCAL_AUTH_TOKEN) to require a shared secret.",
-    });
-  }
-  return rest.trim() || localSharedUid();
+    const uid = String(req.body?.uid || localSharedUid()).trim();
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ token: createSignedLocalToken(uid, policy.secret) });
+    } catch {
+      res.status(400).json({ error: "Invalid local user id." });
+    }
+  });
 }
 
 export type AuthedRequest = Request & {
@@ -91,26 +61,23 @@ export async function requireFirebaseUser(
     return res.status(401).json({ error: "Authentication token is required." });
   }
 
-    const token = match[1].trim();
-  const dbProvider = process.env.DATA_PROVIDER || process.env.DB_PROVIDER || "firebase";
-  const allowLocalAuth = process.env.ALLOW_LOCAL_AUTH === "true" || dbProvider === "sqlite";
+  const token = match[1].trim();
 
-  // Local-dev / Demo token shortcut. Honored when:
-  //   * ALLOW_LOCAL_AUTH=true outside production, OR
-  //   * the server is running in SQLite mode (single-tenant local DB, no Firebase project required).
-  // Real production deployments backed by Firebase/Firestore must use a real Firebase ID token.
+  // Local tokens are development/test-only, short-lived, signed, and accepted
+  // only over a loopback connection with an allowlisted Host header.
   if (token.startsWith("local-dev:")) {
-    if (!allowLocalAuth) {
+    const policy = getLocalAuthPolicy();
+    if (!isAllowedLocalRequest(req.hostname, req.socket.remoteAddress, policy)) {
       return res.status(401).json({ error: "Local development tokens are disabled." });
     }
-    const uid = resolveLocalUid(token);
+    const uid = verifySignedLocalToken(token, policy.secret);
     if (uid === null) {
       return res.status(401).json({ error: "Invalid local authentication token." });
     }
     try {
       const record = ensureUserRecord({
         uid,
-        email: "local@golden-pro-crm.dev",
+        email: null,
         name: "Local user",
         provider: "local-dev",
       });
@@ -119,7 +86,7 @@ export async function requireFirebaseUser(
       }
       attachUser(req, {
         uid,
-        email: record.email || "local@golden-pro-crm.dev",
+        email: record.email || undefined,
         name: record.name || "Local user",
         role: record.role,
         permissions: record.permissions,
@@ -129,17 +96,7 @@ export async function requireFirebaseUser(
       return next();
     } catch (err) {
       logError("auth.ensure_user_record_failed", err, { uid });
-      // Fallback: create user with basic info directly
-      attachUser(req, {
-        uid,
-        email: "local@golden-pro-crm.dev",
-        name: "Local user",
-        role: uid === localSharedUid() ? "admin" as UserRole : "user" as UserRole,
-        permissions: {},
-        active: true,
-        local: true,
-      });
-      return next();
+      return res.status(500).json({ error: "Unable to initialize the local test user." });
     }
   }
 

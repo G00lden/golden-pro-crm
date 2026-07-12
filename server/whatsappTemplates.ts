@@ -105,10 +105,23 @@ export function listTemplateNames(): TemplateName[] {
   return Object.keys(TEMPLATES) as TemplateName[];
 }
 
+export function templateVariableNames(name: TemplateName): string[] {
+  const seen = new Set<string>();
+  for (const match of TEMPLATES[name].matchAll(/\{([a-z_][a-z0-9_]*)\}/gi)) {
+    seen.add(match[1]);
+  }
+  return [...seen];
+}
+
+export function cloudTemplateEnvKey(name: TemplateName): string {
+  return `WHATSAPP_CLOUD_TEMPLATE_${name.toUpperCase()}`;
+}
+
 /**
  * Returns the WhatsApp Cloud API parameter payload for a template message.
  * Cloud API templates are pre-approved by Meta; for the freeform template
- * `general_reminder` we instead return a plain text body.
+ * `general_reminder` maps its single `{message}` variable to one approved
+ * Cloud-template body placeholder; WhatsApp Web still renders it as text.
  */
 export function templateToCloudParams(name: TemplateName, vars: RenderVars): {
   isFreeform: boolean;
@@ -116,14 +129,15 @@ export function templateToCloudParams(name: TemplateName, vars: RenderVars): {
   templateName?: string;
   parameters?: Array<{ type: "text"; text: string }>;
 } {
-  const body = renderTemplate(name, vars);
-  if (name === "general_reminder") {
-    return { isFreeform: true, body };
-  }
+  const merged: RenderVars = { company_name: DEFAULT_COMPANY, ...vars };
+  const body = renderTemplate(name, merged);
   return {
     isFreeform: false,
     body,
     templateName: name,
-    parameters: [{ type: "text", text: body }],
+    parameters: templateVariableNames(name).map((key) => ({
+      type: "text" as const,
+      text: String(merged[key] ?? "-"),
+    })),
   };
 }

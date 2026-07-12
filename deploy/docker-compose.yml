@@ -3,11 +3,22 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        VITE_DATA_PROVIDER: ${VITE_DATA_PROVIDER:-sqlite}
+        VITE_DB_PROVIDER: ${VITE_DB_PROVIDER:-sqlite}
+        VITE_LOCAL_AUTH: ${VITE_LOCAL_AUTH:-false}
     restart: unless-stopped
     env_file:
       - ../.env.production
+    environment:
+      # The deploy command must override any stale BUILD_COMMIT left in the
+      # env file so /api/health identifies the exact packaged source.
+      BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
     expose:
       - "8080"
+    ports:
+      - "127.0.0.1:3000:8080"
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
@@ -15,6 +26,7 @@ services:
       retries: 3
       start_period: 30s
     volumes:
+      - crm_data:/app/data
       - crm_runtime:/app/.runtime
       - crm_wa_session:/app/.wa-session
 
@@ -34,6 +46,7 @@ services:
       - caddy_config:/config
 
 volumes:
+  crm_data:
   crm_runtime:
   crm_wa_session:
   caddy_data:

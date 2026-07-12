@@ -41,8 +41,17 @@ function Test-CloudflaredRunning([string]$ConfigPath) {
 $runtimeDir = Join-Path $AppDir ".runtime"
 Ensure-Directory $runtimeDir
 
+$distIndex = Join-Path $AppDir "dist\index.html"
+if (-not (Test-Path -LiteralPath $distIndex)) {
+  throw "Production build is missing: $distIndex. Run npm run build first."
+}
+
 if (-not (Test-PortListening $Port)) {
   $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+  $env:ENV_FILE = if ($env:ENV_FILE) { $env:ENV_FILE } else { ".env.production" }
+  $env:NODE_ENV = "production"
+  $env:ENABLE_VITE_DEV_SERVER = "false"
+  $env:PORT = [string]$Port
   Start-Process -FilePath $npm `
     -ArgumentList @("run", "start") `
     -WorkingDirectory $AppDir `
@@ -50,6 +59,15 @@ if (-not (Test-PortListening $Port)) {
     -RedirectStandardOutput (Join-Path $runtimeDir "crm-server.out.log") `
     -RedirectStandardError (Join-Path $runtimeDir "crm-server.err.log")
   Start-Sleep -Seconds 5
+} else {
+  try {
+    $runtime = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/version" -TimeoutSec 5
+    if ($runtime.runtime -ne "production") {
+      throw "Port $Port is serving a development build. Stop it before starting the public tunnel."
+    }
+  } catch {
+    throw "An unverified service is already listening on port $Port. $($_.Exception.Message)"
+  }
 }
 
 if (-not (Test-Path $CloudflaredConfig)) {

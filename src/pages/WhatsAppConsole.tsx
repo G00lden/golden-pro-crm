@@ -60,6 +60,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
   const [stats, setStats] = useState<api.WhatsAppDailyStats | null>(null);
   const [recent, setRecent] = useState<api.WhatsAppMessage[]>([]);
   const [templates, setTemplates] = useState<api.WhatsAppTemplateInfo[]>([]);
+  const [queue, setQueue] = useState<{ summary: api.CommunicationQueueSummary; jobs: api.CommunicationJob[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [qrAgeSec, setQrAgeSec] = useState(0);
@@ -77,18 +78,20 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, st, ds, msgs, tpls] = await Promise.all([
+      const [s, st, ds, msgs, tpls, jobs] = await Promise.all([
         api.getWhatsAppStatus(),
         api.getWhatsAppDailyStats(),
         api.getWhatsAppDevices(),
         api.listRecentWhatsAppMessages(40),
         api.getWhatsAppTemplates(),
+        api.getWhatsAppJobs(30),
       ]);
       setStatus(s);
       setStats(st);
       setDevices(ds.devices);
       setRecent(msgs.items);
       setTemplates(tpls.templates);
+      setQueue(jobs);
       if (s.qr) {
         // Restart the age clock every time a *new* QR string arrives (the code
         // rotates ~every minute). Previously the timestamp was set only once,
@@ -259,6 +262,36 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
         <Stat label="فشل" value={stats?.today.failed || 0} color="#ef4444" icon={<CircleAlert size={18} />} />
         <Stat label="رسائل واردة" value={stats?.today.inbound || 0} color="#60a5fa" icon={<MessageCircle size={18} />} />
       </div>
+
+      <Panel title="طابور رسائل المكالمات والحملات" icon={<RefreshCcw size={16} />}>
+        <div className="wa-stat-grid" style={{ marginBottom: 12 }}>
+          <Stat label="بانتظار المعالجة" value={queue?.summary.waiting || 0} color="#60a5fa" icon={<RefreshCcw size={18} />} />
+          <Stat label="أُرسلت" value={queue?.summary.sent || 0} color="#0fbf6c" icon={<CheckCircle2 size={18} />} />
+          <Stat label="تحتاج تدخلاً" value={queue?.summary.attention || 0} color="#ef4444" icon={<CircleAlert size={18} />} />
+          <Stat label="انتهت صلاحيتها" value={queue?.summary.expired || 0} color="#9ca3af" icon={<CircleAlert size={18} />} />
+        </div>
+        {queue?.jobs.length ? (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead><tr style={{ textAlign: "right", opacity: 0.7 }}>
+                <th style={{ padding: 6 }}>الوقت</th><th style={{ padding: 6 }}>المستلم</th>
+                <th style={{ padding: 6 }}>القالب</th><th style={{ padding: 6 }}>الحالة</th>
+                <th style={{ padding: 6 }}>المحاولات</th><th style={{ padding: 6 }}>آخر خطأ</th>
+              </tr></thead>
+              <tbody>{queue.jobs.slice(0, 12).map((job) => (
+                <tr key={job.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                  <td style={{ padding: 6, whiteSpace: "nowrap" }}>{fmtDateTime(job.created_at)}</td>
+                  <td style={{ padding: 6 }} dir="ltr">{phoneLabel(job.recipient_phone)}</td>
+                  <td style={{ padding: 6 }}><code>{job.template_name || job.kind}</code></td>
+                  <td style={{ padding: 6 }}>{job.status}</td>
+                  <td style={{ padding: 6 }}>{job.attempts}/{job.max_attempts}</td>
+                  <td style={{ padding: 6, color: job.last_error ? "#ef4444" : undefined }}>{job.last_error || "—"}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        ) : <p style={{ opacity: 0.65 }}>لا توجد مهام اتصال مسجلة بعد.</p>}
+      </Panel>
 
       {/* Devices + outbound mode */}
       <div className="wa-split">

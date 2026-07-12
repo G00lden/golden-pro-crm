@@ -1,4 +1,4 @@
-import { RefreshCcw, Save, Plus, LogOut, Smartphone, X } from "lucide-react";
+import { ExternalLink, RefreshCcw, Save, Plus, LogOut, Smartphone, X } from "lucide-react";
 import { useState, useEffect, type FormEvent } from "react";
 import * as api from "../api";
 import {
@@ -14,6 +14,7 @@ import {
   fmtDate,
   useData,
 } from "../shared";
+import { normalizeSallaStoreUrl } from "../sallaStoreUrl";
 
 export default function SettingsPage({ notify }: { notify: (message: string, ok?: boolean) => void }) {
   const settings = useData(api.getSettings);
@@ -30,6 +31,26 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
     typeof window !== "undefined"
       ? `${window.location.origin}${webhook.data?.endpoint || "/api/store/webhook"}`
       : webhook.data?.endpoint || "/api/store/webhook";
+  const storeUrl = normalizeSallaStoreUrl(salla.data?.store_url);
+  const customerSyncAdvertisedCount =
+    typeof salla.data?.last_customer_sync_advertised_count === "number" &&
+    Number.isFinite(salla.data.last_customer_sync_advertised_count)
+      ? Math.max(0, Math.trunc(salla.data.last_customer_sync_advertised_count))
+      : null;
+  const customerSyncReceivedCount =
+    typeof salla.data?.last_customer_sync_count === "number" && Number.isFinite(salla.data.last_customer_sync_count)
+      ? Math.max(0, Math.trunc(salla.data.last_customer_sync_count))
+      : 0;
+  const customerSyncCountGap = customerSyncAdvertisedCount === null
+    ? null
+    : Math.abs(customerSyncAdvertisedCount - customerSyncReceivedCount);
+  const customerSyncHasWarning = Boolean(
+    salla.data?.last_customer_sync_status === "success" &&
+    salla.data?.last_customer_sync_complete === true &&
+    salla.data?.last_customer_sync_warning &&
+    customerSyncCountGap &&
+    customerSyncCountGap > 0,
+  );
 
   useEffect(() => {
     if (settings.data) setValues(settings.data);
@@ -76,9 +97,17 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
     setSyncingSalla(true);
     try {
       const result = await api.syncSallaOrders();
+      const orders = result.orders || result;
       const products = result.products;
+      const customers = result.customers;
       const productSummary = products ? `، المنتجات: ${products.imported} جديد و${products.updated} محدث` : "";
-      notify(`مزامنة سلة انتهت: الطلبات ${result.imported} جديد، ${result.updated} محدث، ${result.failed} فشل${productSummary}`, result.failed === 0 && (!products || products.failed === 0));
+      const customerSummary = customers
+        ? `، العملاء: ${customers.imported} جديد و${customers.updated} محدث من ${customers.fetched}`
+        : "";
+      notify(
+        `مزامنة سلة انتهت: الطلبات ${orders.imported} جديد، ${orders.updated} محدث، ${orders.failed} فشل${productSummary}${customerSummary}`,
+        result.success,
+      );
       await Promise.all([salla.refresh(), webhook.refresh()]);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذرت مزامنة سلة", false);
@@ -258,6 +287,23 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
                 <strong>المتجر</strong>
                 <span>{salla.data?.store_name || "غير مرتبط بعد"}</span>
                 <p>{salla.data?.merchant_id ? `Merchant ID: ${salla.data.merchant_id}` : "سيظهر بعد نجاح التفويض."}</p>
+                {storeUrl ? (
+                  <a
+                    className="btn muted store-link"
+                    href={storeUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <ExternalLink size={16} aria-hidden="true" focusable="false" />
+                    فتح صفحة المتجر
+                  </a>
+                ) : (
+                  <p className="store-link-empty">
+                    {salla.data?.linked
+                      ? "لم يصل رابط المتجر من سلة بعد. حدّث حالة الربط، وإن استمر غيابه فأعد تثبيت التطبيق من لوحة سلة."
+                      : "اربط متجر سلة أولاً، ثم حدّث الحالة ليظهر رابط فتح المتجر هنا."}
+                  </p>
+                )}
               </article>
               <article className="mini-card">
                 <strong>آخر تفويض</strong>
@@ -270,9 +316,20 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
                 <p>{salla.data?.last_sync_status === "error" ? salla.data?.last_sync_error || "فشل غير محدد" : `الطلبات: ${salla.data?.last_sync_count || 0} · المنتجات: ${salla.data?.last_product_sync_count || 0}`}</p>
               </article>
               <article className="mini-card">
+                <strong>مزامنة العملاء</strong>
+                <span>{salla.data?.last_customer_sync_at ? fmtDate(salla.data.last_customer_sync_at) : "لم تبدأ"}</span>
+                <p>
+                  {salla.data?.last_customer_sync_status === "failed" || salla.data?.last_customer_sync_status === "error"
+                    ? salla.data?.last_customer_sync_error || "لم تكتمل مزامنة العملاء"
+                    : customerSyncAdvertisedCount === null
+                      ? `${customerSyncReceivedCount} عميل · ${salla.data?.last_customer_sync_complete ? "مكتملة" : "بانتظار المزامنة الكاملة"}`
+                      : `تم جلب ${customerSyncReceivedCount} من ${customerSyncAdvertisedCount} عميل · ${salla.data?.last_customer_sync_complete ? "مكتملة" : "بانتظار المزامنة الكاملة"}`}
+                </p>
+              </article>
+              <article className="mini-card">
                 <strong>الجدولة</strong>
                 <span>{salla.data?.sync_enabled ? "مفعلة" : "غير مفعلة"}</span>
-                <p>{salla.data?.sync_schedule || "-"}</p>
+                <p>{salla.data?.sync_schedule || "-"} · العملاء كل {salla.data?.customer_sync_interval_minutes || 360} دقيقة</p>
               </article>
             </div>
             {salla.data?.auth_mode !== "custom" && (
@@ -290,7 +347,7 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
                 <article className="mini-card">
                   <strong>بعد الربط</strong>
                   <span>مزامنة الآن</span>
-                  <p>بعد وصول حدث app.store.authorize اضغط مزامنة الآن لسحب المنتجات والطلبات من Salla API إلى النظام.</p>
+                  <p>بعد وصول حدث app.store.authorize اضغط مزامنة الآن لسحب العملاء والمنتجات والطلبات من Salla API إلى النظام.</p>
                 </article>
               </div>
             )}
@@ -300,11 +357,19 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
               ) : (
                 <Button tone="muted" disabled><Smartphone size={16} /> الربط يتم من Webhook التطبيق</Button>
               )}
-              <Button tone="muted" loading={syncingSalla} disabled={!salla.data?.linked} onClick={runSallaSync}><RefreshCcw size={16} /> مزامنة المنتجات والطلبات</Button>
+              <Button tone="muted" loading={syncingSalla} disabled={!salla.data?.linked} onClick={runSallaSync}><RefreshCcw size={16} /> مزامنة العملاء والمنتجات والطلبات</Button>
               <Button tone="muted" onClick={salla.refresh}><RefreshCcw size={16} /> تحديث الحالة</Button>
             </div>
             {salla.data?.last_sync_error && <p className="note danger">{salla.data.last_sync_error}</p>}
             {salla.data?.last_product_sync_error && <p className="note danger">{salla.data.last_product_sync_error}</p>}
+            {salla.data?.last_customer_sync_error && <p className="note danger">{salla.data.last_customer_sync_error}</p>}
+            {customerSyncHasWarning && customerSyncAdvertisedCount !== null && customerSyncCountGap !== null && (
+              <p className="note" role="status">
+                <Badge tone="warn">فرق في عدّ سلة</Badge>{" "}
+                أعلنت سلة عن {customerSyncAdvertisedCount} عميل، وأعادت جميع صفحاتها {customerSyncReceivedCount}
+                {` (فرق ${customerSyncCountGap}). اكتملت المزامنة وسيُعاد التحقق تلقائيًا.`}
+              </p>
+            )}
           </div>
         )}
       </section>

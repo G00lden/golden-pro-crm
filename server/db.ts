@@ -7,6 +7,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
+const TARGET_SCHEMA_VERSION = 10303;
+const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
 const dataDir = path.dirname(DB_PATH);
@@ -19,6 +21,24 @@ const db = new Database(DB_PATH);
 // Enable WAL mode for better concurrent performance
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+
+const schemaVersionBeforeMigration = Number(db.pragma("user_version", { simple: true }) || 0);
+if (
+  process.env.NODE_ENV === "production" &&
+  databaseExistedBeforeStartup &&
+  schemaVersionBeforeMigration < TARGET_SCHEMA_VERSION
+) {
+  const backupDirectory = process.env.DB_MIGRATION_BACKUP_DIR || path.join(dataDir, "backups");
+  fs.mkdirSync(backupDirectory, { recursive: true });
+  db.pragma("wal_checkpoint(FULL)");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = path.join(
+    backupDirectory,
+    `${path.basename(DB_PATH)}.pre-schema-${TARGET_SCHEMA_VERSION}-${stamp}.bak`,
+  );
+  fs.copyFileSync(DB_PATH, backupPath, fs.constants.COPYFILE_EXCL);
+  console.log(`SQLite pre-migration backup created: ${backupPath}`);
+}
 
 // ==========================================
 // SCHEMA
@@ -97,6 +117,13 @@ for (const col of [
   ["booking_ids", "TEXT DEFAULT '[]'"],
   ["order_types", "TEXT DEFAULT '[]'"],
   ["customer_id", "TEXT"],
+  ["remote_status_id", "TEXT"],
+  ["remote_status_name", "TEXT"],
+  ["remote_status_slug", "TEXT"],
+  ["remote_updated_at", "TEXT"],
+  ["remote_synced_at", "TEXT"],
+  ["sync_origin", "TEXT"],
+  ["remote_deleted_at", "TEXT"],
   // Columns that ONLY existed in the full CREATE TABLE below (line ~262). Because
   // the shell table above is created first, that CREATE ... IF NOT EXISTS is a
   // no-op, so on a fresh DB these were never created and every store-order
@@ -120,6 +147,73 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_imported ON store_orders(imported_at)");
+
+// Durable Salla order synchronization queues. The inbox makes incoming events
+// replayable; commands provide an idempotent outbox for changes sent to Salla.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS salla_order_inbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    merchant_id TEXT,
+    event_type TEXT NOT NULL DEFAULT '',
+    remote_order_id TEXT,
+    payload_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at TEXT,
+    next_attempt_at TEXT,
+    error_code TEXT,
+    error TEXT,
+    lease_token TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS salla_order_commands (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    order_doc_id TEXT NOT NULL,
+    remote_order_id TEXT,
+    command_type TEXT NOT NULL,
+    desired_hash TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    before_hash TEXT,
+    after_hash TEXT,
+    result_status TEXT,
+    last_error TEXT,
+    actor_uid TEXT,
+    lease_token TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_salla_order_inbox_owner_status
+    ON salla_order_inbox(owner_uid, status, received_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_inbox_due
+    ON salla_order_inbox(status, next_attempt_at, received_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_inbox_remote_order
+    ON salla_order_inbox(owner_uid, remote_order_id, received_at);
+
+  CREATE INDEX IF NOT EXISTS idx_salla_order_commands_owner_status
+    ON salla_order_commands(owner_uid, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_commands_due
+    ON salla_order_commands(status, updated_at, created_at);
+  CREATE INDEX IF NOT EXISTS idx_salla_order_commands_order
+    ON salla_order_commands(owner_uid, order_doc_id, created_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_salla_order_commands_desired_hash
+    ON salla_order_commands(owner_uid, order_doc_id, command_type, desired_hash)
+    WHERE desired_hash <> '';
+`);
+
+for (const table of ["salla_order_inbox", "salla_order_commands"] as const) {
+  if (!hasColumn(table, "lease_token")) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN lease_token TEXT`);
+  }
+}
 
 // bookings + technician_notifications were created with a minimal column set.
 // bookingLifecycle / bookingNotifications write to richer columns; the missing
@@ -390,7 +484,12 @@ db.exec(`
     follow_up_date TEXT,
     subtotal NUMERIC DEFAULT 0,
     discount NUMERIC DEFAULT 0,
+    discount_mode TEXT DEFAULT 'fixed',
+    discount_value NUMERIC DEFAULT 0,
     tax NUMERIC DEFAULT 0,
+    vat_percent NUMERIC DEFAULT 15,
+    vat_amount NUMERIC DEFAULT 0,
+    total_without_vat NUMERIC DEFAULT 0,
     total NUMERIC DEFAULT 0,
     currency TEXT DEFAULT 'SAR',
     payment_method TEXT DEFAULT 'تحويل بنكي',
@@ -402,6 +501,7 @@ db.exec(`
     payment_account TEXT DEFAULT '',
     payment_iban TEXT DEFAULT '',
     payment_note TEXT DEFAULT '',
+    installments TEXT DEFAULT '[]',
     items TEXT DEFAULT '[]',
     notes TEXT DEFAULT '',
     terms TEXT DEFAULT '',
@@ -432,6 +532,8 @@ db.exec(`
     payment_method TEXT DEFAULT '',
     subtotal NUMERIC DEFAULT 0,
     discount NUMERIC DEFAULT 0,
+    discount_mode TEXT DEFAULT 'fixed',
+    discount_value NUMERIC DEFAULT 0,
     vat NUMERIC DEFAULT 0,
     vat_percent NUMERIC DEFAULT 15,
     vat_amount NUMERIC DEFAULT 0,
@@ -445,6 +547,7 @@ db.exec(`
     seller_vat TEXT DEFAULT '',
     seller_vat_number TEXT DEFAULT '',
     seller_address TEXT DEFAULT '',
+    invoice_type TEXT DEFAULT '',
     qr_code TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
@@ -616,10 +719,139 @@ db.exec(`
     status TEXT DEFAULT 'pending',
     call_id TEXT,
     error TEXT,
+    attempts INTEGER DEFAULT 0,
+    lease_until TEXT,
+    device_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    sent_at TEXT
+    sent_at TEXT,
+    updated_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
+
+  -- Durable inbound event ledger. Provider retries are accepted once and every
+  -- downstream side effect uses the same idempotency key.
+  CREATE TABLE IF NOT EXISTS communication_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_type TEXT DEFAULT '',
+    payload_hash TEXT DEFAULT '',
+    processed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, provider, event_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_events_owner_created
+    ON communication_events(owner_uid, created_at DESC);
+
+  -- Durable outbound queue. Workers claim jobs with a lease, retry transient
+  -- failures and stop at max_attempts instead of losing webhook-triggered sends.
+  CREATE TABLE IF NOT EXISTS communication_jobs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'whatsapp_template',
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    recipient_phone TEXT NOT NULL,
+    template_name TEXT,
+    payload TEXT NOT NULL DEFAULT '{}',
+    role TEXT DEFAULT 'customer',
+    call_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    available_at TEXT NOT NULL DEFAULT (datetime('now')),
+    lease_until TEXT,
+    last_error TEXT,
+    provider_message_id TEXT,
+    expires_at TEXT,
+    sent_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, event_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_jobs_ready
+    ON communication_jobs(status, available_at, lease_until, created_at);
+  CREATE INDEX IF NOT EXISTS idx_communication_jobs_owner
+    ON communication_jobs(owner_uid, created_at DESC);
+
+  -- Explicit marketing consent. Absence of a granted row means the recipient
+  -- is not eligible for campaign messages (fail closed).
+  CREATE TABLE IF NOT EXISTS communication_preferences (
+    owner_uid TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    purpose TEXT NOT NULL DEFAULT 'marketing',
+    status TEXT NOT NULL DEFAULT 'unknown',
+    source TEXT NOT NULL DEFAULT 'manual',
+    evidence TEXT NOT NULL DEFAULT '',
+    captured_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY(owner_uid, phone, channel, purpose)
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_preferences_status
+    ON communication_preferences(owner_uid, channel, purpose, status, updated_at DESC);
+
+  -- Suppression is independent of consent: once an opt-out is active it wins
+  -- over every audience rule and is rechecked immediately before send.
+  CREATE TABLE IF NOT EXISTS communication_suppressions (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    reason TEXT NOT NULL DEFAULT 'opt_out',
+    source TEXT NOT NULL DEFAULT 'inbound',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    lifted_at TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_communication_suppressions_active
+    ON communication_suppressions(owner_uid, phone, channel) WHERE active = 1;
+
+  CREATE TABLE IF NOT EXISTS communication_campaigns (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    name TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    template_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    audience_filter TEXT NOT NULL DEFAULT '{}',
+    template_vars TEXT NOT NULL DEFAULT '{}',
+    scheduled_at TEXT,
+    rate_limit_per_minute INTEGER NOT NULL DEFAULT 30,
+    frequency_cap_days INTEGER NOT NULL DEFAULT 7,
+    created_by TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_campaigns_owner
+    ON communication_campaigns(owner_uid, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_communication_campaigns_due
+    ON communication_campaigns(status, scheduled_at);
+
+  CREATE TABLE IF NOT EXISTS communication_campaign_recipients (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL,
+    owner_uid TEXT NOT NULL,
+    customer_id TEXT,
+    phone TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'eligible',
+    skip_reason TEXT,
+    job_id TEXT,
+    provider_message_id TEXT,
+    sent_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(campaign_id, phone)
+  );
+  CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign
+    ON communication_campaign_recipients(campaign_id, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_campaign_recipients_owner_phone
+    ON communication_campaign_recipients(owner_uid, phone, sent_at DESC);
 
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
@@ -655,6 +887,16 @@ for (const col of [
     db.exec(`ALTER TABLE bookings ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
+for (const col of [
+  ["campaign_id", "TEXT"],
+  ["campaign_recipient_id", "TEXT"],
+] as const) {
+  if (!hasColumn("communication_jobs", col[0])) {
+    db.exec(`ALTER TABLE communication_jobs ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_communication_jobs_campaign ON communication_jobs(campaign_id, status, created_at)");
 
 for (const col of [
   ["owner_uid", "TEXT"],
@@ -704,14 +946,36 @@ for (const col of [
   ["handled", "INTEGER DEFAULT 0"],
   ["handled_at", "TEXT"],
   ["handled_by", "TEXT"],
+  ["correlation_key", "TEXT"],
+  ["wa_customer_job_id", "TEXT"],
+  ["wa_agent_job_id", "TEXT"],
+  ["wa_customer_status", "TEXT"],
+  ["wa_agent_status", "TEXT"],
 ] as const) {
   if (!hasColumn("call_logs", col[0])) {
     db.exec(`ALTER TABLE call_logs ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_correlation ON call_logs(owner_uid, correlation_key, created_at DESC)");
 
 for (const col of [
+  ["attempts", "INTEGER DEFAULT 0"],
+  ["lease_until", "TEXT"],
+  ["device_id", "TEXT"],
+  ["updated_at", "TEXT"],
+] as const) {
+  if (!hasColumn("gateway_outbox", col[0])) {
+    db.exec(`ALTER TABLE gateway_outbox ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+for (const col of [
+  ["discount_mode", "TEXT DEFAULT 'fixed'"],
+  ["discount_value", "NUMERIC DEFAULT 0"],
+  ["vat_percent", "NUMERIC DEFAULT 15"],
+  ["vat_amount", "NUMERIC DEFAULT 0"],
+  ["total_without_vat", "NUMERIC DEFAULT 0"],
   ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],
   ["payment_down_percent", "NUMERIC DEFAULT 70"],
   ["payment_final_percent", "NUMERIC DEFAULT 30"],
@@ -721,6 +985,7 @@ for (const col of [
   ["payment_account", "TEXT DEFAULT ''"],
   ["payment_iban", "TEXT DEFAULT ''"],
   ["payment_note", "TEXT DEFAULT ''"],
+  ["installments", "TEXT DEFAULT '[]'"],
 ] as const) {
   if (!hasColumn("quotes", col[0])) {
     db.exec(`ALTER TABLE quotes ADD COLUMN ${col[0]} ${col[1]}`);
@@ -743,6 +1008,8 @@ for (const col of [
   ["payment_method", "TEXT DEFAULT ''"],
   ["subtotal", "NUMERIC DEFAULT 0"],
   ["discount", "NUMERIC DEFAULT 0"],
+  ["discount_mode", "TEXT DEFAULT 'fixed'"],
+  ["discount_value", "NUMERIC DEFAULT 0"],
   ["vat", "NUMERIC DEFAULT 0"],
   ["vat_percent", "NUMERIC DEFAULT 15"],
   ["vat_amount", "NUMERIC DEFAULT 0"],
@@ -756,6 +1023,7 @@ for (const col of [
   ["seller_vat", "TEXT DEFAULT ''"],
   ["seller_vat_number", "TEXT DEFAULT ''"],
   ["seller_address", "TEXT DEFAULT ''"],
+  ["invoice_type", "TEXT DEFAULT ''"],
   ["qr_code", "TEXT DEFAULT ''"],
   ["created_at", "TEXT DEFAULT (datetime('now'))"],
   ["updated_at", "TEXT DEFAULT (datetime('now'))"],
@@ -790,5 +1058,22 @@ for (const col of [
     db.exec(`ALTER TABLE settings ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    release TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10004, '1.0.4');
+  UPDATE users SET email = NULL
+    WHERE provider = 'local-dev' AND LOWER(IFNULL(email, '')) = 'local@golden-pro-crm.dev';
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10007, '1.0.7');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10100, '1.1.0');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10200, '1.2.0');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10300, '1.3.0');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10303, '1.3.3');
+`);
+db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 
 export default db;

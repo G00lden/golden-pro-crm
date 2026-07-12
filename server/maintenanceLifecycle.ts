@@ -8,6 +8,7 @@
  */
 import crypto from "crypto";
 import db from "./db";
+import { addCalendarMonths } from "../shared/date";
 
 export type MaintenanceAction =
   | "created"
@@ -66,13 +67,6 @@ function nowIso() {
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
-}
-
-function addMonthsIso(dateStr: string, months: number) {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const date = new Date(Date.UTC(y, m - 1, d));
-  date.setUTCMonth(date.getUTCMonth() + months);
-  return date.toISOString().slice(0, 10);
 }
 
 function dayDiff(a: string, b: string): number {
@@ -209,7 +203,7 @@ export function completeMaintenance(params: CompleteParams) {
 
   const completedDate = params.completedDate || todayIso();
   const intervalMonths = productIntervalMonths(row.product_id as string);
-  const nextDate = addMonthsIso(completedDate, intervalMonths);
+  const nextDate = addCalendarMonths(completedDate, intervalMonths);
 
   db.prepare(
     `UPDATE installations
@@ -398,7 +392,7 @@ export function getMaintenanceTimeline(installationId: string): TimelineEvent[] 
 
 export function getOverdueList(uid: string, daysPast = 0) {
   const today = todayIso();
-  const cutoff = addMonthsIso(today, 0); // today
+  const cutoff = addCalendarMonths(today, 0); // today
   const rows = db
     .prepare(
       `SELECT * FROM installations

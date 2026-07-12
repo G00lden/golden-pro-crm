@@ -5,7 +5,67 @@ import { adminDb } from "./firebaseAdmin";
 import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
-import { publicInvoiceShareQuerySchema, validateQuery } from "./validation";
+import { publicInvoiceShareQuerySchema, validate, validateParams, validateQuery } from "./validation";
+import {
+  bookingCreateSchema,
+  bookingUpdateSchema,
+  crmIdParamsSchema,
+  customerCreateSchema,
+  customerUpdateSchema,
+  demoDataSchema,
+  documentSendSchema,
+  installationCompleteSchema,
+  installationCreateSchema,
+  installationUpdateSchema,
+  invoiceCreateSchema,
+  invoiceStatusSchema,
+  invoiceUpdateSchema,
+  productCreateSchema,
+  productUpdateSchema,
+  quoteConvertSchema,
+  quoteCreateSchema,
+  quoteStatusSchema,
+  quoteUpdateSchema,
+  settingsUpdateSchema,
+  technicianCreateSchema,
+  technicianUpdateSchema,
+} from "./crmValidation";
+import {
+  calculateDocumentTotals,
+  calculateDocumentLineAmounts,
+  normalizeVatPercent,
+  validateInstallments,
+  type DiscountMode,
+} from "../shared/financial";
+import {
+  generateZatcaQrBase64,
+  resolveInvoiceTaxType,
+  zatcaQrFields,
+  type InvoiceTaxType,
+  type InvoiceTaxTypeInput,
+} from "../shared/zatca";
+import {
+  createOwnedRepository,
+  MAX_OWNED_SCAN_LIMIT,
+  type FirestoreLikeStore,
+} from "./repositories/ownedRepository";
+import {
+  filterCustomerRecords,
+  paginateCustomerRecords,
+  parseCustomerListQuery,
+} from "./customerPagination";
+
+const ownedRepository = createOwnedRepository(adminDb as unknown as FirestoreLikeStore);
+const {
+  list: listOwned,
+  count: countOwned,
+  listPage: listOwnedPage,
+  get: getOwned,
+  create: createOwned,
+  update: updateOwned,
+  delete: deleteOwned,
+  findBlockingReferences,
+} = ownedRepository;
 
 type DocSnapshot = {
   id: string;
@@ -39,13 +99,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function addMonths(date: string, months: number) {
-  const [year, month, day] = date.split("-").map(Number);
-  const d = new Date(Date.UTC(year, month - 1, day));
-  d.setUTCMonth(d.getUTCMonth() + months);
-  return d.toISOString().slice(0, 10);
-}
-
 function daysUntil(value?: string) {
   if (!value) return undefined;
   const todayMs = Date.parse(`${todayInTimeZone()}T00:00:00`);
@@ -66,93 +119,28 @@ function docData(doc: DocSnapshot): Record<string, any> & { id: string } {
   return { id: doc.id, ...doc.data() };
 }
 
-async function listOwned(table: string, uid: string, orderField?: string, limit = 250): Promise<Array<Record<string, any> & { id: string }>> {
-  let ref = adminDb.collection(table).where("createdBy", "==", uid);
-  if (orderField) ref = ref.orderBy(orderField);
-  const snap = await ref.limit(limit).get();
-  return snap.docs.map((doc: DocSnapshot) => docData(doc));
-}
-
-async function getOwned(table: string, id: string, uid: string) {
-  const snap = await adminDb.collection(table).doc(id).get();
-  if (!snap.exists) return null;
-  const data = docData(snap);
-  // SQLite stores ownership in `owner_uid`; the Firestore code path uses `createdBy`.
-  // Accept either so the adapter abstraction does not require reverse-mapping.
-  const ownerKey = (data as Record<string, unknown>).createdBy ?? (data as Record<string, unknown>).owner_uid;
-  return ownerKey === uid ? data : null;
-}
-
-async function createOwned(table: string, uid: string, data: Record<string, unknown>) {
-  const ref = adminDb.collection(table).doc();
-  const now = nowIso();
-  await ref.set(clean({
-    ...data,
-    createdBy: uid,
-    createdAt: data.createdAt || now,
-    updatedAt: now,
-  }));
-  return ref.id;
-}
-
-// Fields a client must never be able to set through an update body. Several PUT
-// endpoints forward req.body straight here, so without this a caller could send
-// createdBy/owner_uid and reassign a record's ownership (mass assignment).
-const PROTECTED_UPDATE_FIELDS = ["createdBy", "owner_uid", "id", "createdAt"] as const;
-
-async function updateOwned(table: string, id: string, uid: string, data: Record<string, unknown>) {
-  const existing = await getOwned(table, id, uid);
-  if (!existing) return false;
-  const safe: Record<string, unknown> = { ...(data || {}) };
-  for (const field of PROTECTED_UPDATE_FIELDS) delete safe[field];
-  await adminDb.collection(table).doc(id).update(clean({ ...safe, updatedAt: nowIso() }));
-  return true;
-}
-
-async function deleteOwned(table: string, id: string, uid: string) {
-  const existing = await getOwned(table, id, uid);
-  if (!existing) return false;
-  await adminDb.collection(table).doc(id).delete();
-  return true;
-}
-
-/** Count the owner's rows in `table` whose `field` equals `value`. */
-async function countReferencing(table: string, field: string, value: string, uid: string): Promise<number> {
-  const snap = await adminDb
-    .collection(table)
-    .where("createdBy", "==", uid)
-    .where(field, "==", value)
-    .get();
-  return snap.size;
-}
-
-/**
- * Reference-integrity guard for hard-deletes. Returns an Arabic description of
- * the records that still point at this entity (so deleting it would orphan
- * their foreign keys), or null when nothing references it. We RESTRICT rather
- * than cascade — cascading a customer/product delete would silently destroy the
- * linked installations and bookings.
- */
-async function findBlockingReferences(
-  uid: string,
-  checks: Array<{ table: string; field: string; value: string; label: string }>,
-): Promise<string | null> {
-  const blockers: string[] = [];
-  for (const c of checks) {
-    const count = await countReferencing(c.table, c.field, c.value, uid);
-    if (count > 0) blockers.push(`${c.label} (${count})`);
-  }
-  return blockers.length ? blockers.join("، ") : null;
-}
-
 async function stats(uid: string) {
-  const [customers, products, technicians, installations, reminders, quotes, settings] = await Promise.all([
-    listOwned("customers", uid, undefined, 1000),
-    listOwned("products", uid, undefined, 1000),
-    listOwned("technicians", uid, undefined, 1000),
-    listOwned("installations", uid, undefined, 1000),
-    listOwned("reminders", uid, undefined, 1000),
-    listOwned("quotes", uid, undefined, 1000),
+  const [
+    customerCount,
+    productCount,
+    technicianCount,
+    installationCount,
+    quoteCount,
+    customers,
+    installations,
+    reminders,
+    quotes,
+    settings,
+  ] = await Promise.all([
+    countOwned("customers", uid),
+    countOwned("products", uid),
+    countOwned("technicians", uid),
+    countOwned("installations", uid),
+    countOwned("quotes", uid),
+    listOwned("customers", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+    listOwned("installations", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+    listOwned("reminders", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+    listOwned("quotes", uid, undefined, MAX_OWNED_SCAN_LIMIT),
     getSettings(uid),
   ]);
 
@@ -164,13 +152,31 @@ async function stats(uid: string) {
   const tomorrow = new Date(`${today}T00:00:00`);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStart = tomorrow.toISOString();
+  const values = (records: Array<Record<string, any>>, field: string) => new Set(
+    records
+      .map((record) => String(record[field] ?? "").trim())
+      .filter(Boolean),
+  );
+  const installationCustomerIds = values(installations, "customer_id");
+  const installationCustomerPhones = values(installations, "customer_phone");
+  const reminderCustomerIds = values(reminders, "customer_id");
+  const reminderCustomerPhones = values(reminders, "customer_phone");
+  const care = customers.reduce((count, customer) => {
+    const customerId = String(customer.id ?? "").trim();
+    const customerPhone = String(customer.phone ?? "").trim();
+    const hasInstallation = installationCustomerIds.has(customerId)
+      || (customerPhone !== "" && installationCustomerPhones.has(customerPhone));
+    const hasReminder = reminderCustomerIds.has(customerId)
+      || (customerPhone !== "" && reminderCustomerPhones.has(customerPhone));
+    return count + (!hasInstallation || !hasReminder ? 1 : 0);
+  }, 0);
 
   return {
-    customers: customers.length,
-    products: products.length,
-    technicians: technicians.length,
-    installations: installations.length,
-    quotes: quotes.length,
+    customers: customerCount.total,
+    products: productCount.total,
+    technicians: technicianCount.total,
+    installations: installationCount.total,
+    quotes: quoteCount.total,
     confirmedQuotes: quotes.filter((item) => item.status === "confirmed").length,
     quoteFollowUps: quotes.filter((item) => item.status === "follow_up").length,
     overdue: installations.filter((item) => item.status === "active" && String(item.next_maintenance) < today).length,
@@ -182,11 +188,7 @@ async function stats(uid: string) {
     ).length,
     completed: installations.filter((item) => item.status === "completed").length,
     maxDaily: settings.maxDaily,
-    care: customers.filter((customer) => {
-      const hasInstallation = installations.some((item) => item.customer_id === customer.id || item.customer_phone === customer.phone);
-      const hasReminder = reminders.some((item) => item.customer_id === customer.id || item.customer_phone === customer.phone);
-      return !hasInstallation || !hasReminder;
-    }).length,
+    care,
   };
 }
 
@@ -240,15 +242,30 @@ function normalizeQuoteItems(items: unknown) {
     .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
 }
 
-function quoteTotals(items: Array<{ total: number }>, discount = 0, tax = 0) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const cleanTax = Math.max(0, Number(tax || 0));
+function quoteTotals(
+  items: Array<{ total: number; vat_excluded?: boolean }>,
+  discountValue = 0,
+  tax = 0,
+  discountMode: DiscountMode = "fixed",
+  vatPercent = 15,
+) {
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue,
+    discountMode,
+    vatPercent,
+    additionalTax: tax,
+  });
   return {
-    subtotal,
-    discount: cleanDiscount,
-    tax: cleanTax,
-    total: Math.max(0, subtotal - cleanDiscount + cleanTax),
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
+    tax: totals.additionalTax,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_without_vat: totals.totalWithoutVat,
+    total: totals.total,
   };
 }
 
@@ -262,6 +279,10 @@ function quotePaymentFields(row: Record<string, any>, existing?: Record<string, 
       { percent: Number(row.payment_final_percent ?? existing?.payment_final_percent ?? 30), label: String(row.payment_final_text || existing?.payment_final_text || "بعد التوريد أو التركيب والتشغيل حسب نطاق العمل.").trim(), deadline_days: undefined },
     ];
   })();
+  const installmentValidation = validateInstallments(installments);
+  if (!installmentValidation.valid) {
+    throw Object.assign(new Error(installmentValidation.error || "Invalid installments."), { status: 400 });
+  }
   return {
     payment_method: String(row.payment_method || existing?.payment_method || "تحويل بنكي").trim(),
     payment_down_percent: Number(row.payment_down_percent ?? existing?.payment_down_percent ?? 70),
@@ -278,7 +299,14 @@ function quotePaymentFields(row: Record<string, any>, existing?: Record<string, 
 
 function normalizeQuote(row: Record<string, any>): Record<string, any> {
   const items = normalizeQuoteItems(row.items);
-  const totals = quoteTotals(items, row.discount, row.tax);
+  const discountMode: DiscountMode = row.discount_mode === "percent" ? "percent" : "fixed";
+  const totals = quoteTotals(
+    items,
+    row.discount_value ?? row.discount,
+    row.tax,
+    discountMode,
+    row.vat_percent,
+  );
   let installments = row.installments;
   if (typeof installments === "string") {
     try { installments = JSON.parse(installments); } catch { installments = undefined; }
@@ -300,7 +328,12 @@ function normalizeQuote(row: Record<string, any>): Record<string, any> {
     installments: installments || undefined,
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
+    discount_mode: discountMode,
+    discount_value: Number(row.discount_value ?? row.discount ?? totals.discount_value),
     tax: Number(row.tax ?? totals.tax),
+    vat_percent: Number(row.vat_percent ?? totals.vat_percent),
+    vat_amount: Number(row.vat_amount ?? totals.vat_amount),
+    total_without_vat: Number(row.total_without_vat ?? totals.total_without_vat),
     total: Number(row.total ?? totals.total),
   };
 }
@@ -375,7 +408,14 @@ async function ensureQuoteCustomer(uid: string, body: Record<string, any>) {
 
 function quotePayload(body: Record<string, any>, customer: Record<string, any>, existing?: Record<string, any>) {
   const items = normalizeQuoteItems(body.items);
-  const totals = quoteTotals(items, body.discount, body.tax);
+  const discountMode: DiscountMode = body.discount_mode === "percent" ? "percent" : "fixed";
+  const totals = quoteTotals(
+    items,
+    body.discount_value ?? body.discount,
+    body.tax,
+    discountMode,
+    body.vat_percent,
+  );
   const status = quoteStatuses.has(body.status) ? body.status as QuoteStatus : (existing?.status || "issued") as QuoteStatus;
   const now = nowIso();
   return clean({
@@ -428,13 +468,35 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.get("/api/customers", asyncRoute(async (req, res) => {
-    const search = String(req.query.search || "").trim();
-    let data = await listOwned("customers", userId(req), "name", 250);
-    if (search) data = data.filter((item) => `${item.name || ""} ${item.phone || ""} ${item.city || ""}`.includes(search));
-    res.json({ data, total: data.length });
+    const uid = userId(req);
+    const query = parseCustomerListQuery(req.query as Record<string, unknown>);
+
+    // Search must run against the complete bounded owner set before slicing;
+    // filtering a single page is what previously hid matches after row 250.
+    if (query.search || query.all) {
+      const customers = await listOwned("customers", uid, "name", MAX_OWNED_SCAN_LIMIT);
+      // A short bounded scan proves the exact owner total without a second
+      // query. Only the ambiguous 10,000-row boundary needs an explicit count.
+      const ownerCount = customers.length < MAX_OWNED_SCAN_LIMIT
+        ? { total: customers.length, capped: false }
+        : await countOwned("customers", uid);
+      const filtered = filterCustomerRecords(customers, query.search);
+      res.json(paginateCustomerRecords(filtered, query, {
+        total: query.search ? filtered.length : ownerCount.total,
+        capped: ownerCount.capped,
+      }));
+      return;
+    }
+
+    res.json(await listOwnedPage("customers", uid, {
+      orderField: "name",
+      page: query.page,
+      pageSize: query.pageSize,
+      maxScan: MAX_OWNED_SCAN_LIMIT,
+    }));
   }));
 
-  app.post("/api/customers", asyncRoute(async (req, res) => {
+  app.post("/api/customers", validate(customerCreateSchema), asyncRoute(async (req, res) => {
     const name = String(req.body?.name || "").trim();
     const phone = String(req.body?.phone || "").trim();
     if (!name || !phone) {
@@ -451,12 +513,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/customers/:id", asyncRoute(async (req, res) => {
+  app.put("/api/customers/:id", validateParams(crmIdParamsSchema), validate(customerUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("customers", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Customer was not found." });
     res.json({ success: true });
   }));
 
-  app.delete("/api/customers/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/customers/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const id = req.params.id;
     const blocking = await findBlockingReferences(uid, [
@@ -485,7 +547,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ data, total: data.length, stats: quoteStats(all) });
   }));
 
-  app.post("/api/quotes", asyncRoute(async (req, res) => {
+  app.post("/api/quotes", validate(quoteCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const items = normalizeQuoteItems(req.body?.items);
     const customerName = String(req.body?.customer_name || "").trim();
@@ -508,7 +570,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id, quote: quote ? normalizeQuote(quote) : null });
   }));
 
-  app.put("/api/quotes/:id", asyncRoute(async (req, res) => {
+  app.put("/api/quotes/:id", validateParams(crmIdParamsSchema), validate(quoteUpdateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("quotes", req.params.id, uid);
     if (!existing) {
@@ -522,7 +584,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ quote: quote ? normalizeQuote(quote) : null });
   }));
 
-  app.post("/api/quotes/:id/status", asyncRoute(async (req, res) => {
+  app.post("/api/quotes/:id/status", validateParams(crmIdParamsSchema), validate(quoteStatusSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const status = String(req.body?.status || "").trim() as QuoteStatus;
     if (!quoteStatuses.has(status)) {
@@ -548,12 +610,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ quote: quote ? normalizeQuote(quote) : null });
   }));
 
-  app.delete("/api/quotes/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/quotes/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("quotes", req.params.id, userId(req)))) return res.status(404).json({ error: "Quote was not found." });
     res.json({ success: true });
   }));
 
-  app.post("/api/quotes/:id/send-whatsapp", asyncRoute(async (req, res) => {
+  app.post("/api/quotes/:id/send-whatsapp", validateParams(crmIdParamsSchema), validate(documentSendSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("quotes", req.params.id, uid);
     if (!existing) {
@@ -601,7 +663,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(await listOwned("products", userId(req), "name", 250));
   }));
 
-  app.post("/api/products", asyncRoute(async (req, res) => {
+  app.post("/api/products", validate(productCreateSchema), asyncRoute(async (req, res) => {
     const id = await createOwned("products", userId(req), {
       ...req.body,
       interval_months: Number(req.body?.interval_months || 1),
@@ -614,7 +676,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/products/:id", asyncRoute(async (req, res) => {
+  app.put("/api/products/:id", validateParams(crmIdParamsSchema), validate(productUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("products", req.params.id, userId(req), {
       ...req.body,
       interval_months: req.body?.interval_months ? Number(req.body.interval_months) : undefined,
@@ -622,7 +684,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.delete("/api/products/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/products/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const id = req.params.id;
     const blocking = await findBlockingReferences(uid, [
@@ -641,7 +703,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(data.map((item) => ({ ...item, days_until: daysUntil(String(item.next_maintenance || "")) })));
   }));
 
-  app.post("/api/installations", asyncRoute(async (req, res) => {
+  app.post("/api/installations", validate(installationCreateSchema), asyncRoute(async (req, res) => {
     const id = await createOwned("installations", userId(req), {
       ...req.body,
       label: req.body?.label || "",
@@ -656,12 +718,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/installations/:id", asyncRoute(async (req, res) => {
+  app.put("/api/installations/:id", validateParams(crmIdParamsSchema), validate(installationUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("installations", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Installation was not found." });
     res.json({ success: true });
   }));
 
-  app.post("/api/installations/:id/complete", asyncRoute(async (req, res) => {
+  app.post("/api/installations/:id/complete", validateParams(crmIdParamsSchema), validate(installationCompleteSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("installations", req.params.id, userId(req), {
       status: "completed",
       completed_date: req.body?.completedDate || todayInTimeZone(),
@@ -670,7 +732,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.delete("/api/installations/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/installations/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("installations", req.params.id, userId(req)))) return res.status(404).json({ error: "Installation was not found." });
     res.json({ success: true });
   }));
@@ -679,7 +741,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(await listOwned("technicians", userId(req), "name", 250));
   }));
 
-  app.post("/api/technicians", asyncRoute(async (req, res) => {
+  app.post("/api/technicians", validate(technicianCreateSchema), asyncRoute(async (req, res) => {
     const id = await createOwned("technicians", userId(req), {
       ...req.body,
       specialty: req.body?.specialty || "",
@@ -688,7 +750,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/technicians/:id", asyncRoute(async (req, res) => {
+  app.put("/api/technicians/:id", validateParams(crmIdParamsSchema), validate(technicianUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("technicians", req.params.id, userId(req), {
       ...req.body,
       max_daily: req.body?.max_daily ? Number(req.body.max_daily) : undefined,
@@ -696,7 +758,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.delete("/api/technicians/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/technicians/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const id = req.params.id;
     // installations carry no technician_id — only bookings reference technicians.
@@ -718,7 +780,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(snap.docs.map((doc: DocSnapshot) => docData(doc)));
   }));
 
-  app.post("/api/bookings", asyncRoute(async (req, res) => {
+  app.post("/api/bookings", validate(bookingCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const technicianId = String(req.body?.technician_id || "").trim();
     if (technicianId && !(await getOwned("technicians", technicianId, uid))) {
@@ -735,12 +797,12 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.status(201).json({ id });
   }));
 
-  app.put("/api/bookings/:id", asyncRoute(async (req, res) => {
+  app.put("/api/bookings/:id", validateParams(crmIdParamsSchema), validate(bookingUpdateSchema), asyncRoute(async (req, res) => {
     if (!(await updateOwned("bookings", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Booking was not found." });
     res.json({ success: true });
   }));
 
-  app.delete("/api/bookings/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/bookings/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("bookings", req.params.id, userId(req)))) return res.status(404).json({ error: "Booking was not found." });
     res.json({ success: true });
   }));
@@ -753,7 +815,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json(await getSettings(userId(req)));
   }));
 
-  app.put("/api/settings", asyncRoute(async (req, res) => {
+  app.put("/api/settings", validate(settingsUpdateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     await adminDb.collection("settings").doc(uid).set({
       ...defaultSettings,
@@ -764,7 +826,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     res.json({ success: true });
   }));
 
-  app.post("/api/demo-data", asyncRoute(async (req, res) => {
+  app.post("/api/demo-data", validate(demoDataSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const count = Math.max(1, Math.min(50, Number(req.body?.count || 10)));
     const stamp = new Date().toISOString().replace(/\D/g, "").slice(8, 14);
@@ -839,40 +901,6 @@ const invoiceStatuses = new Set(["draft", "issued", "sent", "paid", "cancelled",
 function invoiceNumber(seed = Date.now(), index = 1) {
   const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
   return `INV-${ymd}-${String(index).padStart(3, "0")}`;
-}
-
-function generateTLV(tag: number, value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  const len = bytes.length;
-  const tagHex = tag.toString(16).padStart(2, "0");
-  const lenHex = len.toString(16).padStart(2, "0");
-  return tagHex + lenHex + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function generateZatcaBase64(sellerName: string, vatNumber: string, timestamp: string, total: number, vatTotal: number) {
-  const tlv =
-    generateTLV(1, sellerName) +
-    generateTLV(2, vatNumber) +
-    generateTLV(3, timestamp) +
-    generateTLV(4, total.toFixed(2)) +
-    generateTLV(5, vatTotal.toFixed(2));
-  const hexPairs = tlv.match(/.{1,2}/g) || [];
-  const bytes = new Uint8Array(hexPairs.map((h) => parseInt(h, 16)));
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function zatcaQrFields(sellerName: string, vatNumber: string, timestamp: string, total: number, vatTotal: number) {
-  return [
-    { tag: 1, label: "Seller name", value: sellerName },
-    { tag: 2, label: "VAT registration number", value: vatNumber },
-    { tag: 3, label: "Invoice timestamp", value: timestamp },
-    { tag: 4, label: "Invoice total including VAT", value: total.toFixed(2) },
-    { tag: 5, label: "VAT total", value: vatTotal.toFixed(2) },
-  ];
 }
 
 function escapeHtml(value: unknown) {
@@ -954,39 +982,43 @@ function normalizeInvoiceItems(items: unknown) {
 // Resolve a VAT percentage while treating an explicit 0 (zero-rated) as valid.
 // Only an unset value (undefined / null / "") or a non-numeric value falls back
 // to the default — `0 || 15` would otherwise turn a 0% invoice into 15%.
-function resolveVatPercent(value: unknown, fallback = 15): number {
-  if (value === undefined || value === null || value === "") return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
-function invoiceTotals(items: Array<{ total: number; vat_excluded?: boolean }>, discount = 0, vatPercent = 15) {
-  const cleanVatPercent = resolveVatPercent(vatPercent);
-  const vatRate = cleanVatPercent / 100;
-  const subtotal = items.reduce((sum, item) => {
-    const total = Number(item.total || 0);
-    return sum + (item.vat_excluded === false && vatRate > 0 ? total / (1 + vatRate) : total);
-  }, 0);
-  const cleanDiscount = Math.max(0, Number(discount || 0));
-  const afterDiscount = Math.max(0, subtotal - cleanDiscount);
-  const vatAmount = Math.round(afterDiscount * (cleanVatPercent / 100) * 100) / 100;
+function invoiceTotals(
+  items: Array<{ total: number; vat_excluded?: boolean }>,
+  discountValue = 0,
+  vatPercent = 15,
+  discountMode: DiscountMode = "fixed",
+) {
+  const totals = calculateDocumentTotals({
+    lines: items,
+    discountValue,
+    discountMode,
+    vatPercent,
+  });
   return {
-    subtotal: Math.round(subtotal * 100) / 100,
-    discount: cleanDiscount,
-    vat: vatAmount,
-    vat_percent: cleanVatPercent,
-    vat_amount: vatAmount,
-    total_without_vat: Math.round(afterDiscount * 100) / 100,
-    total_with_vat: Math.round((afterDiscount + vatAmount) * 100) / 100,
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    discount_mode: totals.discountMode,
+    discount_value: totals.discountValue,
+    vat: totals.vatAmount,
+    vat_percent: totals.vatPercent,
+    vat_amount: totals.vatAmount,
+    total_without_vat: totals.totalWithoutVat,
+    total_with_vat: totals.total,
   };
 }
 
 function normalizeInvoice(row: Record<string, any>): Record<string, any> {
   const items = normalizeInvoiceItems(row.items);
-  const totals = invoiceTotals(items, row.discount, row.vat_percent);
+  const discountMode: DiscountMode = row.discount_mode === "percent" ? "percent" : "fixed";
+  const totals = invoiceTotals(items, row.discount_value ?? row.discount, row.vat_percent, discountMode);
   const vatAmount = Number(row.vat_amount ?? row.vat ?? totals.vat_amount);
   const totalWithoutVat = Number(row.total_without_vat ?? totals.total_without_vat);
   const sellerVatNumber = String(row.seller_vat_number || row.seller_vat || "").trim();
+  const invoiceType = resolveInvoiceTaxType({
+    requested: row.invoice_type as InvoiceTaxTypeInput,
+    buyerVat: row.customer_vat,
+    taxableAmount: Number(row.total_without_vat ?? totals.total_without_vat),
+  });
   return {
     ...row,
     currency: row.currency || "SAR",
@@ -994,6 +1026,8 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     items,
     subtotal: Number(row.subtotal ?? totals.subtotal),
     discount: Number(row.discount ?? totals.discount),
+    discount_mode: discountMode,
+    discount_value: Number(row.discount_value ?? row.discount ?? totals.discount_value),
     vat: vatAmount,
     vat_percent: Number(row.vat_percent ?? totals.vat_percent),
     vat_amount: vatAmount,
@@ -1001,22 +1035,23 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     total_with_vat: Number(row.total_with_vat ?? totalWithoutVat + vatAmount),
     seller_vat: String(row.seller_vat || sellerVatNumber).trim(),
     seller_vat_number: sellerVatNumber,
+    invoice_type: invoiceType,
   };
 }
 
-function invoiceLineAmounts(item: Record<string, any>, vatPercent: number) {
-  const rate = Math.max(0, Number(vatPercent || 0)) / 100;
-  const quantity = Math.max(0, Number(item.quantity || 0));
-  const enteredTotal = Math.max(0, Number(item.total || quantity * Number(item.unit_price || 0)));
-  const net = item.vat_excluded === false && rate > 0 ? enteredTotal / (1 + rate) : enteredTotal;
-  const gross = item.vat_excluded === false ? enteredTotal : enteredTotal * (1 + rate);
-  return {
-    quantity,
-    net: Math.round(net * 100) / 100,
-    unitNet: quantity ? Math.round((net / quantity) * 100) / 100 : 0,
-    vat: Math.round((gross - net) * 100) / 100,
-    gross: Math.round(gross * 100) / 100,
-  };
+function invoiceKindLabels(type: InvoiceTaxType) {
+  return type === "tax"
+    ? { ar: "فاتورة ضريبية", en: "Tax Invoice" }
+    : { ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
+}
+
+function invoiceBreakdown(invoice: Record<string, any>) {
+  return calculateDocumentLineAmounts({
+    lines: Array.isArray(invoice.items) ? invoice.items : [],
+    discountValue: invoice.discount_value ?? invoice.discount,
+    discountMode: invoice.discount_mode === "percent" ? "percent" : "fixed",
+    vatPercent: invoice.vat_percent,
+  });
 }
 
 async function publicInvoiceHtml(invoice: Record<string, any>) {
@@ -1025,17 +1060,14 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
   const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
   const sellerCr = invoice.seller_cr || invoice.seller_cr_number || "7016449519";
   const sellerPhone = invoice.seller_phone || "+966533971168";
-  // نوع الفاتورة حسب الإجمالي: مبسطة ≤ 999، ضريبية (عادية) ≥ 1000
-  const kind = Number(invoice.total_with_vat || 0) >= 1000
-    ? { ar: "فاتورة ضريبية", en: "Tax Invoice" }
-    : { ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
-  const qrBase64 = generateZatcaBase64(
+  const kind = invoiceKindLabels(invoice.invoice_type);
+  const qrBase64 = generateZatcaQrBase64({
     sellerName,
-    sellerVat,
+    vatNumber: sellerVat,
     timestamp,
-    Number(invoice.total_with_vat || 0),
-    Number(invoice.vat_amount || invoice.vat || 0),
-  );
+    total: Number(invoice.total_with_vat || 0),
+    vatTotal: Number(invoice.vat_amount || invoice.vat || 0),
+  });
   const qrSrc = await QRCode.toDataURL(qrBase64, {
     errorCorrectionLevel: "M",
     margin: 1,
@@ -1043,15 +1075,19 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     color: { dark: "#000000", light: "#ffffff" },
   });
   const currency = String(invoice.currency || "SAR");
+  const breakdown = invoiceBreakdown(invoice);
   const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
-    const line = invoiceLineAmounts(item, resolveVatPercent(invoice.vat_percent));
+    const line = breakdown.lines[index];
+    const quantity = Math.max(0, Number(item.quantity || 0));
+    const unitNet = quantity ? line.netBeforeDiscount / quantity : 0;
     const sku = item.product_sku ? `<small style="display:block;opacity:.6;font-size:.85em;direction:ltr">${escapeHtml(item.product_sku)}</small>` : "";
     return `<tr>
       <td>${index + 1}</td>
       <td>${escapeHtml(item.description)}${sku}</td>
-      <td>${line.quantity}</td>
-      <td>${escapeHtml(formatMoney(line.unitNet, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.net, currency))}</td>
+      <td>${quantity}</td>
+      <td>${escapeHtml(formatMoney(unitNet, currency))}</td>
+      <td>${escapeHtml(formatMoney(line.discount, currency))}</td>
+      <td>${escapeHtml(formatMoney(line.taxableAmount, currency))}</td>
       <td>${escapeHtml(formatMoney(line.vat, currency))}</td>
       <td>${escapeHtml(formatMoney(line.gross, currency))}</td>
     </tr>`;
@@ -1080,9 +1116,12 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     .party h2 { margin: 0 0 8px; color: #0f6a86; font-size: 14px; }
     .party p { margin: 5px 0; color: #334155; font-size: 12px; }
     .qr { display: grid; place-items: center; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
-    th { padding: 9px; background: #0f6a86; color: #fff; font-size: 11px; }
-    td { padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 11px; text-align: center; }
+    table { width: 100%; table-layout: fixed; border-collapse: collapse; margin-bottom: 12px; }
+    th { padding: 8px 5px; background: #0f6a86; color: #fff; font-size: 9px; }
+    td { padding: 7px 5px; border-bottom: 1px solid #e2e8f0; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; break-inside: avoid; }
+    th:nth-child(1) { width: 4%; } th:nth-child(2) { width: 24%; } th:nth-child(3) { width: 7%; }
+    th:nth-child(4) { width: 15%; } th:nth-child(5) { width: 11%; } th:nth-child(6) { width: 14%; }
+    th:nth-child(7) { width: 10%; } th:nth-child(8) { width: 15%; }
     td:nth-child(2) { text-align: right; white-space: pre-line; }
     .totals { width: 330px; margin-right: auto; border: 1px solid #d7e0ea; border-radius: 10px; overflow: hidden; }
     .totals p { display: flex; justify-content: space-between; margin: 0; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
@@ -1134,13 +1173,14 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       <aside class="qr"><img src="${qrSrc}" width="132" height="132" alt="ZATCA QR" /></aside>
     </section>
     <table>
-      <thead><tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th><th>الخاضع للضريبة</th><th>VAT</th><th>الإجمالي شامل الضريبة</th></tr></thead>
+      <thead><tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th><th>خصم البند</th><th>الخاضع بعد الخصم</th><th>VAT</th><th>الإجمالي شامل الضريبة</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <section class="totals">
-      <p><span>الإجمالي غير شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
+      <p><span>المجموع قبل الخصم والضريبة</span><strong>${escapeHtml(formatMoney(invoice.subtotal, currency))}</strong></p>
       <p><span>الخصم</span><strong>${escapeHtml(formatMoney(invoice.discount, currency))}</strong></p>
-      <p><span>ضريبة القيمة المضافة (${escapeHtml(resolveVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
+      <p><span>الخاضع للضريبة بعد الخصم</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
+      <p><span>ضريبة القيمة المضافة (${escapeHtml(normalizeVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
       <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
     </section>
     ${invoice.terms ? `<section class="terms">${escapeHtml(invoice.terms)}</section>` : ""}
@@ -1190,7 +1230,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ data, total: data.length, stats });
   }));
 
-  app.post("/api/invoices", asyncRoute(async (req, res) => {
+  app.post("/api/invoices", validate(invoiceCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const items = normalizeInvoiceItems(req.body?.items);
     const customerName = String(req.body?.customer_name || "").trim();
@@ -1204,7 +1244,13 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     }
     const all = await listOwned("invoices", uid, undefined, 10000);
     const settings = await getSettings(uid);
-    const totals = invoiceTotals(items, req.body?.discount, req.body?.vat_percent);
+    const discountMode: DiscountMode = req.body?.discount_mode === "percent" ? "percent" : "fixed";
+    const totals = invoiceTotals(items, req.body?.discount_value ?? req.body?.discount, req.body?.vat_percent, discountMode);
+    const invoiceType = resolveInvoiceTaxType({
+      requested: req.body?.invoice_type,
+      buyerVat: req.body?.customer_vat,
+      taxableAmount: totals.total_without_vat,
+    });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
@@ -1215,6 +1261,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       customer_city: String(req.body?.customer_city || "").trim(),
       customer_vat: String(req.body?.customer_vat || "").trim(),
       title: String(req.body?.title || "").trim(),
+      invoice_type: invoiceType,
       status: invoiceStatuses.has(req.body?.status) ? req.body.status : "issued",
       issue_date: req.body?.issue_date || todayInTimeZone(),
       due_date: req.body?.due_date || null,
@@ -1254,7 +1301,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ url: invoiceShareUrl(req, invoice) });
   }));
 
-  app.put("/api/invoices/:id", asyncRoute(async (req, res) => {
+  app.put("/api/invoices/:id", validateParams(crmIdParamsSchema), validate(invoiceUpdateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("invoices", req.params.id, uid);
     if (!existing) {
@@ -1263,15 +1310,24 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     }
     const items = req.body?.items ? normalizeInvoiceItems(req.body.items) : normalizeInvoiceItems(existing.items);
     const settings = await getSettings(uid);
-    const totals = invoiceTotals(items, req.body?.discount ?? existing.discount, req.body?.vat_percent ?? existing.vat_percent);
+    const discountMode: DiscountMode = (req.body?.discount_mode ?? existing.discount_mode) === "percent" ? "percent" : "fixed";
+    const discountValue = req.body?.discount_value ?? req.body?.discount ?? existing.discount_value ?? existing.discount;
+    const totals = invoiceTotals(items, discountValue, req.body?.vat_percent ?? existing.vat_percent, discountMode);
+    const customerVat = String(req.body?.customer_vat ?? existing.customer_vat ?? "").trim();
+    const invoiceType = resolveInvoiceTaxType({
+      requested: req.body?.invoice_type ?? existing.invoice_type,
+      buyerVat: customerVat,
+      taxableAmount: totals.total_without_vat,
+    });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || existing.seller_vat_number || existing.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       customer_id: req.body?.customer_id ?? existing.customer_id,
       customer_name: String(req.body?.customer_name || existing.customer_name || "").trim(),
       customer_phone: String(req.body?.customer_phone || existing.customer_phone || "").trim(),
       customer_city: String(req.body?.customer_city || existing.customer_city || "").trim(),
-      customer_vat: String(req.body?.customer_vat || existing.customer_vat || "").trim(),
+      customer_vat: customerVat,
       title: String(req.body?.title || existing.title || "").trim(),
+      invoice_type: invoiceType,
       status: invoiceStatuses.has(req.body?.status) ? req.body.status : existing.status,
       issue_date: req.body?.issue_date || existing.issue_date,
       due_date: req.body?.due_date ?? existing.due_date ?? null,
@@ -1291,7 +1347,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
   }));
 
-  app.post("/api/invoices/:id/status", asyncRoute(async (req, res) => {
+  app.post("/api/invoices/:id/status", validateParams(crmIdParamsSchema), validate(invoiceStatusSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const status = String(req.body?.status || "").trim() as InvoiceStatus;
     if (!invoiceStatuses.has(status)) {
@@ -1316,7 +1372,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
   }));
 
-  app.delete("/api/invoices/:id", asyncRoute(async (req, res) => {
+  app.delete("/api/invoices/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
     if (!(await deleteOwned("invoices", req.params.id, userId(req)))) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
       return;
@@ -1324,7 +1380,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     res.json({ success: true });
   }));
 
-  app.post("/api/invoices/:id/send-whatsapp", asyncRoute(async (req, res) => {
+  app.post("/api/invoices/:id/send-whatsapp", validateParams(crmIdParamsSchema), validate(documentSendSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("invoices", req.params.id, uid);
     if (!existing) {
@@ -1339,22 +1395,24 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     }
     const currency = String(invoice.currency || "SAR");
     const documentUrl = invoiceShareUrl(req, invoice);
+    const breakdown = invoiceBreakdown(invoice);
     const lines = (Array.isArray(invoice.items) ? invoice.items : []).map(
-      (item: Record<string, any>) => `- ${item.description} × ${item.quantity}: ${Number(item.total || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      (item: Record<string, any>, index: number) => `- ${item.description} × ${item.quantity}: ${Number(breakdown.lines[index]?.gross || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
     const message = [
-      `${Number(invoice.total_with_vat || 0) >= 1000 ? "فاتورة ضريبية" : "فاتورة ضريبية مبسطة"} - Breexe Pro Co.`,
+      `${invoiceKindLabels(invoice.invoice_type).ar} - Breexe Pro Co.`,
       `${invoice.invoice_number}`,
       `العميل: ${invoice.customer_name}`,
       "",
       ...lines,
       "",
-      `المجموع: ${Number(invoice.subtotal || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `المجموع قبل الخصم والضريبة: ${Number(invoice.subtotal || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       `الخصم: ${Number(invoice.discount || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
-      `ضريبة ١٥٪: ${Number(invoice.vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `الخاضع للضريبة بعد الخصم: ${Number(invoice.total_without_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      `ضريبة ${Number(invoice.vat_percent || 0).toLocaleString("ar-SA")}%: ${Number(invoice.vat_amount || invoice.vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       `الإجمالي شامل الضريبة: ${Number(invoice.total_with_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       "",
-      `الرقم الضريبي: ${invoice.seller_vat || "313049114100003"}`,
+      `الرقم الضريبي: ${invoice.seller_vat_number || invoice.seller_vat || "313049114100003"}`,
       `رابط الفاتورة للطباعة أو الحفظ PDF: ${documentUrl}`,
       invoice.notes ? `ملاحظات: ${invoice.notes}` : "",
     ].filter(Boolean).join("\n");
@@ -1405,22 +1463,17 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
     const total = Number(invoice.total_with_vat || 0);
     const vatTotal = Number(invoice.vat_amount || invoice.vat || 0);
-    const qr = generateZatcaBase64(
-      sellerName,
-      sellerVat,
-      timestamp,
-      total,
-      vatTotal,
-    );
+    const qrInput = { sellerName, vatNumber: sellerVat, timestamp, total, vatTotal };
+    const qr = generateZatcaQrBase64(qrInput);
     res.json({
       qr_base64: qr,
       format: "TLV_BASE64",
       phase: "ZATCA phase 1 QR fields",
-      fields: zatcaQrFields(sellerName, sellerVat, timestamp, total, vatTotal),
+      fields: zatcaQrFields(qrInput),
     });
   }));
 
-  app.post("/api/quotes/:id/convert-to-invoice", asyncRoute(async (req, res) => {
+  app.post("/api/quotes/:id/convert-to-invoice", validateParams(crmIdParamsSchema), validate(quoteConvertSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
     const existing = await getOwned("quotes", req.params.id, uid);
     if (!existing) {
@@ -1431,7 +1484,17 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const all = await listOwned("invoices", uid, undefined, 10000);
     const settings = await getSettings(uid);
     const items = normalizeInvoiceItems(quote.items || []);
-    const totals = invoiceTotals(items, quote.discount);
+    const totals = invoiceTotals(
+      items,
+      quote.discount_value ?? quote.discount,
+      quote.vat_percent,
+      quote.discount_mode === "percent" ? "percent" : "fixed",
+    );
+    const invoiceType = resolveInvoiceTaxType({
+      requested: req.body?.invoice_type,
+      buyerVat: quote.customer_vat,
+      taxableAmount: totals.total_without_vat,
+    });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
     const payload = clean({
       invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
@@ -1440,6 +1503,8 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       customer_name: quote.customer_name || "",
       customer_phone: quote.customer_phone || "",
       customer_city: quote.customer_city || "",
+      customer_vat: quote.customer_vat || "",
+      invoice_type: invoiceType,
       status: "issued",
       issue_date: todayInTimeZone(),
       currency: quote.currency || "SAR",

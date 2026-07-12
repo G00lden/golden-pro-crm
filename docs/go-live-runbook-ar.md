@@ -40,6 +40,7 @@ openssl rand -hex 16   # لـ OUTBOUND_CONFIRM_CODE
 | `FIREBASE_SERVICE_ACCOUNT_*` | Firebase › Project Settings › Service accounts › Generate key |
 | `STORE_WEBHOOK_OWNER_UID` | UID حسابك في Firebase Authentication |
 | `ADMIN_UIDS` | UID(ات) من يتحكم بقناة واتساب (نفس uid المالك غالبًا) |
+| `BOOTSTRAP_ADMIN_EMAILS` | البريد الموثق للمالك/المشرف الأول؛ قائمة مفصولة بفواصل عند الحاجة |
 | `SALLA_CLIENT_ID` / `SALLA_CLIENT_SECRET` | لوحة مطوّري سلة › تطبيقك |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare › My Profile › API Tokens |
 | الأسرار العشوائية الأربعة | من الأمر `openssl` أعلاه |
@@ -55,6 +56,8 @@ npm run db:verify     # يتحقق أن الجداول والسياسات موج
 ```
 
 لو الجداول ناقصة، طبّق الـ migrations من `supabase/migrations/` عبر Supabase SQL editor أو CLI:
+
+تأكد خصوصًا من تطبيق `20260712010400_quotes_invoices_financial.sql` قبل تفعيل `DATA_PROVIDER=supabase`؛ فهي تنشئ جداول العروض والفواتير وحقول الخصم والضريبة والأقساط مع RLS.
 `20260429181500_initial_crm_schema.sql` ثم `20260429183500_harden_crm_schema.sql`.
 
 ---
@@ -64,6 +67,7 @@ npm run db:verify     # يتحقق أن الجداول والسياسات موج
 1. Firebase Console › Authentication › Sign-in method › فعّل **Email/Password** (أو Google).
 2. أضف كل عضو فريق كمستخدم (Authentication › Users › Add user).
 3. Authentication › Settings › Authorized domains › أضف `crm.breexe-pro.com`.
+4. ضع UID المالك في `ADMIN_UIDS` وبريده الموثق في `BOOTSTRAP_ADMIN_EMAILS` قبل أول دخول. أول مستخدم لا يصبح admin تلقائيًا.
 
 > ملاحظة عزل البيانات: كل مستخدم يشوف بياناته فقط (الفلترة بـ `createdBy === uid`). لو تبي الفريق **يتشارك** نفس بيانات المتجر، استخدم حساب مالك واحد مشترك، أو أخبرني لأضيف نموذج فريق/مؤسسة (workspace) — تطوير إضافي.
 

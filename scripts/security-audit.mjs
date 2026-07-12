@@ -4,6 +4,7 @@ import { readProjectEnv, root, masked } from "./env-utils.mjs";
 
 const env = readProjectEnv();
 const findings = [];
+const sourceOnly = process.argv.includes("--source-only");
 
 const skipDirs = new Set([
   ".git",
@@ -163,6 +164,8 @@ function checkDocker() {
     if (dockerignore.includes(entry)) pass(`.dockerignore excludes ${entry}`);
     else fail(`.dockerignore should exclude ${entry}`);
   }
+  if (/npm ci --omit=dev --omit=optional/.test(dockerfile)) pass("Docker runtime omits dev and unused optional dependencies.");
+  else fail("Docker runtime must omit dev and unused optional dependencies.");
 }
 
 function checkSecretLeakage() {
@@ -190,6 +193,14 @@ function checkSecretLeakage() {
   }
 
   if (!leaks) pass("No obvious secrets found in source/config files outside local env files.");
+
+  const firebase = fileText(join(root, "src", "firebase.ts"));
+  if (firebase.includes("VITE_LOCAL_AUTH_TOKEN")) fail("A local-auth secret is referenced from the frontend bundle.");
+  else pass("No local-auth secret is referenced from the frontend bundle.");
+
+  const viteConfig = fileText(join(root, "vite.config.ts"));
+  if (/allowedHosts\s*:\s*true/.test(viteConfig)) fail("Vite development server allows every Host header.");
+  else pass("Vite development hosts are restricted.");
 }
 
 async function checkRunningHeaders() {
@@ -228,8 +239,8 @@ function print() {
   }
 }
 
-checkEnv();
+if (!sourceOnly) checkEnv();
 checkDocker();
 checkSecretLeakage();
-await checkRunningHeaders();
+if (!sourceOnly) await checkRunningHeaders();
 print();

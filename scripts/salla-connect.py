@@ -79,7 +79,7 @@ def build_authorize_url(env: dict[str, str]) -> str:
         "client_id": env["SALLA_CLIENT_ID"],
         "response_type": "code",
         "redirect_uri": env.get("SALLA_REDIRECT_URI", ""),
-        "scope": env.get("SALLA_SCOPES", "offline_access orders.read"),
+        "scope": env.get("SALLA_SCOPES", "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write"),
         "state": f"probe-{int(time.time())}",
     }
     return f"{SALLA_AUTHORIZE_URL}?{parse.urlencode(params)}"

@@ -1,4 +1,4 @@
-import { RefreshCcw, Search, UserRoundCog, Wrench, Save, Send, Filter } from "lucide-react";
+import { RefreshCcw, Search, UserRoundCog, Wrench, Save, Send, Filter, PencilLine } from "lucide-react";
 import { useState, useCallback, useEffect, useMemo, useRef, type FormEvent } from "react";
 import * as api from "../api";
 import {
@@ -33,20 +33,80 @@ export default function StoreOrdersPage({
   setModal: (modal: ModalState) => void;
 }) {
   const [filter, setFilter] = useState("all");
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [cityFilter, setCityFilter] = useState("");
-  const [productFilter, setProductFilter] = useState("");
-  const [minValue, setMinValue] = useState("");
-  const [maxValue, setMaxValue] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [cityInput, setCityInput] = useState("");
+  const [city, setCity] = useState("");
+  const [productInput, setProductInput] = useState("");
+  const [product, setProduct] = useState("");
+  const [minTotalInput, setMinTotalInput] = useState("");
+  const [minTotal, setMinTotal] = useState<number | undefined>();
+  const [maxTotalInput, setMaxTotalInput] = useState("");
+  const [maxTotal, setMaxTotal] = useState<number | undefined>();
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
   const [showFilters, setShowFilters] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState("");
   const seenOrderIdsRef = useRef<Set<string>>(new Set());
+  const realtimeCreatedIdsRef = useRef<Set<string>>(new Set());
+  const refreshRequestSequenceRef = useRef(0);
   const bootstrappedRef = useRef(false);
-  const orders = useData(() => api.getStoreOrders({ type: "all" }), []);
+  const journeyFilter = ["needs_review", "awaiting_schedule", "booking_created"].includes(filter)
+    ? filter
+    : "";
+  const typeFilter = filter !== "all" && !journeyFilter ? filter : "";
+  const orderQuery = useMemo<api.StoreOrderListParams>(() => ({
+    search,
+    type: typeFilter,
+    journey: journeyFilter,
+    status: statusFilter,
+    city,
+    product,
+    min_total: minTotal,
+    max_total: maxTotal,
+    page,
+    pageSize,
+  }), [city, journeyFilter, maxTotal, minTotal, page, pageSize, product, search, statusFilter, typeFilter]);
+  const orderQueryKey = useMemo(() => JSON.stringify(orderQuery), [orderQuery]);
+  const activeOrderQueryKeyRef = useRef(orderQueryKey);
+  activeOrderQueryKeyRef.current = orderQueryKey;
+  const orders = useData(
+    () => api.getStoreOrders(orderQuery),
+    [search, typeFilter, journeyFilter, statusFilter, city, product, minTotal, maxTotal, page, pageSize],
+  );
+  const sallaStatuses = useData(api.getSallaOrderStatuses);
   const setOrderData = orders.setData;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  const totalRangeError = useMemo(() => {
+    const minimum = minTotalInput.trim() === "" ? undefined : Number(minTotalInput);
+    const maximum = maxTotalInput.trim() === "" ? undefined : Number(maxTotalInput);
+    if (minimum !== undefined && (!Number.isFinite(minimum) || minimum < 0)) return "أدخل حدًا أدنى صحيحًا للقيمة.";
+    if (maximum !== undefined && (!Number.isFinite(maximum) || maximum < 0)) return "أدخل حدًا أعلى صحيحًا للقيمة.";
+    if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
+      return "يجب أن يكون الحد الأدنى للقيمة أقل من الحد الأعلى أو مساويًا له.";
+    }
+    return "";
+  }, [maxTotalInput, minTotalInput]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setCity(cityInput.trim());
+      setProduct(productInput.trim());
+      if (totalRangeError) return;
+      setMinTotal(minTotalInput.trim() === "" ? undefined : Number(minTotalInput));
+      setMaxTotal(maxTotalInput.trim() === "" ? undefined : Number(maxTotalInput));
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [cityInput, maxTotalInput, minTotalInput, productInput, totalRangeError]);
 
   const openWorkflowForm = (order: api.StoreOrder, item?: api.StoreOrderItem) => {
     setModal({
@@ -93,7 +153,11 @@ export default function StoreOrdersPage({
 
   const updateSeenOrders = useCallback((nextOrders: api.StoreOrder[], quiet = false) => {
     const nextIds = new Set(nextOrders.map((order) => order.id));
-    const newOrders = nextOrders.filter((order) => !seenOrderIdsRef.current.has(order.id));
+    const newOrders = nextOrders.filter((order) =>
+      !seenOrderIdsRef.current.has(order.id) &&
+      !realtimeCreatedIdsRef.current.has(order.id) &&
+      !realtimeCreatedIdsRef.current.has(order.order_id),
+    );
 
     if (bootstrappedRef.current && newOrders.length && !quiet) {
       notify(`وصل ${newOrders.length} طلب جديد من سلة`);
@@ -116,12 +180,17 @@ export default function StoreOrdersPage({
         notify(`تحديث سلة انتهى: الطلبات ${result.imported} جديد، ${result.updated} محدث، ${result.failed} فشل${productSummary}`, result.failed === 0 && (!products || products.failed === 0));
       }
 
-      const nextOrders = await api.getStoreOrders({ type: "all" });
+      const requestedOrderQueryKey = JSON.stringify(orderQuery);
+      const requestSequence = ++refreshRequestSequenceRef.current;
+      const nextOrders = await api.getStoreOrders(orderQuery);
+      if (
+        activeOrderQueryKeyRef.current !== requestedOrderQueryKey ||
+        refreshRequestSequenceRef.current !== requestSequence
+      ) return;
       setOrderData(nextOrders);
-      // Do NOT suppress on background: the 1-minute auto-poll is exactly when a
-      // "new order arrived" toast is most useful. The bootstrappedRef guard
-      // already prevents alerting on the very first load.
-      updateSeenOrders(nextOrders);
+      const isUnfilteredFirstPage = page === 1 && !search && !typeFilter && !journeyFilter && !statusFilter &&
+        !city && !product && minTotal === undefined && maxTotal === undefined;
+      updateSeenOrders(nextOrders.data, !isUnfilteredFirstPage);
 
       if (!options.background || options.sync) {
         await refreshStats();
@@ -134,110 +203,94 @@ export default function StoreOrdersPage({
       setSyncing(false);
       setRefreshing(false);
     }
-  }, [notify, refreshStats, setOrderData, updateSeenOrders]);
+  }, [city, journeyFilter, maxTotal, minTotal, notify, orderQuery, page, product, refreshStats, search, setOrderData, statusFilter, typeFilter, updateSeenOrders]);
+  const refreshOrdersRef = useRef(refreshOrders);
+  const realtimeRefreshTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    refreshOrdersRef.current = refreshOrders;
+  }, [refreshOrders]);
+
+  useEffect(() => {
+    const unsubscribe = api.subscribeStoreOrderEvents((event) => {
+      if (!event.type.startsWith("order.") && event.type !== "sync.completed") return;
+      if (event.type === "order.created") {
+        const orderKeys = [event.orderId, event.remoteOrderId].filter((value): value is string => Boolean(value));
+        const alreadyNotified = orderKeys.some((key) => realtimeCreatedIdsRef.current.has(key));
+        if (orderKeys.length && !alreadyNotified) {
+          for (const key of orderKeys) realtimeCreatedIdsRef.current.add(key);
+          if (event.orderId) seenOrderIdsRef.current.add(event.orderId);
+          const visibleOrderNumber = event.remoteOrderId || event.orderId;
+          notify(`وصل طلب جديد من سلة: ${visibleOrderNumber}`);
+          while (realtimeCreatedIdsRef.current.size > 1_000) {
+            const oldest = realtimeCreatedIdsRef.current.values().next().value;
+            if (!oldest) break;
+            realtimeCreatedIdsRef.current.delete(oldest);
+          }
+        }
+      }
+      if (realtimeRefreshTimerRef.current !== null) {
+        window.clearTimeout(realtimeRefreshTimerRef.current);
+      }
+      realtimeRefreshTimerRef.current = window.setTimeout(() => {
+        realtimeRefreshTimerRef.current = null;
+        void refreshOrdersRef.current({ background: true });
+      }, 500);
+    });
+
+    return () => {
+      unsubscribe();
+      if (realtimeRefreshTimerRef.current !== null) {
+        window.clearTimeout(realtimeRefreshTimerRef.current);
+        realtimeRefreshTimerRef.current = null;
+      }
+    };
+  }, [notify]);
 
   useEffect(() => {
     if (!orders.data) return;
-    updateSeenOrders(orders.data, true);
+    updateSeenOrders(orders.data.data, true);
   }, [orders.data, updateSeenOrders]);
 
   useEffect(() => {
     if (!autoRefresh) return;
     const timer = window.setInterval(() => {
       void refreshOrders({ background: true });
-    }, 15_000);
+    }, 60_000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, refreshOrders]);
 
-  const allOrders = orders.data || [];
-  const matchesType = useCallback((order: api.StoreOrder, value: string) => {
-    if (value === "all") return true;
-    if (value === "needs_review" || value === "awaiting_schedule" || value === "booking_created") {
-      return order.journey_status === value || Boolean(order.items?.some((item) => item.status === value));
-    }
-    return Boolean(
-      order.order_types?.includes(value as api.StoreItemType) ||
-        order.items?.some((item) => effectiveStoreOrderType(item) === value),
-    );
-  }, []);
-
-  const filteredOrders = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    const productTerm = productFilter.trim().toLowerCase();
-    const minVal = minValue ? Number(minValue) : null;
-    const maxVal = maxValue ? Number(maxValue) : null;
-    return allOrders.filter((order) => {
-      if (!matchesType(order, filter)) return false;
-      // City filter
-      if (cityFilter && (order.customer_city || "").toLowerCase() !== cityFilter.toLowerCase()) return false;
-      // Product filter
-      if (productTerm) {
-        const itemMatch = (order.items || []).some(
-          (item) =>
-            (item.name || "").toLowerCase().includes(productTerm) ||
-            (item.sku || "").toLowerCase().includes(productTerm),
-        );
-        if (!itemMatch) return false;
-      }
-      // Value filter
-      const orderVal = orderTotal(order);
-      if (minVal !== null && (orderVal === null || orderVal < minVal)) return false;
-      if (maxVal !== null && (orderVal === null || orderVal > maxVal)) return false;
-      // Text search
-      if (!term) return true;
-      const haystack = [
-        order.order_number,
-        order.order_id,
-        order.customer_name,
-        order.customer_phone,
-        order.customer_city,
-        order.status,
-        ...(order.items || []).flatMap((item) => [item.name, item.sku]),
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(term);
-    });
-  }, [allOrders, filter, matchesType, search, cityFilter, productFilter, minValue, maxValue]);
-
-  // Extract unique cities for filter dropdown
-  const availableCities = useMemo(() => {
-    const cities = new Set<string>();
-    allOrders.forEach((order) => {
-      if (order.customer_city) cities.add(order.customer_city);
-    });
-    return Array.from(cities).sort();
-  }, [allOrders]);
+  const pageData = orders.data;
+  const allOrders = pageData?.data || [];
+  const availableStatuses = useMemo(
+    () => (sallaStatuses.data || []).filter((status) => status.is_active !== false && status.slug),
+    [sallaStatuses.data],
+  );
+  const numberFormatter = useMemo(() => new Intl.NumberFormat("ar-SA"), []);
+  const formatCount = useCallback((value: number) => numberFormatter.format(value), [numberFormatter]);
 
   const summary = useMemo(() => {
     const todayKey = today();
     return {
-      total: allOrders.length,
-      needsReview: allOrders.filter((order) => matchesType(order, "needs_review")).length,
-      awaitingSchedule: allOrders.filter((order) => matchesType(order, "awaiting_schedule")).length,
-      booked: allOrders.filter((order) => matchesType(order, "booking_created")).length,
+      total: pageData?.total || 0,
+      visible: allOrders.length,
+      needsReview: allOrders.filter((order) => order.journey_status === "needs_review" || order.items?.some((item) => item.status === "needs_review")).length,
+      currentPage: pageData?.page || 1,
+      totalPages: pageData?.totalPages || 1,
       today: allOrders.filter((order) => String(order.imported_at || order.order_date || "").startsWith(todayKey)).length,
     };
-  }, [allOrders, matchesType]);
+  }, [allOrders, pageData?.page, pageData?.total, pageData?.totalPages]);
 
   const tabs = [
-    ["all", "الكل", summary.total],
-    ["needs_review", "مراجعة", summary.needsReview],
-    ["awaiting_schedule", "بانتظار الجدولة", summary.awaitingSchedule],
-    ["booking_created", "محولة لفني", summary.booked],
-    ["sale_only", "بيع فقط", allOrders.filter((order) => matchesType(order, "sale_only")).length],
-    ["install_maintenance", "تركيب", allOrders.filter((order) => matchesType(order, "install_maintenance")).length],
-    ["maintenance_existing", "صيانة سابقة", allOrders.filter((order) => matchesType(order, "maintenance_existing")).length],
-    ["external_maintenance", "صيانة خارجية", allOrders.filter((order) => matchesType(order, "external_maintenance")).length],
+    ["all", "الكل"],
+    ["needs_review", "مراجعة"],
+    ["awaiting_schedule", "بانتظار الجدولة"],
+    ["booking_created", "محولة لفني"],
+    ["sale_only", "بيع فقط"],
+    ["install_maintenance", "تركيب"],
+    ["maintenance_existing", "صيانة سابقة"],
+    ["external_maintenance", "صيانة خارجية"],
   ] as const;
-
-  const productsLabel = (order: api.StoreOrder) => {
-    const items = order.items || [];
-    if (!items.length) return "-";
-    const visible = items.slice(0, 2).map((item) => `${item.name} × ${item.quantity}`);
-    return items.length > 2 ? `${visible.join("، ")} +${items.length - 2}` : visible.join("، ");
-  };
 
   const storeOrderItemTotal = (item: api.StoreOrderItem) => {
     if (typeof item.total_price === "number" && Number.isFinite(item.total_price)) return item.total_price;
@@ -270,6 +323,70 @@ export default function StoreOrdersPage({
     return types.map(storeOrderTypeLabel).join("، ");
   };
 
+  const remoteStatusLabel = (order: api.StoreOrder) => {
+    const matched = availableStatuses.find((status) =>
+      status.slug === order.remote_status_slug ||
+      status.slug === order.status ||
+      String(status.id) === String(order.remote_status_id || ""),
+    );
+    return {
+      name: order.remote_status_name || matched?.name || order.status || order.external_status || "-",
+      slug: order.remote_status_slug || matched?.slug || "",
+    };
+  };
+
+  const openSallaStatusForm = (order: api.StoreOrder) => {
+    if (sallaStatuses.loading) {
+      notify("جاري تحميل حالات الطلب من سلة…");
+      return;
+    }
+    if (sallaStatuses.error) {
+      notify("تعذر تحميل حالات سلة. أعد المحاولة ثم افتح الطلب.", false);
+      void sallaStatuses.refresh();
+      return;
+    }
+    if (!availableStatuses.length) {
+      notify("لم ترجع سلة أي حالات نشطة يمكن اختيارها.", false);
+      return;
+    }
+
+    setModal({
+      title: `تحديث حالة الطلب ${order.order_number || order.order_id} في سلة`,
+      content: (
+        <StoreOrderStatusForm
+          order={order}
+          statuses={availableStatuses}
+          onCancel={() => setModal(null)}
+          onSaved={async (message) => {
+            notify(message);
+            setModal(null);
+            await Promise.all([orders.refresh(), refreshStats()]);
+          }}
+          onError={(message) => notify(message, false)}
+        />
+      ),
+    });
+  };
+
+  const openSallaEditForm = (order: api.StoreOrder) => {
+    setModal({
+      title: `تعديل بيانات الطلب ${order.order_number || order.order_id} في سلة`,
+      wide: true,
+      content: (
+        <StoreOrderEditForm
+          order={order}
+          onCancel={() => setModal(null)}
+          onSaved={async (message) => {
+            notify(message);
+            setModal(null);
+            await Promise.all([orders.refresh(), refreshStats()]);
+          }}
+          onError={(message) => notify(message, false)}
+        />
+      ),
+    });
+  };
+
   return (
     <>
       <PageHeader
@@ -285,24 +402,24 @@ export default function StoreOrdersPage({
 
       <section className="ops-strip">
         <article className="ops-card">
-          <strong>{summary.total}</strong>
-          <span>كل الطلبات</span>
+          <strong>{formatCount(summary.total)}</strong>
+          <span>نتيجة مطابقة</span>
         </article>
         <article className="ops-card danger">
-          <strong>{summary.needsReview}</strong>
-          <span>تحتاج مراجعة</span>
+          <strong>{formatCount(summary.needsReview)}</strong>
+          <span>تحتاج مراجعة في الصفحة</span>
         </article>
         <article className="ops-card warn">
-          <strong>{summary.awaitingSchedule}</strong>
-          <span>بانتظار الجدولة</span>
+          <strong>{formatCount(summary.visible)}</strong>
+          <span>معروضة في الصفحة</span>
         </article>
         <article className="ops-card success">
-          <strong>{summary.booked}</strong>
-          <span>محولة لفني</span>
+          <strong>{formatCount(summary.currentPage)} / {formatCount(summary.totalPages)}</strong>
+          <span>رقم الصفحة</span>
         </article>
         <article className="ops-card">
-          <strong>{summary.today}</strong>
-          <span>وصلت اليوم</span>
+          <strong>{formatCount(summary.today)}</strong>
+          <span>وصلت اليوم في الصفحة</span>
         </article>
       </section>
 
@@ -310,59 +427,175 @@ export default function StoreOrdersPage({
         <div className="store-board-toolbar">
           <div className="toolbar compact">
             <Search size={16} />
-            <TextInput placeholder="ابحث برقم الطلب، العميل، الجوال، المنتج أو SKU" value={search} onChange={(event) => setSearch(event.target.value)} />
+            <TextInput
+              aria-label="البحث في طلبات المتجر"
+              autoComplete="off"
+              name="store_order_search"
+              placeholder="ابحث برقم الطلب، العميل، الجوال، المنتج أو SKU…"
+              value={searchInput}
+              onChange={(event) => {
+                setSearchInput(event.target.value);
+                setPage(1);
+              }}
+            />
           </div>
-          <button type="button" className={`btn ${showFilters ? "primary" : "muted"}`} onClick={() => setShowFilters(!showFilters)}>
+          <button
+            type="button"
+            className={`btn ${showFilters ? "primary" : "muted"}`}
+            aria-expanded={showFilters}
+            onClick={() => setShowFilters(!showFilters)}
+          >
             <Filter size={14} /> فلاتر متقدمة
           </button>
           <label className="toggle-control">
             <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
-            <span>تحديث تلقائي</span>
+            <span>تحقق احتياطي كل 60 ثانية</span>
           </label>
-          <span className="sync-meta">{lastUpdated ? `آخر تحديث: ${fmtDate(lastUpdated)}` : "بانتظار أول تحديث"}</span>
+          <span className="sync-meta" aria-live="polite">{lastUpdated ? `آخر تحديث: ${fmtDate(lastUpdated)}` : "بانتظار أول تحديث"}</span>
         </div>
 
         {showFilters && (
           <div className="store-filters-bar">
             <div className="filter-group">
-              <label>المدينة</label>
-              {availableCities.length > 0 ? (
-                <select className="input" value={cityFilter} onChange={(e) => setCityFilter(e.target.value)}>
-                  <option value="">كل المدن</option>
-                  {availableCities.map((city) => (
-                    <option key={city} value={city}>{city}</option>
+              <label>
+                <span>حالة الطلب في سلة</span>
+                <select
+                  className="input"
+                  name="salla_status_filter"
+                  value={statusFilter}
+                  onChange={(event) => {
+                    setStatusFilter(event.target.value);
+                    setPage(1);
+                  }}
+                >
+                  <option value="">كل حالات سلة</option>
+                  {availableStatuses.map((status) => (
+                    <option key={String(status.id)} value={status.slug}>{status.name}</option>
                   ))}
                 </select>
-              ) : (
-                <TextInput placeholder="اكتب اسم المدينة" value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} />
-              )}
+              </label>
             </div>
             <div className="filter-group">
-              <label>المنتج</label>
-              <TextInput placeholder="اسم أو SKU المنتج" value={productFilter} onChange={(e) => setProductFilter(e.target.value)} />
+              <Field label="المدينة">
+                <TextInput
+                  name="store_order_city_filter"
+                  autoComplete="off"
+                  placeholder="مثال: الرياض…"
+                  value={cityInput}
+                  onChange={(event) => {
+                    setCityInput(event.target.value);
+                    setPage(1);
+                  }}
+                />
+              </Field>
             </div>
             <div className="filter-group">
-              <label>قيمة الطلب (من)</label>
-              <TextInput placeholder="الحد الأدنى" type="number" value={minValue} onChange={(e) => setMinValue(e.target.value)} />
+              <Field label="المنتج أو رمز SKU">
+                <TextInput
+                  name="store_order_product_filter"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="اسم المنتج أو الرمز…"
+                  value={productInput}
+                  onChange={(event) => {
+                    setProductInput(event.target.value);
+                    setPage(1);
+                  }}
+                />
+              </Field>
             </div>
             <div className="filter-group">
-              <label>قيمة الطلب (إلى)</label>
-              <TextInput placeholder="الحد الأعلى" type="number" value={maxValue} onChange={(e) => setMaxValue(e.target.value)} />
+              <Field label="الحد الأدنى للقيمة">
+                <TextInput
+                  type="number"
+                  inputMode="decimal"
+                  name="store_order_min_total_filter"
+                  autoComplete="off"
+                  min="0"
+                  step="0.01"
+                  placeholder="مثال: 100…"
+                  value={minTotalInput}
+                  onChange={(event) => {
+                    setMinTotalInput(event.target.value);
+                    setPage(1);
+                  }}
+                />
+              </Field>
             </div>
-            {(cityFilter || productFilter || minValue || maxValue) && (
+            <div className="filter-group">
+              <Field label="الحد الأعلى للقيمة">
+                <TextInput
+                  type="number"
+                  inputMode="decimal"
+                  name="store_order_max_total_filter"
+                  autoComplete="off"
+                  min="0"
+                  step="0.01"
+                  placeholder="مثال: 1,000…"
+                  value={maxTotalInput}
+                  onChange={(event) => {
+                    setMaxTotalInput(event.target.value);
+                    setPage(1);
+                  }}
+                />
+              </Field>
+            </div>
+            <div className="filter-group">
+              <label>
+                <span>عدد الطلبات في الصفحة</span>
+                <select
+                  className="input"
+                  name="store_order_page_size"
+                  value={pageSize}
+                  onChange={(event) => {
+                    setPageSize(Number(event.target.value));
+                    setPage(1);
+                  }}
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </label>
+            </div>
+            {(statusFilter || cityInput || productInput || minTotalInput || maxTotalInput || pageSize !== 50) && (
               <div className="filter-group filter-actions">
-                <Button tone="muted" onClick={() => { setCityFilter(""); setProductFilter(""); setMinValue(""); setMaxValue(""); }}>
+                <Button tone="muted" onClick={() => {
+                  setStatusFilter("");
+                  setCityInput("");
+                  setCity("");
+                  setProductInput("");
+                  setProduct("");
+                  setMinTotalInput("");
+                  setMinTotal(undefined);
+                  setMaxTotalInput("");
+                  setMaxTotal(undefined);
+                  setPageSize(50);
+                  setPage(1);
+                }}>
                   مسح الفلاتر
                 </Button>
+              </div>
+            )}
+            {totalRangeError && <p className="inline-error" role="alert" aria-live="polite">{totalRangeError}</p>}
+            {sallaStatuses.error && (
+              <div className="filter-group filter-actions">
+                <Button tone="muted" onClick={() => sallaStatuses.refresh()}>إعادة تحميل حالات سلة</Button>
               </div>
             )}
           </div>
         )}
 
         <div className="tabs table-tabs">
-          {tabs.map(([value, label, count]) => (
-            <button key={value} type="button" className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>
-              {label} <b>{count}</b>
+          {tabs.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={filter === value ? "active" : ""}
+              aria-pressed={filter === value}
+              onClick={() => { setFilter(value); setPage(1); }}
+            >
+              {label} {filter === value && <b>{formatCount(summary.total)}</b>}
             </button>
           ))}
         </div>
@@ -386,9 +619,9 @@ export default function StoreOrdersPage({
                 </tr>
               </thead>
               <tbody>
-                {filteredOrders.map((order) => {
+                {allOrders.map((order) => {
                   const needsReview = order.journey_status === "needs_review" || order.items?.some((item) => item.status === "needs_review");
-                  const sallaStatus = order.status || "-";
+                  const sallaStatus = remoteStatusLabel(order);
                   const total = orderTotal(order);
                   return (
                     <tr key={order.id} className={needsReview ? "row-needs-review" : ""}>
@@ -413,11 +646,26 @@ export default function StoreOrdersPage({
                         </div>
                       </td>
                       <td><strong className="money-val">{moneyLabel(total)}</strong></td>
-                      <td><span className="salla-status">{sallaStatus}</span></td>
+                      <td>
+                        <div className="order-customer-cell">
+                          <span className="salla-status">{sallaStatus.name}</span>
+                          {sallaStatus.slug && <small translate="no">{sallaStatus.slug}</small>}
+                        </div>
+                      </td>
                       <td>{orderTypeLabel(order)}</td>
                       <td>{order.scheduled_date ? `${fmtDate(order.scheduled_date)} ${order.scheduled_time || ""}` : "غير مجدول"}</td>
                       <td>
                         <div className="table-actions">
+                          <Button
+                            tone="muted"
+                            disabled={sallaStatuses.loading}
+                            onClick={() => openSallaStatusForm(order)}
+                          >
+                            <RefreshCcw size={16} /> حالة سلة
+                          </Button>
+                          <Button tone="muted" onClick={() => openSallaEditForm(order)}>
+                            <PencilLine size={16} /> تعديل بيانات سلة
+                          </Button>
                           <Button tone="muted" onClick={() => openWorkflowForm(order)}><UserRoundCog size={16} /> إدارة</Button>
                           {needsReview && <Button tone="success" onClick={() => openLinkForm(order)}><Wrench size={16} /> ربط</Button>}
                         </div>
@@ -427,11 +675,822 @@ export default function StoreOrdersPage({
                 })}
               </tbody>
             </table>
-            {!filteredOrders.length && <Empty title="لا توجد طلبات مطابقة لهذا البحث أو الفلتر" />}
+            {!allOrders.length && <Empty title="لا توجد طلبات مطابقة لهذا البحث أو الفلتر" />}
+            {pageData?.capped && (
+              <div className="inline-error" role="status">
+                نتائج التصفح محدودة بأول 10,000 طلب متاح. استخدم البحث أو الفلاتر للوصول إلى الطلب المطلوب بدقة.
+              </div>
+            )}
+            {pageData && pageData.totalPages > 1 && (
+              <nav className="form-actions" aria-label="التنقل بين صفحات طلبات المتجر">
+                <Button
+                  tone="muted"
+                  disabled={!pageData.hasPrevious || orders.loading}
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                >
+                  الصفحة السابقة
+                </Button>
+                <span className="sync-meta" aria-live="polite">
+                  الصفحة {formatCount(pageData.page)} من {formatCount(pageData.totalPages)} · {formatCount(pageData.total)} طلب
+                </span>
+                <Button
+                  tone="muted"
+                  disabled={!pageData.hasNext || orders.loading}
+                  onClick={() => setPage((current) => Math.min(pageData.totalPages, current + 1))}
+                >
+                  الصفحة التالية
+                </Button>
+              </nav>
+            )}
           </div>
         )}
       </section>
     </>
+  );
+}
+
+type SallaShippingForm = {
+  deliveryMethod: string;
+  branchId: string;
+  courierId: string;
+  country: string;
+  city: string;
+  addressLine: string;
+  streetNumber: string;
+  block: string;
+  shortAddress: string;
+  buildingNumber: string;
+  additionalNumber: string;
+  postalCode: string;
+  latitude: string;
+  longitude: string;
+};
+
+const emptySallaShippingForm = (): SallaShippingForm => ({
+  deliveryMethod: "",
+  branchId: "",
+  courierId: "",
+  country: "",
+  city: "",
+  addressLine: "",
+  streetNumber: "",
+  block: "",
+  shortAddress: "",
+  buildingNumber: "",
+  additionalNumber: "",
+  postalCode: "",
+  latitude: "",
+  longitude: "",
+});
+
+function StoreOrderEditForm({
+  order,
+  onSaved,
+  onError,
+  onCancel,
+}: {
+  order: api.StoreOrder;
+  onSaved: (message: string) => Promise<void>;
+  onError: (message: string) => void;
+  onCancel: () => void;
+}) {
+  const [editCustomer, setEditCustomer] = useState(false);
+  const [customer, setCustomer] = useState({ id: "", name: "", mobile: "", email: "" });
+  const [editReceiver, setEditReceiver] = useState(false);
+  const [receiver, setReceiver] = useState({
+    name: "",
+    countryCode: "",
+    phone: "",
+    email: "",
+    notify: false,
+  });
+  const [couponCode, setCouponCode] = useState("");
+  const [employeeIds, setEmployeeIds] = useState("");
+  const [editPayment, setEditPayment] = useState(false);
+  const [payment, setPayment] = useState({
+    status: "",
+    method: "",
+    storeBankId: "",
+    receiptImagePath: "",
+    acceptedMethods: "",
+    cashAmount: "",
+    cashCurrency: "SAR",
+  });
+  const [editShipping, setEditShipping] = useState(false);
+  const [shipping, setShipping] = useState<SallaShippingForm>(emptySallaShippingForm);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const errorRef = useRef<HTMLParagraphElement>(null);
+
+  const clearConfirmation = () => {
+    setAcknowledged(false);
+    setError("");
+  };
+
+  const updateReceiver = (key: keyof typeof receiver, value: string | boolean) => {
+    setReceiver((current) => ({ ...current, [key]: value }));
+    clearConfirmation();
+  };
+
+  const updateCustomer = (key: keyof typeof customer, value: string) => {
+    setCustomer((current) => ({ ...current, [key]: value }));
+    clearConfirmation();
+  };
+
+  const updatePayment = (key: keyof typeof payment, value: string) => {
+    setPayment((current) => ({ ...current, [key]: value }));
+    clearConfirmation();
+  };
+
+  const updateShipping = (key: keyof SallaShippingForm, value: string) => {
+    setShipping((current) => ({ ...current, [key]: value }));
+    clearConfirmation();
+  };
+
+  const fail = (message: string) => {
+    setError(message);
+    window.requestAnimationFrame(() => errorRef.current?.focus());
+  };
+
+  const parseOptionalPositiveId = (raw: string, label: string) => {
+    if (!raw.trim()) return undefined;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`${label} يجب أن يكون رقمًا صحيحًا موجبًا.`);
+    }
+    return value;
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError("");
+
+    const payload: api.SallaOrderUpdatePayload = {};
+
+    if (editCustomer) {
+      try {
+        const customerId = parseOptionalPositiveId(customer.id, "معرّف العميل في سلة");
+        const values = {
+          ...(customerId === undefined ? {} : { id: customerId }),
+          ...(customer.name.trim() ? { name: customer.name.trim() } : {}),
+          ...(customer.mobile.trim() ? { mobile: customer.mobile.trim() } : {}),
+          ...(customer.email.trim() ? { email: customer.email.trim() } : {}),
+        };
+        if (!Object.keys(values).length) throw new Error("أدخل معلومة واحدة على الأقل للعميل.");
+        if (values.mobile && !/^\+?[0-9]{5,30}$/.test(values.mobile)) {
+          throw new Error("جوال العميل يجب أن يحتوي أرقامًا فقط مع علامة + اختيارية في البداية.");
+        }
+        if (values.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email)) {
+          throw new Error("أدخل بريدًا إلكترونيًا صحيحًا للعميل.");
+        }
+        payload.customer = values;
+      } catch (validationError) {
+        fail(validationError instanceof Error ? validationError.message : "تحقق من بيانات العميل.");
+        return;
+      }
+    }
+
+    if (editReceiver) {
+      const receiverValues = {
+        name: receiver.name.trim(),
+        country_code: receiver.countryCode.trim(),
+        phone: receiver.phone.trim(),
+        email: receiver.email.trim(),
+      };
+      if (!Object.values(receiverValues).some(Boolean)) {
+        fail("أدخل معلومة واحدة على الأقل للمستلم، أو أوقف قسم تعديل المستلم.");
+        return;
+      }
+      if (receiverValues.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(receiverValues.email)) {
+        fail("أدخل بريدًا إلكترونيًا صحيحًا للمستلم.");
+        return;
+      }
+      payload.receiver = {
+        ...Object.fromEntries(Object.entries(receiverValues).filter(([, value]) => value)) as api.SallaOrderReceiverUpdate,
+        notify: receiver.notify,
+      };
+    }
+
+    if (couponCode.trim()) payload.coupon_code = couponCode.trim();
+
+    if (employeeIds.trim()) {
+      const tokens = employeeIds.split(/[,،\s]+/).filter(Boolean);
+      const ids = tokens.map(Number);
+      if (!tokens.length || ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+        fail("أدخل أرقام موظفين صحيحة وموجبة، مفصولة بفواصل.");
+        return;
+      }
+      payload.employees = Array.from(new Set(ids));
+    }
+
+    if (editPayment) {
+      try {
+        const bankId = parseOptionalPositiveId(payment.storeBankId, "معرّف حساب البنك في سلة");
+        const acceptedMethods = payment.acceptedMethods.split(/[,،\s]+/).map((value) => value.trim()).filter(Boolean);
+        const paymentPayload: NonNullable<api.SallaOrderUpdatePayload["payment"]> = {
+          ...(payment.status.trim() ? { status: payment.status.trim() } : {}),
+          ...(payment.method.trim() ? { method: payment.method.trim() } : {}),
+          ...(bankId === undefined ? {} : { store_bank_id: bankId }),
+          ...(payment.receiptImagePath.trim() ? { receipt_image_path: payment.receiptImagePath.trim() } : {}),
+          ...(acceptedMethods.length ? { accepted_methods: Array.from(new Set(acceptedMethods)) } : {}),
+        };
+        if (payment.cashAmount.trim() || payment.cashCurrency.trim() !== "SAR") {
+          const amount = Number(payment.cashAmount);
+          if (!Number.isFinite(amount) || amount < 0) throw new Error("مبلغ الدفع عند الاستلام يجب أن يكون صفرًا أو أكبر.");
+          if (!/^[A-Za-z]{3,12}$/.test(payment.cashCurrency.trim())) throw new Error("عملة الدفع عند الاستلام غير صحيحة.");
+          paymentPayload.cash_on_delivery = { amount, currency: payment.cashCurrency.trim().toUpperCase() };
+        }
+        if (!Object.keys(paymentPayload).length) throw new Error("أدخل معلومة دفع واحدة على الأقل.");
+        payload.payment = paymentPayload;
+      } catch (validationError) {
+        fail(validationError instanceof Error ? validationError.message : "تحقق من بيانات الدفع.");
+        return;
+      }
+    }
+
+    if (editShipping) {
+      const requiredAddressFields = [
+        ["الدولة", shipping.country],
+        ["المدينة", shipping.city],
+        ["سطر العنوان", shipping.addressLine],
+        ["رقم الشارع", shipping.streetNumber],
+        ["الحي أو المربع", shipping.block],
+        ["العنوان المختصر", shipping.shortAddress],
+        ["رقم المبنى", shipping.buildingNumber],
+        ["الرقم الإضافي", shipping.additionalNumber],
+        ["الرمز البريدي", shipping.postalCode],
+        ["خط العرض", shipping.latitude],
+        ["خط الطول", shipping.longitude],
+      ] as const;
+      const missing = requiredAddressFields.filter(([, value]) => !value.trim()).map(([label]) => label);
+      if (missing.length) {
+        fail(`أكمل جميع حقول العنوان الوطني قبل الإرسال: ${missing.join("، ")}.`);
+        return;
+      }
+
+      const latitude = Number(shipping.latitude);
+      const longitude = Number(shipping.longitude);
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+        fail("خط العرض يجب أن يكون رقمًا بين -90 و90.");
+        return;
+      }
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+        fail("خط الطول يجب أن يكون رقمًا بين -180 و180.");
+        return;
+      }
+
+      try {
+        if (shipping.deliveryMethod.trim()) payload.delivery_method = shipping.deliveryMethod.trim();
+        payload.branch_id = parseOptionalPositiveId(shipping.branchId, "رقم الفرع");
+        payload.courier_id = parseOptionalPositiveId(shipping.courierId, "رقم شركة الشحن");
+        const countryId = parseOptionalPositiveId(shipping.country, "معرّف الدولة في سلة");
+        const cityId = parseOptionalPositiveId(shipping.city, "معرّف المدينة في سلة");
+        if (countryId === undefined || cityId === undefined) {
+          throw new Error("معرّف الدولة ومعرّف المدينة في سلة مطلوبان.");
+        }
+        payload.ship_to = {
+          country: countryId,
+          city: cityId,
+          address_line: shipping.addressLine.trim(),
+          street_number: shipping.streetNumber.trim(),
+          block: shipping.block.trim(),
+          short_address: shipping.shortAddress.trim(),
+          building_number: shipping.buildingNumber.trim(),
+          additional_number: shipping.additionalNumber.trim(),
+          postal_code: shipping.postalCode.trim(),
+          geo_coordinates: { lat: latitude, lng: longitude },
+        };
+      } catch (validationError) {
+        fail(validationError instanceof Error ? validationError.message : "تحقق من أرقام الشحن.");
+        return;
+      }
+
+      if (payload.branch_id === undefined) delete payload.branch_id;
+      if (payload.courier_id === undefined) delete payload.courier_id;
+    }
+
+    if (!Object.keys(payload).length) {
+      fail("أدخل تعديلًا واحدًا على الأقل قبل الإرسال إلى سلة.");
+      return;
+    }
+    if (!acknowledged) {
+      fail("أكد فهم أثر التعديل قبل إرساله إلى سلة.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const result = await api.updateSallaOrder(order.id, payload);
+      await onSaved(result.changed === false
+        ? "البيانات مطابقة مسبقًا؛ تم تحديث نسخة الطلب في البرنامج."
+        : "تم تعديل بيانات الطلب في سلة وتحديث نسخة البرنامج.");
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "تعذر تعديل بيانات الطلب في سلة.";
+      fail(`${message} تحقق من حالة الطلب وقيود سلة ثم أعد المحاولة.`);
+      onError(message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="form" aria-busy={saving} noValidate onSubmit={submit}>
+      <div className="cards-grid">
+        <article className="mini-card">
+          <strong>الطلب</strong>
+          <span>{order.order_number || order.order_id}</span>
+          <p>{order.customer_name || "عميل سلة"}</p>
+        </article>
+        <article className="mini-card">
+          <strong>الحالة الحالية</strong>
+          <span>{order.remote_status_name || order.status || "غير معروفة"}</span>
+          <p>يمكن لسلة رفض بعض التعديلات بحسب حالة الطلب.</p>
+        </article>
+      </div>
+
+      <section aria-labelledby="salla-customer-heading">
+        <h3 id="salla-customer-heading">حساب العميل</h3>
+        <label className="field checkbox-field">
+          <span>تعديل حساب العميل المرتبط بالطلب في سلة</span>
+          <input
+            type="checkbox"
+            name="edit_salla_customer"
+            checked={editCustomer}
+            disabled={saving}
+            onChange={(event) => {
+              setEditCustomer(event.target.checked);
+              clearConfirmation();
+            }}
+          />
+        </label>
+        {editCustomer && (
+          <>
+            <p className="sync-meta">تسمح سلة بهذا التعديل للضيف أو عندما لا يكون حساب عميل ثابت مرتبطًا بالطلب.</p>
+            <div className="form-grid">
+              <Field label="معرّف العميل في سلة">
+                <TextInput type="number" inputMode="numeric" min="1" step="1" name="salla_customer_id" autoComplete="off" placeholder="رقم العميل…" value={customer.id} disabled={saving} onChange={(event) => updateCustomer("id", event.target.value)} />
+              </Field>
+              <Field label="اسم العميل">
+                <TextInput name="salla_customer_name" autoComplete="off" placeholder="اسم العميل…" value={customer.name} disabled={saving} onChange={(event) => updateCustomer("name", event.target.value)} />
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field label="جوال العميل">
+                <TextInput type="tel" inputMode="tel" name="salla_customer_mobile" autoComplete="off" placeholder="05xxxxxxxx…" value={customer.mobile} disabled={saving} onChange={(event) => updateCustomer("mobile", event.target.value)} />
+              </Field>
+              <Field label="بريد العميل">
+                <TextInput type="email" name="salla_customer_email" autoComplete="off" spellCheck={false} placeholder="customer@example.com…" value={customer.email} disabled={saving} onChange={(event) => updateCustomer("email", event.target.value)} />
+              </Field>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section aria-labelledby="salla-receiver-heading">
+        <h3 id="salla-receiver-heading">بيانات المستلم</h3>
+        <label className="field checkbox-field">
+          <span>تعديل بيانات المستلم في سلة</span>
+          <input
+            type="checkbox"
+            name="edit_salla_receiver"
+            checked={editReceiver}
+            disabled={saving}
+            onChange={(event) => {
+              setEditReceiver(event.target.checked);
+              clearConfirmation();
+            }}
+          />
+        </label>
+        {editReceiver && (
+          <>
+            <div className="form-grid">
+              <Field label="اسم المستلم">
+                <TextInput
+                  name="salla_receiver_name"
+                  autoComplete="off"
+                  placeholder="مثال: محمد أحمد…"
+                  value={receiver.name}
+                  disabled={saving}
+                  onChange={(event) => updateReceiver("name", event.target.value)}
+                />
+              </Field>
+              <Field label="رمز الدولة">
+                <TextInput
+                  name="salla_receiver_country_code"
+                  autoComplete="off"
+                  inputMode="tel"
+                  placeholder="مثال: SA…"
+                  value={receiver.countryCode}
+                  disabled={saving}
+                  onChange={(event) => updateReceiver("countryCode", event.target.value)}
+                />
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field label="جوال المستلم">
+                <TextInput
+                  type="tel"
+                  name="salla_receiver_phone"
+                  autoComplete="off"
+                  inputMode="tel"
+                  placeholder="مثال: 05xxxxxxxx…"
+                  value={receiver.phone}
+                  disabled={saving}
+                  onChange={(event) => updateReceiver("phone", event.target.value)}
+                />
+              </Field>
+              <Field label="بريد المستلم">
+                <TextInput
+                  type="email"
+                  name="salla_receiver_email"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="مثال: customer@example.com…"
+                  value={receiver.email}
+                  disabled={saving}
+                  onChange={(event) => updateReceiver("email", event.target.value)}
+                />
+              </Field>
+            </div>
+            <label className="field checkbox-field">
+              <span>السماح لسلة بإشعار المستلم بهذا التعديل</span>
+              <input
+                type="checkbox"
+                name="salla_receiver_notify"
+                checked={receiver.notify}
+                disabled={saving}
+                onChange={(event) => updateReceiver("notify", event.target.checked)}
+              />
+            </label>
+          </>
+        )}
+      </section>
+
+      <section aria-labelledby="salla-assignment-heading">
+        <h3 id="salla-assignment-heading">الكوبون والموظفون</h3>
+        <div className="form-grid">
+          <Field label="رمز الكوبون">
+            <TextInput
+              name="salla_coupon_code"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="اتركه فارغًا لعدم التعديل…"
+              value={couponCode}
+              disabled={saving}
+              onChange={(event) => {
+                setCouponCode(event.target.value);
+                clearConfirmation();
+              }}
+            />
+          </Field>
+          <Field label="أرقام الموظفين">
+            <TextInput
+              name="salla_employee_ids"
+              autoComplete="off"
+              inputMode="numeric"
+              placeholder="مثال: 12, 27, 31…"
+              value={employeeIds}
+              disabled={saving}
+              onChange={(event) => {
+                setEmployeeIds(event.target.value);
+                clearConfirmation();
+              }}
+            />
+          </Field>
+        </div>
+      </section>
+
+      <section aria-labelledby="salla-payment-heading">
+        <h3 id="salla-payment-heading">بيانات الدفع</h3>
+        <label className="field checkbox-field">
+          <span>تعديل بيانات الدفع في سلة</span>
+          <input
+            type="checkbox"
+            name="edit_salla_payment"
+            checked={editPayment}
+            disabled={saving}
+            onChange={(event) => {
+              setEditPayment(event.target.checked);
+              clearConfirmation();
+            }}
+          />
+        </label>
+        {editPayment && (
+          <>
+            <p className="sync-meta">تسمح سلة بتغيير الدفع فقط ما دام الدفع قيد الانتظار. استخدم القيم والمعرّفات المعتمدة في متجرك.</p>
+            <div className="form-grid">
+              <Field label="حالة الدفع">
+                <TextInput name="salla_payment_status" autoComplete="off" placeholder="مثال: pending…" value={payment.status} disabled={saving} onChange={(event) => updatePayment("status", event.target.value)} />
+              </Field>
+              <Field label="طريقة الدفع">
+                <TextInput name="salla_payment_method" autoComplete="off" placeholder="طريقة الدفع في سلة…" value={payment.method} disabled={saving} onChange={(event) => updatePayment("method", event.target.value)} />
+              </Field>
+              <Field label="معرّف حساب البنك في سلة">
+                <TextInput type="number" inputMode="numeric" min="1" step="1" name="salla_store_bank_id" autoComplete="off" placeholder="رقم الحساب…" value={payment.storeBankId} disabled={saving} onChange={(event) => updatePayment("storeBankId", event.target.value)} />
+              </Field>
+            </div>
+            <Field label="مسار صورة إيصال الدفع">
+              <TextInput name="salla_receipt_image_path" autoComplete="off" spellCheck={false} placeholder="المسار المعتمد لدى سلة…" value={payment.receiptImagePath} disabled={saving} onChange={(event) => updatePayment("receiptImagePath", event.target.value)} />
+            </Field>
+            <Field label="طرق الدفع المقبولة">
+              <TextInput name="salla_accepted_methods" autoComplete="off" placeholder="مفصولة بفواصل…" value={payment.acceptedMethods} disabled={saving} onChange={(event) => updatePayment("acceptedMethods", event.target.value)} />
+            </Field>
+            <div className="form-grid">
+              <Field label="مبلغ الدفع عند الاستلام">
+                <TextInput type="number" inputMode="decimal" min="0" step="any" name="salla_cod_amount" autoComplete="off" placeholder="0.00…" value={payment.cashAmount} disabled={saving} onChange={(event) => updatePayment("cashAmount", event.target.value)} />
+              </Field>
+              <Field label="عملة الدفع عند الاستلام">
+                <TextInput name="salla_cod_currency" autoComplete="off" spellCheck={false} placeholder="SAR" value={payment.cashCurrency} disabled={saving} onChange={(event) => updatePayment("cashCurrency", event.target.value)} />
+              </Field>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section aria-labelledby="salla-shipping-heading">
+        <h3 id="salla-shipping-heading">الشحن والعنوان الوطني</h3>
+        <label className="field checkbox-field">
+          <span>تعديل بيانات الشحن والعنوان الوطني في سلة</span>
+          <input
+            type="checkbox"
+            name="edit_salla_shipping"
+            checked={editShipping}
+            disabled={saving}
+            onChange={(event) => {
+              setEditShipping(event.target.checked);
+              clearConfirmation();
+            }}
+          />
+        </label>
+        {editShipping && (
+          <>
+            <p className="sync-meta">عند تفعيل هذا القسم يجب تعبئة جميع حقول العنوان الوطني. طريقة التوصيل والفرع وشركة الشحن اختيارية.</p>
+            <div className="form-grid">
+              <Field label="طريقة التوصيل">
+                <TextInput
+                  name="salla_delivery_method"
+                  autoComplete="off"
+                  placeholder="مثال: courier…"
+                  value={shipping.deliveryMethod}
+                  disabled={saving}
+                  onChange={(event) => updateShipping("deliveryMethod", event.target.value)}
+                />
+              </Field>
+              <Field label="رقم الفرع">
+                <TextInput
+                  type="number"
+                  inputMode="numeric"
+                  name="salla_branch_id"
+                  autoComplete="off"
+                  min="1"
+                  step="1"
+                  placeholder="رقم موجب…"
+                  value={shipping.branchId}
+                  disabled={saving}
+                  onChange={(event) => updateShipping("branchId", event.target.value)}
+                />
+              </Field>
+              <Field label="رقم شركة الشحن">
+                <TextInput
+                  type="number"
+                  inputMode="numeric"
+                  name="salla_courier_id"
+                  autoComplete="off"
+                  min="1"
+                  step="1"
+                  placeholder="رقم موجب…"
+                  value={shipping.courierId}
+                  disabled={saving}
+                  onChange={(event) => updateShipping("courierId", event.target.value)}
+                />
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field label="معرّف الدولة في سلة *">
+                <TextInput type="number" inputMode="numeric" min="1" step="1" name="salla_ship_country" autoComplete="off" placeholder="رقم الدولة في سلة…" value={shipping.country} disabled={saving} aria-required="true" onChange={(event) => updateShipping("country", event.target.value)} />
+              </Field>
+              <Field label="معرّف المدينة في سلة *">
+                <TextInput type="number" inputMode="numeric" min="1" step="1" name="salla_ship_city" autoComplete="off" placeholder="رقم المدينة في سلة…" value={shipping.city} disabled={saving} aria-required="true" onChange={(event) => updateShipping("city", event.target.value)} />
+              </Field>
+            </div>
+            <Field label="سطر العنوان *">
+              <TextInput name="salla_ship_address_line" autoComplete="off" placeholder="اسم الشارع ووصف الموقع…" value={shipping.addressLine} disabled={saving} aria-required="true" onChange={(event) => updateShipping("addressLine", event.target.value)} />
+            </Field>
+            <div className="form-grid">
+              <Field label="رقم الشارع *">
+                <TextInput name="salla_ship_street_number" autoComplete="off" inputMode="numeric" placeholder="مثال: 25…" value={shipping.streetNumber} disabled={saving} aria-required="true" onChange={(event) => updateShipping("streetNumber", event.target.value)} />
+              </Field>
+              <Field label="الحي أو المربع *">
+                <TextInput name="salla_ship_block" autoComplete="off" placeholder="مثال: حي العليا…" value={shipping.block} disabled={saving} aria-required="true" onChange={(event) => updateShipping("block", event.target.value)} />
+              </Field>
+              <Field label="العنوان المختصر *">
+                <TextInput name="salla_ship_short_address" autoComplete="off" spellCheck={false} placeholder="مثال: RRAA1234…" value={shipping.shortAddress} disabled={saving} aria-required="true" onChange={(event) => updateShipping("shortAddress", event.target.value)} />
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field label="رقم المبنى *">
+                <TextInput name="salla_ship_building_number" autoComplete="off" inputMode="numeric" placeholder="مثال: 1234…" value={shipping.buildingNumber} disabled={saving} aria-required="true" onChange={(event) => updateShipping("buildingNumber", event.target.value)} />
+              </Field>
+              <Field label="الرقم الإضافي *">
+                <TextInput name="salla_ship_additional_number" autoComplete="off" inputMode="numeric" placeholder="مثال: 5678…" value={shipping.additionalNumber} disabled={saving} aria-required="true" onChange={(event) => updateShipping("additionalNumber", event.target.value)} />
+              </Field>
+              <Field label="الرمز البريدي *">
+                <TextInput name="salla_ship_postal_code" autoComplete="off" inputMode="numeric" placeholder="مثال: 12345…" value={shipping.postalCode} disabled={saving} aria-required="true" onChange={(event) => updateShipping("postalCode", event.target.value)} />
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field label="خط العرض *">
+                <TextInput type="number" inputMode="decimal" name="salla_ship_latitude" autoComplete="off" min="-90" max="90" step="any" placeholder="مثال: 24.7136…" value={shipping.latitude} disabled={saving} aria-required="true" onChange={(event) => updateShipping("latitude", event.target.value)} />
+              </Field>
+              <Field label="خط الطول *">
+                <TextInput type="number" inputMode="decimal" name="salla_ship_longitude" autoComplete="off" min="-180" max="180" step="any" placeholder="مثال: 46.6753…" value={shipping.longitude} disabled={saving} aria-required="true" onChange={(event) => updateShipping("longitude", event.target.value)} />
+              </Field>
+            </div>
+          </>
+        )}
+      </section>
+
+      <div className="inline-error" role="note">
+        هذا الإجراء يرسل التعديل مباشرة إلى سلة. قد يتأثر حساب العميل أو المستلم أو الدفع أو الشحن أو رسائل العميل، وقد ترفض سلة التعديل بحسب حالة الطلب.
+      </div>
+      <label className="field checkbox-field">
+        <span>تحققت من البيانات وأفهم أن التعديل سيؤثر في طلب سلة الحقيقي</span>
+        <input
+          type="checkbox"
+          name="acknowledge_salla_order_edit"
+          checked={acknowledged}
+          disabled={saving}
+          onChange={(event) => {
+            setAcknowledged(event.target.checked);
+            setError("");
+          }}
+        />
+      </label>
+
+      {error && <p ref={errorRef} className="inline-error" role="alert" aria-live="polite" tabIndex={-1}>{error}</p>}
+
+      <div className="form-actions">
+        <Button type="submit" loading={saving}><Save size={16} /> حفظ التعديلات في سلة</Button>
+        <Button tone="muted" disabled={saving} onClick={onCancel}>إلغاء</Button>
+      </div>
+    </form>
+  );
+}
+
+function StoreOrderStatusForm({
+  order,
+  statuses,
+  onSaved,
+  onError,
+  onCancel,
+}: {
+  order: api.StoreOrder;
+  statuses: api.SallaOrderStatus[];
+  onSaved: (message: string) => Promise<void>;
+  onError: (message: string) => void;
+  onCancel: () => void;
+}) {
+  const matchedCurrentStatus = statuses.find((status) =>
+    status.slug === order.remote_status_slug ||
+    status.slug === order.status ||
+    String(status.id) === String(order.remote_status_id || ""),
+  );
+  const currentSlug = order.remote_status_slug || matchedCurrentStatus?.slug || "";
+  const currentName = order.remote_status_name || matchedCurrentStatus?.name || order.status || order.external_status || "غير معروفة";
+  const [nextStatusKey, setNextStatusKey] = useState(matchedCurrentStatus ? String(matchedCurrentStatus.id) : "");
+  const [restoreItems, setRestoreItems] = useState(true);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const nextStatus = statuses.find((status) => String(status.id) === nextStatusKey);
+  const unchanged = Boolean(nextStatus && (
+    String(nextStatus.id) === String(order.remote_status_id || "") ||
+    (currentSlug && nextStatus.slug === currentSlug)
+  ));
+  const isRestoreTransition = /restor/i.test(nextStatus?.slug || "");
+  const isCustomStatus = Boolean(nextStatus && (
+    String(nextStatus.type || "").toLowerCase() === "custom" ||
+    nextStatus.original ||
+    nextStatus.parent
+  ));
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError("");
+    if (!nextStatus) {
+      setError("اختر الحالة الجديدة من قائمة الحالات القادمة من سلة.");
+      return;
+    }
+    if (unchanged) {
+      setError("الحالة المختارة هي الحالة الحالية. اختر حالة مختلفة.");
+      return;
+    }
+    if (!acknowledged) {
+      setError("أكد فهم أثر التحديث قبل الإرسال إلى سلة.");
+      return;
+    }
+    if (isCustomStatus && (!Number.isSafeInteger(Number(nextStatus.id)) || Number(nextStatus.id) <= 0)) {
+      setError("معرّف الحالة المخصصة القادم من سلة غير صالح.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const common = isRestoreTransition ? { restore_items: restoreItems } : {};
+      const result = isCustomStatus
+        ? await api.updateSallaOrderStatus(order.id, {
+            status_id: Number(nextStatus.id),
+            ...common,
+          })
+        : await api.updateSallaOrderStatus(order.id, {
+            slug: nextStatus.slug,
+            ...common,
+          });
+      await onSaved(result.changed === false
+        ? "حالة الطلب في سلة مطابقة مسبقاً؛ تم تحديث نسخة البرنامج."
+        : `تم تحديث حالة الطلب في سلة إلى «${nextStatus.name}».`);
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "تعذر تحديث حالة الطلب في سلة.";
+      setError(`${message} تحقق من صلاحية الطلب والحالة ثم أعد المحاولة.`);
+      onError(message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="form" aria-busy={saving} onSubmit={submit}>
+      <div className="cards-grid">
+        <article className="mini-card">
+          <strong>الطلب</strong>
+          <span>{order.order_number || order.order_id}</span>
+          <p>{order.customer_name || "عميل سلة"}</p>
+        </article>
+        <article className="mini-card">
+          <strong>الحالة الحالية في سلة</strong>
+          <span>{currentName}</span>
+          <p translate="no">{currentSlug || "—"}</p>
+        </article>
+      </div>
+
+      <Field label="الحالة الجديدة في سلة">
+        <SelectInput
+          name="salla_order_status"
+          value={nextStatusKey}
+          disabled={saving}
+          onChange={(event) => {
+            setNextStatusKey(event.target.value);
+            setAcknowledged(false);
+            setError("");
+          }}
+        >
+          <option value="">اختر الحالة…</option>
+          {statuses.map((status) => (
+            <option key={String(status.id)} value={String(status.id)}>{status.name}</option>
+          ))}
+        </SelectInput>
+      </Field>
+
+      {isRestoreTransition && (
+        <label className="field checkbox-field">
+          <span>إعادة أصناف الطلب إلى المخزون عند الاستعادة</span>
+          <input
+            type="checkbox"
+            name="salla_restore_items"
+            checked={restoreItems}
+            disabled={saving}
+            onChange={(event) => {
+              setRestoreItems(event.target.checked);
+              setAcknowledged(false);
+            }}
+          />
+        </label>
+      )}
+
+      <div className="inline-error" role="note">
+        هذا التعديل يُرسل مباشرة إلى سلة، وقد يشغّل رسائل العميل أو إجراءات الدفع والشحن المرتبطة بالحالة. لا تغيّرها إلا بعد التحقق من الطلب.
+      </div>
+
+      <label className="field checkbox-field">
+        <span>أفهم أن التغيير سيظهر في سلة وبرنامج إدارة العملاء</span>
+        <input
+          type="checkbox"
+          checked={acknowledged}
+          disabled={!nextStatus || unchanged || saving}
+          onChange={(event) => setAcknowledged(event.target.checked)}
+        />
+      </label>
+
+      {error && <p className="inline-error" role="alert" aria-live="polite">{error}</p>}
+
+      <div className="form-actions">
+        <Button type="submit" loading={saving} disabled={!nextStatus || unchanged || !acknowledged}>
+          <Save size={16} /> تحديث الحالة في سلة
+        </Button>
+        <Button tone="muted" disabled={saving} onClick={onCancel}>إلغاء</Button>
+      </div>
+    </form>
   );
 }
 

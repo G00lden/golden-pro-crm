@@ -1,6 +1,7 @@
 node_modules/
 build/
 dist/
+dist-server/
 coverage/
 .DS_Store
 *.log
@@ -49,6 +50,7 @@ Thumbs.db
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/backups/
 *.sqlite
 *.sqlite3
 

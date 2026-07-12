@@ -9,8 +9,10 @@ if [ ! -f ".env.production" ]; then
   exit 1
 fi
 
-docker compose -f deploy/docker-compose.yml up -d --build
-docker compose -f deploy/docker-compose.yml ps
+export BUILD_COMMIT="${BUILD_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+
+docker compose --env-file .env.production -f deploy/docker-compose.yml up -d --build
+docker compose --env-file .env.production -f deploy/docker-compose.yml ps
 
 echo "Golden Pro CRM containers are running."
 echo "Health check: curl -fsS http://127.0.0.1/api/health"

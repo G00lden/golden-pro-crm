@@ -12,6 +12,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type FormEvent,
   type InputHTMLAttributes,
@@ -20,6 +21,7 @@ import {
   type TextareaHTMLAttributes,
 } from "react";
 import * as api from "./api";
+import { addCalendarMonths } from "../shared/date";
 
 /* ── Types ───────────────────────────────────────────────── */
 
@@ -36,6 +38,7 @@ export type Page =
   | "care"
   | "technicians"
   | "messages"
+  | "campaigns"
   | "callSystem"
   | "settings"
   | "adminUsers";
@@ -46,11 +49,7 @@ export type Toast = { message: string; ok: boolean } | null;
 /* ── Utilities ───────────────────────────────────────────── */
 
 export const today = () => new Date().toLocaleDateString("en-CA");
-export const addMonths = (date: string, months: number) => {
-  const d = new Date(`${date}T00:00:00`);
-  d.setMonth(d.getMonth() + Number(months || 0));
-  return d.toLocaleDateString("en-CA");
-};
+export const addMonths = addCalendarMonths;
 
 export const fmtDate = (value?: string | null) =>
   value ? new Date(`${value.length === 10 ? `${value}T00:00:00` : value}`).toLocaleDateString("ar-SA") : "-";
@@ -138,22 +137,30 @@ export function useData<T>(fetcher: () => Promise<T>, deps: unknown[] = [], enab
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState("");
+  const requestGeneration = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!enabled) return;
+    const generation = ++requestGeneration.current;
     setLoading(true);
     setError("");
     try {
-      setData(await fetcher());
+      const next = await fetcher();
+      if (generation === requestGeneration.current) setData(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (generation === requestGeneration.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
   }, [enabled, ...deps]);
 
   useEffect(() => {
     refresh();
+    return () => {
+      requestGeneration.current += 1;
+    };
   }, [refresh]);
 
   return { data, loading, error, refresh, setData };
