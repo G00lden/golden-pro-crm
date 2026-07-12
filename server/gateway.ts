@@ -26,6 +26,7 @@ import {
   type IvrDepartment,
 } from "./ivrEngine";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
+import { isDryRunSendResult } from "./outboundSafety";
 import {
   smsAgentAlert,
   smsMissedDirect,
@@ -33,20 +34,13 @@ import {
   smsRoutedCustomer,
 } from "./smsTemplates";
 import { logError, logEvent } from "./logger";
+import { normalizePhoneDigits } from "../shared/phone";
 
 function newId(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 18)}`;
 }
 function nowIso() {
   return new Date().toISOString();
-}
-
-function normPhone(p: string | undefined | null): string {
-  let d = String(p || "").replace(/\D/g, "");
-  if (d.startsWith("00")) d = d.slice(2);
-  if (d.startsWith("0")) d = `966${d.slice(1)}`;
-  if (d.length === 9 && d.startsWith("5")) d = `966${d}`;
-  return d;
 }
 
 export function routingMode(): "menu" | "direct" {
@@ -59,26 +53,50 @@ export function enqueueSms(ownerUid: string, toPhone: string, body: string, role
   db.prepare(
     `INSERT INTO gateway_outbox (id, owner_uid, to_phone, body, role, channel, status, call_id, created_at)
      VALUES (?, ?, ?, ?, ?, 'sms', 'pending', ?, ?)`,
-  ).run(id, ownerUid, normPhone(toPhone), body, role, callId || null, nowIso());
+  ).run(id, ownerUid, normalizePhoneDigits(toPhone), body, role, callId || null, nowIso());
   return id;
+}
+
+export function claimPendingSms(ownerUid: string, limit = 20, deviceId = "android-gateway") {
+  return db.transaction(() => {
+    const now = nowIso();
+    const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+    db.prepare(
+      "UPDATE gateway_outbox SET status = 'pending', lease_until = NULL, updated_at = ? WHERE owner_uid = ? AND status = 'processing' AND lease_until <= ?",
+    ).run(now, ownerUid, now);
+    const candidates = db.prepare(
+      "SELECT id FROM gateway_outbox WHERE owner_uid = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?",
+    ).all(ownerUid, Math.min(100, limit)) as Array<{ id: string }>;
+    const claim = db.prepare(
+      "UPDATE gateway_outbox SET status = 'processing', attempts = IFNULL(attempts,0) + 1, lease_until = ?, device_id = ?, updated_at = ? WHERE id = ? AND owner_uid = ? AND status = 'pending'",
+    );
+    const ids: string[] = [];
+    for (const candidate of candidates) {
+      if (claim.run(leaseUntil, deviceId, now, candidate.id, ownerUid).changes) ids.push(candidate.id);
+    }
+    if (!ids.length) return [];
+    return db.prepare(
+      `SELECT id, to_phone, body, role, attempts, lease_until
+       FROM gateway_outbox WHERE owner_uid = ? AND id IN (${ids.map(() => "?").join(",")})
+       ORDER BY created_at ASC`,
+    ).all(ownerUid, ...ids) as Array<Record<string, unknown>>;
+  })();
 }
 
 /**
  * Returns the single oldest pending SMS in a flat, MacroDroid-friendly shape
  * (no array to iterate). `to` is E.164 (+9665…) so any SMS app dials it.
  */
-export function getNextPendingSms(ownerUid: string): {
+export function getNextPendingSms(ownerUid: string, deviceId?: string): {
   has: boolean;
   id?: string;
   to?: string;
   body?: string;
   role?: string;
 } {
-  const row = db
-    .prepare("SELECT id, to_phone, body, role FROM gateway_outbox WHERE owner_uid = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1")
-    .get(ownerUid) as { id: string; to_phone: string; body: string; role: string } | undefined;
+  const row = claimPendingSms(ownerUid, 1, deviceId)[0] as { id: string; to_phone: string; body: string; role: string } | undefined;
   if (!row) return { has: false };
-  return { has: true, id: row.id, to: `+${normPhone(row.to_phone)}`, body: row.body, role: row.role };
+  return { has: true, id: row.id, to: `+${normalizePhoneDigits(row.to_phone)}`, body: row.body, role: row.role };
 }
 
 export function listPendingSms(ownerUid: string, limit = 20) {
@@ -90,10 +108,16 @@ export function listPendingSms(ownerUid: string, limit = 20) {
 
 export function ackSms(ownerUid: string, ids: string[], failedIds: string[] = []): number {
   let changed = 0;
-  const markSent = db.prepare("UPDATE gateway_outbox SET status = 'sent', sent_at = ? WHERE id = ? AND owner_uid = ? AND status = 'pending'");
-  for (const id of ids) changed += markSent.run(nowIso(), id, ownerUid).changes;
-  const markFailed = db.prepare("UPDATE gateway_outbox SET status = 'failed', error = 'reported by gateway', sent_at = ? WHERE id = ? AND owner_uid = ?");
-  for (const id of failedIds) markFailed.run(nowIso(), id, ownerUid);
+  const markSent = db.prepare("UPDATE gateway_outbox SET status = 'sent', sent_at = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND owner_uid = ? AND status IN ('pending','processing')");
+  for (const id of ids) {
+    const now = nowIso();
+    changed += markSent.run(now, now, id, ownerUid).changes;
+  }
+  const markFailed = db.prepare("UPDATE gateway_outbox SET status = 'failed', error = 'reported by gateway', sent_at = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND owner_uid = ? AND status IN ('pending','processing')");
+  for (const id of failedIds) {
+    const now = nowIso();
+    markFailed.run(now, now, id, ownerUid);
+  }
   return changed;
 }
 
@@ -113,10 +137,10 @@ export async function dispatchMessage(
   phone: string,
   body: string,
   opts: { role: string; callId?: string } = { role: "customer" },
-): Promise<{ channel: "whatsapp" | "sms"; to: string; body: string }> {
-  const to = normPhone(phone);
+): Promise<{ channel: "whatsapp" | "sms"; to: string; body: string; accepted: boolean; status: string }> {
+  const to = normalizePhoneDigits(phone);
   const wa = whatsappService.getStatus();
-  const waUsable = wa.status === "connected" || wa.provider === "cloud_api";
+  const waUsable = wa.status === "connected";
 
   if (waUsable) {
     try {
@@ -132,14 +156,15 @@ export async function dispatchMessage(
         owner_uid: ownerUid,
         metadata: { channel: "whatsapp", role: opts.role, call_id: opts.callId },
       });
-      return { channel: "whatsapp", to, body };
+      const blocked = isDryRunSendResult(res);
+      return { channel: "whatsapp", to, body, accepted: !blocked, status: blocked ? "dry_run" : "sent" };
     } catch (err) {
       logError("gateway.whatsapp_send_failed_fallback_sms", err);
     }
   }
 
   enqueueSms(ownerUid, to, body, opts.role, opts.callId);
-  return { channel: "sms", to, body };
+  return { channel: "sms", to, body, accepted: true, status: "queued" };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -183,14 +208,14 @@ export type GatewayEvent = {
 
 export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent): Promise<Record<string, unknown>> {
   const type = String(event.type || "").toLowerCase().replace(/[\s-]/g, "_");
-  const from = normPhone(event.from);
+  const from = normalizePhoneDigits(event.from);
 
   if (!from) return { handled: false, reason: "missing_from" };
 
   // ── Missed / unanswered call ──
   if (["missed_call", "call_missed", "no_answer", "unanswered", "call_ended_unanswered"].includes(type)) {
     const callSid = `gw_${crypto.randomUUID().slice(0, 12)}`;
-    recordCall({ ownerUid, provider: "gateway", callSid, from, to: normPhone(event.to), status: "no_answer" });
+    recordCall({ ownerUid, provider: "gateway", callSid, from, to: normalizePhoneDigits(event.to), status: "no_answer" });
     updateCallBySid(callSid, { missed: 1 });
 
     // Anti-spam: if this caller already got an auto-reply recently (call retries
@@ -217,18 +242,18 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
         const c = await dispatchMessage(ownerUid, from, smsMissedDirect(dept.name, agent?.name || ""), { role: "customer", callId: callSid });
         dispatched.push({ channel: c.channel, to: c.to });
         if (agent?.phone) {
-          updateCallBySid(callSid, { wa_agent_notified: 1 });
           const a = await dispatchMessage(ownerUid, agent.phone, smsAgentAlert(dept.name, from), { role: "agent", callId: callSid });
+          if (a.accepted) updateCallBySid(callSid, { wa_agent_notified: 1, wa_agent_status: a.status });
           dispatched.push({ channel: a.channel, to: a.to });
         }
+        if (c.accepted) updateCallBySid(callSid, { wa_customer_notified: 1, wa_customer_status: c.status });
       }
-      updateCallBySid(callSid, { wa_customer_notified: 1 });
     } else {
       // menu mode: ask the caller to pick a department by SMS reply.
       const menu = smsMenuText(ownerUid);
       const body = menu ? smsMissedMenu(menu) : smsMissedDirect("خدمة العملاء", "");
       const c = await dispatchMessage(ownerUid, from, body, { role: "customer", callId: callSid });
-      updateCallBySid(callSid, { wa_customer_notified: 1 });
+      if (c.accepted) updateCallBySid(callSid, { wa_customer_notified: 1, wa_customer_status: c.status });
       dispatched.push({ channel: c.channel, to: c.to });
     }
 
@@ -271,15 +296,15 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
       agent_phone: agent?.phone || null,
       agent_name: agent?.name || null,
       status: "routed",
-      wa_customer_notified: 1,
     });
 
     const dispatched: Array<{ channel: string; to: string }> = [];
     const c = await dispatchMessage(ownerUid, from, smsRoutedCustomer(dept.name, agent?.name || ""), { role: "customer", callId: callSid });
+    if (c.accepted) updateCallBySid(callSid, { wa_customer_notified: 1, wa_customer_status: c.status });
     dispatched.push({ channel: c.channel, to: c.to });
     if (agent?.phone) {
-      updateCallBySid(callSid, { wa_agent_notified: 1 });
       const a = await dispatchMessage(ownerUid, agent.phone, smsAgentAlert(dept.name, from), { role: "agent", callId: callSid });
+      if (a.accepted) updateCallBySid(callSid, { wa_agent_notified: 1, wa_agent_status: a.status });
       dispatched.push({ channel: a.channel, to: a.to });
     }
 

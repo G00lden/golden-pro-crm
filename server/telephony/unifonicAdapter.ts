@@ -32,6 +32,7 @@ import type {
   NormalizedInboundCall,
   TelephonyAdapter,
 } from "./types";
+import { normalizePhone, normalizePhoneDigits } from "../../shared/phone";
 
 type AnyRecord = Record<string, unknown>;
 
@@ -47,18 +48,9 @@ function pick(source: AnyRecord, keys: string[]): string | undefined {
 }
 
 /** Normalize a phone to bare international digits for a stable correlation key. */
-function normalizeDigits(phone: string | undefined): string {
-  let d = String(phone || "").replace(/\D/g, "");
-  if (d.startsWith("00")) d = d.slice(2);
-  if (d.startsWith("0")) d = `966${d.slice(1)}`;
-  if (d.length === 9 && d.startsWith("5")) d = `966${d}`;
-  return d;
-}
-
 /** E.164 form Unifonic's `transfer` expects (+9665…). */
 function toE164(phone: string): string {
-  const d = normalizeDigits(phone);
-  return d ? `+${d}` : "";
+  return normalizePhone(phone).e164;
 }
 
 /** Unifonic uses spelled-out language names. */
@@ -80,7 +72,7 @@ const F = {
 function correlationId(src: AnyRecord): string {
   const explicit = pick(src, [...F.callSid]);
   if (explicit) return explicit;
-  const caller = normalizeDigits(pick(src, [...F.caller]));
+  const caller = normalizePhoneDigits(pick(src, [...F.caller]));
   return caller ? `caller:${caller}` : "";
 }
 

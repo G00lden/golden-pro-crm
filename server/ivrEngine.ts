@@ -20,8 +20,9 @@ import type {
   NormalizedCallStatus,
   NormalizedInboundCall,
 } from "./telephony/types";
-import { sendWhatsAppTemplate } from "./whatsapp";
 import { logError, logEvent } from "./logger";
+import { normalizePhoneDigits, phoneTail } from "../shared/phone";
+import { communicationJobStore } from "./communicationJobs";
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Breexe Pro";
 const DEFAULT_RING_TIMEOUT = Number(process.env.TELEPHONY_RING_TIMEOUT_SEC || 20);
@@ -32,15 +33,6 @@ function newId(prefix: string) {
 }
 function nowIso() {
   return new Date().toISOString();
-}
-
-/** Normalize a Saudi phone to international digits for provider dialing. */
-function normalizeDialNumber(phone: string): string {
-  let digits = String(phone || "").replace(/\D/g, "");
-  if (digits.startsWith("00")) digits = digits.slice(2);
-  if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
-  if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
-  return digits;
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -298,9 +290,8 @@ export function pickAgentRoundRobin(dept: IvrDepartment): IvrAgent | null {
  */
 export function recentlyNotifiedCustomer(ownerUid: string, fromPhone: string, minutes: number): boolean {
   if (!minutes || minutes <= 0) return false;
-  const digits = String(fromPhone || "").replace(/\D/g, "");
-  if (!digits) return false;
-  const tail = digits.slice(-9);
+  const tail = phoneTail(fromPhone);
+  if (!tail) return false;
   const since = new Date(Date.now() - minutes * 60_000).toISOString();
   const row = db
     .prepare(
@@ -324,9 +315,8 @@ function safeJson(raw: unknown) {
 
 /** Look up a registered customer by phone (last-9-digit match). */
 export function findCustomerByPhone(ownerUid: string, phone: string): { id: string; name: string } | null {
-  const digits = String(phone || "").replace(/\D/g, "");
-  if (!digits) return null;
-  const tail = digits.slice(-9);
+  const tail = phoneTail(phone);
+  if (!tail) return null;
   const row = db
     .prepare("SELECT id, name FROM customers WHERE owner_uid = ? AND phone LIKE ? ORDER BY created_at DESC LIMIT 1")
     .get(ownerUid, `%${tail}`) as { id: string; name: string } | undefined;
@@ -340,17 +330,19 @@ export function recordCall(input: {
   from: string;
   to: string;
   status?: string;
+  correlationKey?: string;
 }): CallLog {
   const id = newId("call");
   const customer = findCustomerByPhone(input.ownerUid, input.from);
   db.prepare(
-    `INSERT INTO call_logs (id, owner_uid, provider, call_sid, from_phone, to_phone, status, customer_id, customer_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO call_logs (id, owner_uid, provider, call_sid, correlation_key, from_phone, to_phone, status, customer_id, customer_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.ownerUid,
     input.provider,
     input.callSid || null,
+    input.correlationKey || null,
     input.from || null,
     input.to || null,
     input.status || "menu",
@@ -373,9 +365,8 @@ export function isAgentAck(text: string | undefined | null): boolean {
 
 /** Most recent unhandled call assigned to this agent phone (last 9 digits). */
 export function findUnhandledCallForAgent(ownerUid: string, agentPhone: string): Record<string, unknown> | null {
-  const digits = String(agentPhone || "").replace(/\D/g, "");
-  if (!digits) return null;
-  const tail = digits.slice(-9);
+  const tail = phoneTail(agentPhone);
+  if (!tail) return null;
   const row = db
     .prepare(
       `SELECT * FROM call_logs
@@ -396,24 +387,42 @@ export function markCallHandled(ownerUid: string, callId: string, by: string): b
   return res.changes > 0;
 }
 
-export function getCallBySid(callSid: string): Record<string, unknown> | null {
+export function getCallBySid(callSid: string, ownerUid?: string): Record<string, unknown> | null {
   if (!callSid) return null;
-  const row = db
-    .prepare("SELECT * FROM call_logs WHERE call_sid = ? ORDER BY created_at DESC LIMIT 1")
-    .get(callSid) as Record<string, unknown> | undefined;
+  const found = ownerUid
+    ? db.prepare("SELECT * FROM call_logs WHERE owner_uid = ? AND call_sid = ? ORDER BY created_at DESC LIMIT 1").get(ownerUid, callSid)
+    : db.prepare("SELECT * FROM call_logs WHERE call_sid = ? ORDER BY created_at DESC LIMIT 1").get(callSid);
+  const row = found as Record<string, unknown> | undefined;
   return row ? { ...row, metadata: safeJson(row.metadata) } : null;
 }
 
-export function updateCallBySid(callSid: string, fields: Record<string, unknown>) {
+export function updateCallBySid(callSid: string, fields: Record<string, unknown>, ownerUid?: string) {
   if (!callSid) return;
   const keys = Object.keys(fields);
   if (keys.length === 0) return;
   const set = keys.map((k) => `${k} = ?`).join(", ");
-  db.prepare(`UPDATE call_logs SET ${set}, updated_at = ? WHERE call_sid = ?`).run(
-    ...keys.map((k) => fields[k]),
-    nowIso(),
-    callSid,
-  );
+  const sql = ownerUid
+    ? `UPDATE call_logs SET ${set}, updated_at = ? WHERE owner_uid = ? AND call_sid = ?`
+    : `UPDATE call_logs SET ${set}, updated_at = ? WHERE call_sid = ?`;
+  const args = [...keys.map((k) => fields[k]), nowIso(), ...(ownerUid ? [ownerUid] : []), callSid];
+  db.prepare(sql).run(...args);
+}
+
+function fallbackCorrelation(raw: string) {
+  return raw.startsWith("caller:");
+}
+
+function resolveCallSid(ownerUid: string, rawSid: string, create: boolean): string {
+  if (!rawSid || !fallbackCorrelation(rawSid)) return rawSid;
+  const since = new Date(Date.now() - Number(process.env.TELEPHONY_CORRELATION_WINDOW_MIN || 10) * 60_000).toISOString();
+  const active = db.prepare(
+    `SELECT call_sid FROM call_logs
+     WHERE owner_uid = ? AND correlation_key = ? AND created_at >= ?
+       AND status IN ('menu','ringing','forwarding','in_progress')
+     ORDER BY created_at DESC LIMIT 1`,
+  ).get(ownerUid, rawSid, since) as { call_sid?: string } | undefined;
+  if (active?.call_sid) return active.call_sid;
+  return create ? `${rawSid}:${crypto.randomUUID().slice(0, 12)}` : rawSid;
 }
 
 /** Dashboard counters: unhandled missed calls + today's totals. */
@@ -465,13 +474,15 @@ export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, bas
   const { greeting, prompt } = buildMenuText(ownerUid);
 
   // Record the call so the status webhook can correlate it later.
-  if (call.callSid) {
-    const existing = getCallBySid(call.callSid);
+  const callSid = resolveCallSid(ownerUid, call.callSid, true);
+  if (callSid) {
+    const existing = getCallBySid(callSid, ownerUid);
     if (!existing) {
       recordCall({
         ownerUid,
         provider: config.provider,
-        callSid: call.callSid,
+        callSid,
+        correlationKey: fallbackCorrelation(call.callSid) ? call.callSid : undefined,
         from: call.from,
         to: call.to || config.main_number,
         status: "menu",
@@ -494,15 +505,17 @@ export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, bas
 /** Instructions after a digit press: forward to the department's agent. */
 export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
   const digit = String(call.digit || "");
+  const callSid = resolveCallSid(ownerUid, call.callSid, true);
 
   // Ensure a call row exists even if the provider didn't hit the greeting first
   // (so the later status webhook can correlate this call by sid).
-  if (call.callSid && !getCallBySid(call.callSid)) {
+  if (callSid && !getCallBySid(callSid, ownerUid)) {
     const config = getTelephonyConfig(ownerUid);
     recordCall({
       ownerUid,
       provider: config.provider,
-      callSid: call.callSid,
+      callSid,
+      correlationKey: fallbackCorrelation(call.callSid) ? call.callSid : undefined,
       from: call.from,
       to: call.to || config.main_number,
       status: "menu",
@@ -521,7 +534,7 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
   // Idempotent per call: if this call already picked an agent (e.g. the provider
   // re-posted the DTMF webhook), reuse it instead of advancing the round-robin
   // pointer again — which would skew distribution and reassign the call.
-  const existing = getCallBySid(call.callSid);
+  const existing = getCallBySid(callSid, ownerUid);
   const agent: IvrAgent | null = existing?.agent_phone
     ? {
         id: String(existing.agent_user_id || existing.agent_phone || ""),
@@ -537,20 +550,20 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
   if (!agent || !agent.phone) {
     // No reachable agent → treat as a missed call immediately so the customer
     // still gets a WhatsApp follow-up.
-    updateCallBySid(call.callSid, {
+    updateCallBySid(callSid, {
       department_id: department.id,
       department_name: department.name,
       selected_digit: digit,
       status: "no_answer",
     });
-    runMissedCallFlow(call.callSid).catch((err) => logError("ivr.no_agent_missed_flow_failed", err));
+    runMissedCallFlow(callSid).catch((err) => logError("ivr.no_agent_missed_flow_failed", err));
     return [
       { action: "say", text: `سيتواصل معكم فريق ${department.name} قريباً. شكراً لاتصالكم.`, language: "ar" },
       { action: "hangup" },
     ];
   }
 
-  updateCallBySid(call.callSid, {
+  updateCallBySid(callSid, {
     department_id: department.id,
     department_name: department.name,
     selected_digit: digit,
@@ -566,8 +579,8 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
     {
       action: "dial",
       text: `يتم تحويلكم إلى ${department.name}. يرجى الانتظار.`,
-      number: normalizeDialNumber(agent.phone),
-      callerId: config.main_number ? normalizeDialNumber(config.main_number) : undefined,
+      number: normalizePhoneDigits(agent.phone),
+      callerId: config.main_number ? normalizePhoneDigits(config.main_number) : undefined,
       ringTimeoutSec: department.ring_timeout_sec || config.ring_timeout_sec,
       statusCallbackUrl: statusCallbackUrl(baseUrl),
     },
@@ -578,8 +591,9 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
  * Status webhook entry point. Returns a short summary for logging. On a
  * not-connected outcome it triggers the missed-call WhatsApp flow.
  */
-export async function handleCallStatus(status: NormalizedCallStatus): Promise<Record<string, unknown>> {
-  const call = getCallBySid(status.callSid);
+export async function handleCallStatus(ownerUid: string, status: NormalizedCallStatus): Promise<Record<string, unknown>> {
+  const callSid = resolveCallSid(ownerUid, status.callSid, false);
+  const call = getCallBySid(callSid, ownerUid);
   if (!call) {
     return { handled: false, reason: "unknown_call_sid", callSid: status.callSid };
   }
@@ -587,7 +601,7 @@ export async function handleCallStatus(status: NormalizedCallStatus): Promise<Re
   const missedStatuses: NormalizedCallStatus["status"][] = ["no_answer", "busy", "failed", "voicemail"];
   const isMissed = missedStatuses.includes(status.status);
 
-  updateCallBySid(status.callSid, {
+  updateCallBySid(callSid, {
     status: status.status,
     duration_sec: status.durationSec ?? Number(call.duration_sec || 0),
     ended_at: nowIso(),
@@ -595,7 +609,7 @@ export async function handleCallStatus(status: NormalizedCallStatus): Promise<Re
   });
 
   if (isMissed) {
-    const result = await runMissedCallFlow(status.callSid);
+    const result = await runMissedCallFlow(callSid);
     return { handled: true, missed: true, ...result };
   }
   return { handled: true, missed: false, status: status.status };
@@ -619,39 +633,55 @@ export async function runMissedCallFlow(callSid: string): Promise<Record<string,
     timeZone: process.env.APP_TIMEZONE || "Asia/Riyadh",
   });
 
-  const out: Record<string, unknown> = { sent: true, customer: false, agent: false };
+  const callId = String(call.id || "");
+  const out: Record<string, unknown> = { queued: true, customer: false, agent: false };
 
-  // 1) Apology to the customer.
+  // 1) Queue the apology to the customer. The durable worker owns provider I/O,
+  // retry and final delivery flags; webhook retries only return the same job.
   if (customerPhone && Number(call.wa_customer_notified || 0) === 0) {
     try {
-      await sendWhatsAppTemplate({
-        phone: customerPhone,
-        template: "missed_call_customer",
-        vars: { department_name: departmentName || "خدمة العملاء", agent_name: agentName || "أحد موظفينا" },
-        owner_uid: ownerUid,
+      const job = communicationJobStore.enqueue({
+        ownerUid,
+        eventKey: `missed-call:${callId}:customer`,
+        recipientPhone: customerPhone,
+        templateName: "missed_call_customer",
+        payload: { vars: { department_name: departmentName || "خدمة العملاء", agent_name: agentName || "أحد موظفينا" } },
+        role: "customer",
+        callId,
+        expiresInMinutes: 30,
       });
-      updateCallBySid(callSid, { wa_customer_notified: 1 });
-      out.customer = true;
+      db.prepare(
+        "UPDATE call_logs SET wa_customer_job_id = ?, wa_customer_status = ?, updated_at = ? WHERE owner_uid = ? AND id = ?",
+      ).run(job.id, job.status, nowIso(), ownerUid, callId);
+      out.customer = job.status;
+      out.customer_job_id = job.id;
     } catch (err) {
-      logError("ivr.missed_call.customer_wa_failed", err);
+      logError("ivr.missed_call.customer_queue_failed", err);
+      out.customer_error = true;
     }
   }
 
-  // 2) Call-back alert to the agent.
+  // 2) Queue the call-back alert to the assigned agent.
   if (agentPhone && Number(call.wa_agent_notified || 0) === 0) {
     try {
-      await sendWhatsAppTemplate({
-        phone: agentPhone,
-        template: "missed_call_agent",
-        // Show the agent a canonical number (966… for local; genuine
-        // international numbers are left intact) instead of the raw provider form.
-        vars: { department_name: departmentName || "-", customer_phone: (customerPhone && normalizeDialNumber(customerPhone)) || "-", call_time: callTime },
-        owner_uid: ownerUid,
+      const job = communicationJobStore.enqueue({
+        ownerUid,
+        eventKey: `missed-call:${callId}:agent`,
+        recipientPhone: agentPhone,
+        templateName: "missed_call_agent",
+        payload: { vars: { department_name: departmentName || "-", customer_phone: (customerPhone && normalizePhoneDigits(customerPhone)) || "-", call_time: callTime } },
+        role: "agent",
+        callId,
+        expiresInMinutes: 30,
       });
-      updateCallBySid(callSid, { wa_agent_notified: 1 });
-      out.agent = true;
+      db.prepare(
+        "UPDATE call_logs SET wa_agent_job_id = ?, wa_agent_status = ?, updated_at = ? WHERE owner_uid = ? AND id = ?",
+      ).run(job.id, job.status, nowIso(), ownerUid, callId);
+      out.agent = job.status;
+      out.agent_job_id = job.id;
     } catch (err) {
-      logError("ivr.missed_call.agent_wa_failed", err);
+      logError("ivr.missed_call.agent_queue_failed", err);
+      out.agent_error = true;
     }
   }
 

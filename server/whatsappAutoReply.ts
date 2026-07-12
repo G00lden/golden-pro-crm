@@ -8,6 +8,7 @@
  * - Inbound WhatsApp text → recorded + routed (e.g. caller replies a digit).
  */
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
+import { routeInboundConversation } from "./inboundConversation";
 import { handleGatewayEvent } from "./gateway";
 import { logError, logEvent } from "./logger";
 
@@ -38,7 +39,7 @@ export function initWhatsAppAutoReply(ownerUid: () => string) {
         owner_uid: ownerUid(),
         metadata: { channel: "whatsapp", source: "baileys" },
       });
-      await handleGatewayEvent(ownerUid(), { type: "sms_in", from: fromPhone, text });
+      await routeInboundConversation({ ownerUid: ownerUid(), fromPhone, text, source: "whatsapp_web" });
     } catch (err) {
       logError("whatsapp.inbound_message_handler_failed", err);
     }

@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10100;
+const TARGET_SCHEMA_VERSION = 10200;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -645,10 +645,61 @@ db.exec(`
     status TEXT DEFAULT 'pending',
     call_id TEXT,
     error TEXT,
+    attempts INTEGER DEFAULT 0,
+    lease_until TEXT,
+    device_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    sent_at TEXT
+    sent_at TEXT,
+    updated_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
+
+  -- Durable inbound event ledger. Provider retries are accepted once and every
+  -- downstream side effect uses the same idempotency key.
+  CREATE TABLE IF NOT EXISTS communication_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_type TEXT DEFAULT '',
+    payload_hash TEXT DEFAULT '',
+    processed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, provider, event_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_events_owner_created
+    ON communication_events(owner_uid, created_at DESC);
+
+  -- Durable outbound queue. Workers claim jobs with a lease, retry transient
+  -- failures and stop at max_attempts instead of losing webhook-triggered sends.
+  CREATE TABLE IF NOT EXISTS communication_jobs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'whatsapp_template',
+    channel TEXT NOT NULL DEFAULT 'whatsapp',
+    recipient_phone TEXT NOT NULL,
+    template_name TEXT,
+    payload TEXT NOT NULL DEFAULT '{}',
+    role TEXT DEFAULT 'customer',
+    call_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    available_at TEXT NOT NULL DEFAULT (datetime('now')),
+    lease_until TEXT,
+    last_error TEXT,
+    provider_message_id TEXT,
+    expires_at TEXT,
+    sent_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, event_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_communication_jobs_ready
+    ON communication_jobs(status, available_at, lease_until, created_at);
+  CREATE INDEX IF NOT EXISTS idx_communication_jobs_owner
+    ON communication_jobs(owner_uid, created_at DESC);
 
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
@@ -733,12 +784,29 @@ for (const col of [
   ["handled", "INTEGER DEFAULT 0"],
   ["handled_at", "TEXT"],
   ["handled_by", "TEXT"],
+  ["correlation_key", "TEXT"],
+  ["wa_customer_job_id", "TEXT"],
+  ["wa_agent_job_id", "TEXT"],
+  ["wa_customer_status", "TEXT"],
+  ["wa_agent_status", "TEXT"],
 ] as const) {
   if (!hasColumn("call_logs", col[0])) {
     db.exec(`ALTER TABLE call_logs ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_correlation ON call_logs(owner_uid, correlation_key, created_at DESC)");
+
+for (const col of [
+  ["attempts", "INTEGER DEFAULT 0"],
+  ["lease_until", "TEXT"],
+  ["device_id", "TEXT"],
+  ["updated_at", "TEXT"],
+] as const) {
+  if (!hasColumn("gateway_outbox", col[0])) {
+    db.exec(`ALTER TABLE gateway_outbox ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
 
 for (const col of [
   ["discount_mode", "TEXT DEFAULT 'fixed'"],
@@ -840,6 +908,7 @@ db.exec(`
     WHERE provider = 'local-dev' AND LOWER(IFNULL(email, '')) = 'local@golden-pro-crm.dev';
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10007, '1.0.7');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10100, '1.1.0');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10200, '1.2.0');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

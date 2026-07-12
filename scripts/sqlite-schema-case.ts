@@ -61,7 +61,15 @@ for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10100) throw new Error(`Expected schema 10100, got ${userVersion}`);
+if (userVersion !== 10200) throw new Error(`Expected schema 10200, got ${userVersion}`);
+
+for (const table of ["communication_events", "communication_jobs"]) {
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+  if (!exists) throw new Error(`${table} is missing`);
+}
+for (const required of ["correlation_key", "wa_customer_job_id", "wa_agent_job_id", "wa_customer_status", "wa_agent_status"]) {
+  if (!columns("call_logs").has(required)) throw new Error(`call_logs.${required} is missing`);
+}
 
 if (scenario === "legacy") {
   const legacy = db.prepare("SELECT discount, total FROM quotes WHERE id = 'legacy_quote'").get() as { discount: number; total: number };
@@ -85,6 +93,8 @@ const identityMigration = db.prepare("SELECT release FROM schema_migrations WHER
 if (identityMigration?.release !== "1.0.7") throw new Error("Identity migration ledger was not updated.");
 const invoiceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10100").get() as { release?: string };
 if (invoiceMigration?.release !== "1.1.0") throw new Error("Invoice migration ledger was not updated.");
+const communicationMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10200").get() as { release?: string };
+if (communicationMigration?.release !== "1.2.0") throw new Error("Communication migration ledger was not updated.");
 
 db.close();
 console.log(JSON.stringify({ scenario, userVersion, quotes: [...quoteColumns].length }));

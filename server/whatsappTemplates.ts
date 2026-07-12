@@ -105,6 +105,18 @@ export function listTemplateNames(): TemplateName[] {
   return Object.keys(TEMPLATES) as TemplateName[];
 }
 
+export function templateVariableNames(name: TemplateName): string[] {
+  const seen = new Set<string>();
+  for (const match of TEMPLATES[name].matchAll(/\{([a-z_][a-z0-9_]*)\}/gi)) {
+    seen.add(match[1]);
+  }
+  return [...seen];
+}
+
+export function cloudTemplateEnvKey(name: TemplateName): string {
+  return `WHATSAPP_CLOUD_TEMPLATE_${name.toUpperCase()}`;
+}
+
 /**
  * Returns the WhatsApp Cloud API parameter payload for a template message.
  * Cloud API templates are pre-approved by Meta; for the freeform template
@@ -116,7 +128,8 @@ export function templateToCloudParams(name: TemplateName, vars: RenderVars): {
   templateName?: string;
   parameters?: Array<{ type: "text"; text: string }>;
 } {
-  const body = renderTemplate(name, vars);
+  const merged: RenderVars = { company_name: DEFAULT_COMPANY, ...vars };
+  const body = renderTemplate(name, merged);
   if (name === "general_reminder") {
     return { isFreeform: true, body };
   }
@@ -124,6 +137,9 @@ export function templateToCloudParams(name: TemplateName, vars: RenderVars): {
     isFreeform: false,
     body,
     templateName: name,
-    parameters: [{ type: "text", text: body }],
+    parameters: templateVariableNames(name).map((key) => ({
+      type: "text" as const,
+      text: String(merged[key] ?? "-"),
+    })),
   };
 }

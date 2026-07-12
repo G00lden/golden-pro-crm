@@ -161,6 +161,8 @@ export type Settings = {
 export type WhatsAppStatus = {
   status: string;
   provider?: "web" | "cloud_api";
+  configured?: boolean;
+  verifiedAt?: string;
   qr?: string;
   lastError?: string;
   user?: string;
@@ -3142,6 +3144,28 @@ export type WhatsAppDevice = {
 
 export type WhatsAppTemplateInfo = { name: string; sample: string };
 
+export type CommunicationJob = {
+  id: string;
+  event_key: string;
+  kind: string;
+  recipient_phone: string;
+  template_name?: string | null;
+  role: string;
+  call_id?: string | null;
+  status: "pending" | "processing" | "retry" | "sent" | "failed" | "blocked" | "expired";
+  attempts: number;
+  max_attempts: number;
+  last_error?: string | null;
+  sent_at?: string | null;
+  created_at: string;
+};
+
+export type CommunicationQueueSummary = Record<CommunicationJob["status"], number> & {
+  waiting: number;
+  attention: number;
+  total: number;
+};
+
 export const listRecentWhatsAppMessages = (limit = 50) =>
   apiFetch<{ count: number; items: WhatsAppMessage[] }>(`/api/whatsapp/messages?limit=${limit}`);
 
@@ -3152,6 +3176,9 @@ export const getWhatsAppDevices = () =>
 
 export const getWhatsAppTemplates = () =>
   apiFetch<{ templates: WhatsAppTemplateInfo[] }>("/api/whatsapp/templates");
+
+export const getWhatsAppJobs = (limit = 50) =>
+  apiFetch<{ summary: CommunicationQueueSummary; jobs: CommunicationJob[] }>(`/api/whatsapp/jobs?limit=${limit}`);
 
 export const sendWhatsAppTemplateMessage = (data: {
   phone: string;

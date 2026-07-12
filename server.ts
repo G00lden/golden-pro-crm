@@ -34,6 +34,8 @@ import {
 } from "./server/routes-gateway";
 import { registerPaymentRoutes, registerPaymentWebhookRoute } from "./server/routes-payment";
 import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
+import { startCommunicationWorker } from "./server/communicationWorker";
+import { whatsappService } from "./server/whatsapp";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
@@ -286,6 +288,10 @@ async function startServer() {
 
   // Auto-reply on unanswered WhatsApp calls + route inbound WhatsApp replies.
   initWhatsAppAutoReply(__whatsappOwnerUid);
+  void whatsappService.verifyConnection().catch((error) => {
+    logError("whatsapp.startup_verification_failed", error);
+  });
+  startCommunicationWorker();
 
   // Salla OAuth callback + webhook (unauthenticated — these trigger token
   // exchanges or receive store-push events before any user is logged in).

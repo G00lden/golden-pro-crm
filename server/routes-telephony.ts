@@ -57,10 +57,9 @@ function httpError(status: number, message: string) {
   return err;
 }
 
-function adapterFor(_provider?: string): TelephonyAdapter {
-  // Only Unifonic is wired today; the engine is provider-agnostic so adding
-  // another adapter is a one-line switch here.
-  return unifonicAdapter;
+export function adapterFor(provider = "unifonic"): TelephonyAdapter {
+  if (provider.toLowerCase() === "unifonic") return unifonicAdapter;
+  throw httpError(503, `Unsupported telephony provider: ${provider}`);
 }
 
 /** Absolute base URL the provider should call back on (for responseUrl/status). */
@@ -118,7 +117,15 @@ export function registerTelephonyWebhookRoutes(app: Express, options: TelephonyR
 
   const ivrHandler = asyncRoute(async (req, res) => {
     const ownerUid = telephonyOwnerUid();
-    const adapter = adapterFor(getTelephonyConfig(ownerUid).provider);
+    const config = getTelephonyConfig(ownerUid);
+    const adapter = adapterFor(config.provider);
+    if (!config.enabled) {
+      res.status(200).json(adapter.renderInstructions([
+        { action: "say", text: "خدمة الرد الآلي متوقفة مؤقتاً. شكراً لاتصالك." },
+        { action: "hangup" },
+      ]));
+      return;
+    }
     const call = adapter.parseInbound(
       (req.body || {}) as Record<string, unknown>,
       (req.query || {}) as Record<string, unknown>,
@@ -152,13 +159,18 @@ export function registerTelephonyWebhookRoutes(app: Express, options: TelephonyR
     validate(telephonyWebhookSchema),
     asyncRoute(async (req, res) => {
       const ownerUid = telephonyOwnerUid();
-      const adapter = adapterFor(getTelephonyConfig(ownerUid).provider);
+      const config = getTelephonyConfig(ownerUid);
+      if (!config.enabled) {
+        res.status(200).json({ received: true, ignored: "telephony_disabled" });
+        return;
+      }
+      const adapter = adapterFor(config.provider);
       const status = adapter.parseStatus(
         (req.body || {}) as Record<string, unknown>,
         (req.query || {}) as Record<string, unknown>,
       );
       try {
-        const result = await handleCallStatus(status);
+        const result = await handleCallStatus(ownerUid, status);
         res.status(200).json({ received: true, ...result });
       } catch (error) {
         // Best-effort: always 200 so the provider doesn't retry-storm.

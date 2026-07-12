@@ -6,7 +6,9 @@ import type { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
 import db from "./db";
 import { decideOutbound, dryRunSendResult, outboundSafetyStatus, type OutboundSendOptions } from "./outboundSafety";
-import { renderTemplate, type RenderVars, type TemplateName } from "./whatsappTemplates";
+import { cloudTemplateEnvKey, renderTemplate, templateToCloudParams, type RenderVars, type TemplateName } from "./whatsappTemplates";
+import { normalizePhoneDigits, requirePhoneDigits } from "../shared/phone";
+import { advanceMessageStatus } from "./communicationStatus";
 
 export type WhatsAppConnectionStatus =
   | "disconnected"
@@ -18,6 +20,8 @@ export type WhatsAppConnectionStatus =
 export type WhatsAppStatus = {
   status: WhatsAppConnectionStatus;
   provider: "web" | "cloud_api";
+  configured?: boolean;
+  verifiedAt?: string;
   qr?: string;
   lastError?: string;
   template?: string;
@@ -52,6 +56,7 @@ export class WhatsAppService {
   private waiters = new Set<() => void>();
   private readonly sessionDir: string;
   private readonly provider: "web" | "cloud_api";
+  private cloudVerifiedAt = "";
 
   // Auto-reply hooks (registered by server/whatsappAutoReply.ts). Kept as
   // callbacks so whatsapp.ts has no dependency on the routing engine.
@@ -195,14 +200,15 @@ export class WhatsAppService {
   getStatus(): WhatsAppStatus {
     if (this.provider === "cloud_api") {
       const configured = Boolean(this.cloudToken() && this.cloudPhoneNumberId());
-      if (configured && !this.connectedAt) this.connectedAt = new Date().toISOString();
       return {
         provider: this.provider,
-        status: configured ? "connected" : "error",
+        configured,
+        status: !configured ? "error" : this.status === "connected" ? "connected" : this.lastError ? "error" : "connecting",
         lastError: configured ? this.lastError || undefined : "WhatsApp Cloud API credentials are missing.",
         template: this.cloudTemplateName() || undefined,
         user: this.cloudPhoneNumberId() || undefined,
-        connectedAt: configured ? this.connectedAt || new Date().toISOString() : undefined,
+        connectedAt: this.connectedAt || undefined,
+        verifiedAt: this.cloudVerifiedAt || undefined,
         outbound: outboundSafetyStatus(),
         updatedAt: new Date().toISOString(),
       };
@@ -221,7 +227,7 @@ export class WhatsAppService {
   }
 
   async connect(): Promise<WhatsAppStatus> {
-    if (this.provider === "cloud_api") return this.getStatus();
+    if (this.provider === "cloud_api") return this.verifyConnection(true);
 
     if (this.status === "connected" || this.status === "qr_pending") {
       return this.getStatus();
@@ -285,6 +291,64 @@ export class WhatsAppService {
     // message" on their side.
     this.rememberSentMessage(result?.key?.id, result?.message);
     return { jid, messageId: result?.key?.id || null };
+  }
+
+  /**
+   * Verify provider readiness without sending a customer message. Cloud API
+   * credentials are only considered connected after Meta accepts a read probe;
+   * merely having environment variables is not proof that a token is valid.
+   */
+  async verifyConnection(force = false): Promise<WhatsAppStatus> {
+    if (this.provider !== "cloud_api") return this.getStatus();
+
+    const token = this.cloudToken();
+    const phoneNumberId = this.cloudPhoneNumberId();
+    if (!token || !phoneNumberId) {
+      this.status = "error";
+      this.lastError = "WhatsApp Cloud API credentials are missing.";
+      return this.getStatus();
+    }
+
+    const verifiedMs = this.cloudVerifiedAt ? Date.parse(this.cloudVerifiedAt) : 0;
+    if (!force && this.status === "connected" && Date.now() - verifiedMs < 60_000) {
+      return this.getStatus();
+    }
+
+    this.status = "connecting";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS || 10_000));
+    try {
+      const version = process.env.WHATSAPP_CLOUD_API_VERSION || "v23.0";
+      const fields = "id,display_phone_number,verified_name,quality_rating";
+      const response = await fetch(
+        `https://graph.facebook.com/${version}/${phoneNumberId}?fields=${encodeURIComponent(fields)}`,
+        { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
+      );
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body?.error?.message || `HTTP ${response.status}`);
+      }
+      this.status = "connected";
+      this.lastError = "";
+      this.cloudVerifiedAt = new Date().toISOString();
+      if (!this.connectedAt) this.connectedAt = this.cloudVerifiedAt;
+    } catch (error) {
+      this.status = "error";
+      this.connectedAt = "";
+      this.lastError = error instanceof Error ? error.message : String(error);
+    } finally {
+      clearTimeout(timeout);
+    }
+    return this.getStatus();
+  }
+
+  async sendTemplate(phone: string, template: TemplateName, vars: RenderVars = {}, options: OutboundSendOptions = {}) {
+    const decision = decideOutbound(phone, options);
+    if (!decision.allowed) {
+      return dryRunSendResult(phone, this.provider, decision.reason);
+    }
+    if (this.provider === "cloud_api") return this.sendCloudTemplate(phone, template, vars);
+    return this.sendText(phone, renderTemplate(template, vars, { strict: false }), options);
   }
 
   private async startSocket() {
@@ -479,29 +543,12 @@ export class WhatsAppService {
   }
 
   private toJid(phone: string) {
-    let digits = String(phone || "").replace(/\D/g, "");
-    if (digits.startsWith("00")) digits = digits.slice(2);
-    if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
-    if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
-
-    if (!/^\d{10,15}$/.test(digits)) {
-      throw new Error("Invalid WhatsApp phone number.");
-    }
-
+    const digits = requirePhoneDigits(phone);
     return `${digits}@s.whatsapp.net`;
   }
 
   private toInternationalPhone(phone: string) {
-    let digits = String(phone || "").replace(/\D/g, "");
-    if (digits.startsWith("00")) digits = digits.slice(2);
-    if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
-    if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
-
-    if (!/^\d{10,15}$/.test(digits)) {
-      throw new Error("Invalid WhatsApp phone number.");
-    }
-
-    return digits;
+    return requirePhoneDigits(phone);
   }
 
   private cloudToken() {
@@ -520,77 +567,81 @@ export class WhatsAppService {
     return process.env.WHATSAPP_CLOUD_TEMPLATE_LANGUAGE || process.env.WHATSAPP_TEMPLATE_LANGUAGE || "ar";
   }
 
-  private buildCloudPayload(to: string, message: string) {
-    const templateName = this.cloudTemplateName();
-    if (!templateName) {
-      return {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "text",
-        text: {
-          preview_url: false,
-          body: message,
-        },
-      };
-    }
-
+  private buildCloudTextPayload(to: string, message: string) {
     return {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to,
+      type: "text",
+      text: {
+        preview_url: false,
+        body: message,
+      },
+    };
+  }
+
+  private async postCloudPayload(to: string, payload: Record<string, unknown>) {
+    const token = this.cloudToken();
+    const phoneNumberId = this.cloudPhoneNumberId();
+    if (!token || !phoneNumberId) throw new Error("WhatsApp Cloud API credentials are missing.");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS || 10_000));
+    try {
+      const version = process.env.WHATSAPP_CLOUD_API_VERSION || "v23.0";
+      const response = await fetch(`https://graph.facebook.com/${version}/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const details = body?.error?.message || `HTTP ${response.status}`;
+        this.status = "error";
+        this.connectedAt = "";
+        this.lastError = details;
+        throw new Error(`WhatsApp Cloud API error: ${details}`);
+      }
+      this.status = "connected";
+      this.lastError = "";
+      this.cloudVerifiedAt = new Date().toISOString();
+      if (!this.connectedAt) this.connectedAt = this.cloudVerifiedAt;
+      return {
+        jid: `${to}@s.whatsapp.net`,
+        messageId: body?.messages?.[0]?.id || null,
+        provider: this.provider,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async sendCloudTemplate(phone: string, template: TemplateName, vars: RenderVars) {
+    const to = this.toInternationalPhone(phone);
+    const envKey = cloudTemplateEnvKey(template);
+    const templateName = process.env[envKey] || (template === "general_reminder" ? this.cloudTemplateName() : "");
+    if (!templateName) throw new Error(`WhatsApp Cloud template mapping is missing: ${envKey}`);
+    const rendered = templateToCloudParams(template, vars);
+    const components = rendered.parameters?.length
+      ? [{ type: "body", parameters: rendered.parameters }]
+      : undefined;
+    return this.postCloudPayload(to, {
       messaging_product: "whatsapp",
       recipient_type: "individual",
       to,
       type: "template",
       template: {
         name: templateName,
-        language: {
-          code: this.cloudTemplateLanguage(),
-        },
-        components: [
-          {
-            type: "body",
-            parameters: [
-              {
-                type: "text",
-                text: message,
-              },
-            ],
-          },
-        ],
+        language: { code: this.cloudTemplateLanguage() },
+        ...(components ? { components } : {}),
       },
-    };
+    });
   }
 
   private async sendCloudText(phone: string, message: string) {
-    const token = this.cloudToken();
-    const phoneNumberId = this.cloudPhoneNumberId();
-    if (!token || !phoneNumberId) {
-      throw new Error("WhatsApp Cloud API credentials are missing.");
-    }
-
     const to = this.toInternationalPhone(phone);
-    const version = process.env.WHATSAPP_CLOUD_API_VERSION || "v23.0";
-    const response = await fetch(`https://graph.facebook.com/${version}/${phoneNumberId}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(this.buildCloudPayload(to, message)),
-    });
-
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const details = body?.error?.message || `HTTP ${response.status}`;
-      this.lastError = details;
-      throw new Error(`WhatsApp Cloud API error: ${details}`);
-    }
-
-    this.lastError = "";
-    return {
-      jid: `${to}@s.whatsapp.net`,
-      messageId: body?.messages?.[0]?.id || null,
-      provider: this.provider,
-    };
+    return this.postCloudPayload(to, this.buildCloudTextPayload(to, message));
   }
 }
 
@@ -627,15 +678,6 @@ function nowIsoMsg() {
   return new Date().toISOString();
 }
 
-function normalizePhone(phone: string | null | undefined) {
-  if (!phone) return "";
-  let digits = String(phone).replace(/\D/g, "");
-  if (digits.startsWith("00")) digits = digits.slice(2);
-  if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
-  if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
-  return digits;
-}
-
 export function recordWhatsAppMessage(opts: RecordOptions): string {
   const id = newMsgId();
   db.prepare(
@@ -647,8 +689,8 @@ export function recordWhatsAppMessage(opts: RecordOptions): string {
     id,
     opts.type,
     opts.provider,
-    normalizePhone(opts.from_phone) || null,
-    normalizePhone(opts.to_phone) || null,
+    normalizePhoneDigits(opts.from_phone) || null,
+    normalizePhoneDigits(opts.to_phone) || null,
     opts.message || null,
     opts.template_name || null,
     opts.message_id || null,
@@ -666,8 +708,8 @@ export function recordWhatsAppMessage(opts: RecordOptions): string {
 
 export function updateWhatsAppStatus(messageId: string, status: string, extras: Record<string, unknown> = {}) {
   const row = db
-    .prepare("SELECT id, metadata FROM whatsapp_messages WHERE message_id = ?")
-    .get(messageId) as { id: string; metadata?: string } | undefined;
+    .prepare("SELECT id, status, metadata FROM whatsapp_messages WHERE message_id = ? ORDER BY created_at DESC LIMIT 1")
+    .get(messageId) as { id: string; status?: string; metadata?: string } | undefined;
   if (!row) return false;
   const mergedMeta = (() => {
     try {
@@ -677,8 +719,9 @@ export function updateWhatsAppStatus(messageId: string, status: string, extras: 
       return extras;
     }
   })();
+  const nextStatus = advanceMessageStatus(row.status, status);
   db.prepare("UPDATE whatsapp_messages SET status = ?, metadata = ?, updated_at = ? WHERE id = ?").run(
-    status,
+    nextStatus,
     JSON.stringify(mergedMeta),
     nowIsoMsg(),
     row.id,
@@ -692,7 +735,7 @@ export function updateWhatsAppStatus(messageId: string, status: string, extras: 
  * don't have to pre-format.
  */
 export function getConversation(phone: string, ownerUid?: string, limit = 200) {
-  const normalized = normalizePhone(phone);
+  const normalized = normalizePhoneDigits(phone);
   const tail = normalized.slice(-9); // tolerate 9- or 12-digit storage
   const sql = ownerUid
     ? `SELECT * FROM whatsapp_messages
@@ -737,7 +780,7 @@ export async function sendWhatsAppTemplate(opts: {
   // strict:false → a missing/empty variable becomes "" instead of leaking the
   // literal "{placeholder}" to the customer (e.g. "عزيزي {customer_name}،").
   const body = renderTemplate(opts.template, opts.vars || {}, { strict: false });
-  const result = await whatsappService.sendText(opts.phone, body, { confirmationCode: opts.outboundCode });
+  const result = await whatsappService.sendTemplate(opts.phone, opts.template, opts.vars || {}, { confirmationCode: opts.outboundCode });
 
   recordWhatsAppMessage({
     type: "template",

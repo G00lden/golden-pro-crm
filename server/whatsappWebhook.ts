@@ -18,6 +18,9 @@ import {
   updateWhatsAppStatus,
 } from "./whatsapp";
 import { logError, logEvent, redactValue } from "./logger";
+import { normalizePhoneDigits, phoneTail } from "../shared/phone";
+import { communicationEventStore } from "./communicationEvents";
+import { routeInboundConversation } from "./inboundConversation";
 
 export type WhatsAppWebhookMessage = {
   from?: string;
@@ -78,23 +81,14 @@ function isTechnicianAck(message: string | null | undefined): string | null {
   return null;
 }
 
-function normalizePhone(phone: string | null | undefined): string {
-  if (!phone) return "";
-  let digits = String(phone).replace(/\D/g, "");
-  if (digits.startsWith("00")) digits = digits.slice(2);
-  if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
-  if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
-  return digits;
-}
-
 /**
  * If the sender matches a technician phone associated with an unconfirmed
  * booking, mark that booking as technician-acknowledged.
  */
 function recordTechnicianAck(ownerUid: string, phone: string) {
-  const normalized = normalizePhone(phone);
+  const normalized = normalizePhoneDigits(phone);
   if (!normalized) return null;
-  const tail = normalized.slice(-9);
+  const tail = phoneTail(normalized);
   const tech = db
     .prepare("SELECT * FROM technicians WHERE phone LIKE ? LIMIT 1")
     .get(`%${tail}%`) as { id?: string } | undefined;
@@ -122,9 +116,9 @@ function recordTechnicianAck(ownerUid: string, phone: string) {
  * shape from maintenanceLifecycle.
  */
 function recordRescheduleRequest(ownerUid: string, phone: string, body: string) {
-  const normalized = normalizePhone(phone);
+  const normalized = normalizePhoneDigits(phone);
   if (!normalized) return null;
-  const tail = normalized.slice(-9);
+  const tail = phoneTail(normalized);
   const reminder = db
     .prepare(
       `SELECT * FROM reminders
@@ -235,14 +229,15 @@ export async function handleWebhook(
         const statuses = Array.isArray(value.statuses) ? value.statuses : [];
 
         for (const message of messages) {
-          // Meta retries webhook deliveries until it gets a 200; skip a message
-          // already recorded so we don't double-record or re-run confirmations.
-          if (message?.id) {
-            const seen = db
-              .prepare("SELECT 1 FROM whatsapp_messages WHERE message_id = ? AND direction = 'inbound' LIMIT 1")
-              .get(String(message.id));
-            if (seen) continue;
-          }
+          const inboundEventId = message?.id ? `message:${String(message.id)}` : "";
+          if (inboundEventId && !communicationEventStore.begin({
+            ownerUid,
+            provider: "whatsapp_cloud",
+            eventId: inboundEventId,
+            eventType: "message",
+            payload: message,
+          })) continue;
+          try {
           const text = message?.text?.body || "";
           // 1. Persist inbound message for the conversation viewer.
           recordWhatsAppMessage({
@@ -296,6 +291,20 @@ export async function handleWebhook(
             }
           }
 
+          // Cloud API and WhatsApp Web now share the same department/agent
+          // router. Non-menu text is a safe no-op until richer intents land.
+          try {
+            const routed = await routeInboundConversation({
+              ownerUid,
+              fromPhone: String(message?.from || ""),
+              text,
+              source: "whatsapp_cloud",
+            });
+            summary.push({ kind: "conversation_route", phone: message?.from, ...routed });
+          } catch (err) {
+            logError("whatsapp.webhook.conversation_route_failed", err);
+          }
+
           summary.push({
             kind: "message",
             from: message?.from,
@@ -304,10 +313,25 @@ export async function handleWebhook(
             wa_id: message?.id,
             timestamp: message?.timestamp,
           });
+          if (inboundEventId) communicationEventStore.markProcessed(ownerUid, "whatsapp_cloud", inboundEventId);
+          } catch (error) {
+            if (inboundEventId) communicationEventStore.release(ownerUid, "whatsapp_cloud", inboundEventId);
+            throw error;
+          }
         }
 
         for (const status of statuses) {
           const messageId = String(status?.id || "");
+          const statusEventId = messageId
+            ? `status:${messageId}:${String(status?.status || "unknown")}:${String(status?.timestamp || "")}`
+            : "";
+          if (statusEventId && !communicationEventStore.begin({
+            ownerUid,
+            provider: "whatsapp_cloud",
+            eventId: statusEventId,
+            eventType: "status",
+            payload: status,
+          })) continue;
           const updated = messageId
             ? updateWhatsAppStatus(messageId, String(status?.status || "unknown"), {
                 recipient_id: status?.recipient_id,
@@ -336,6 +360,7 @@ export async function handleWebhook(
             timestamp: status?.timestamp,
             updated,
           });
+          if (statusEventId) communicationEventStore.markProcessed(ownerUid, "whatsapp_cloud", statusEventId);
         }
       }
     }

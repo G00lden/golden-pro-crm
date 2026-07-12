@@ -16,6 +16,7 @@ import type { Express, NextFunction, Request, Response } from "express";
 import type { AuthedRequest } from "./auth";
 import {
   ackSms,
+  claimPendingSms,
   getNextPendingSms,
   handleGatewayEvent,
   listPendingSms,
@@ -83,7 +84,7 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
         const result = await handleGatewayEvent(gatewayOwnerUid(), req.body || {});
         // Include any freshly-queued SMS so a response-driven automation can
         // also send immediately; polling /outbox remains the canonical path.
-        const pending = listPendingSms(gatewayOwnerUid(), 20);
+        const pending = claimPendingSms(gatewayOwnerUid(), 20, req.get("x-gateway-device-id") || "event-response");
         res.status(200).json({ received: true, ...result, outbox: pending });
       } catch (error) {
         logError("gateway.event.handler_failed", error);
@@ -99,7 +100,7 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
     validateQuery(gatewayOutboxQuerySchema),
     (req, res) => {
       const limit = Number(req.query.limit ?? 20);
-      res.json({ messages: listPendingSms(gatewayOwnerUid(), limit) });
+      res.json({ messages: claimPendingSms(gatewayOwnerUid(), limit, req.get("x-gateway-device-id") || "poll") });
     },
   );
 
@@ -110,7 +111,7 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
     webhookRateLimit,
     requireGatewayToken,
     (_req, res) => {
-      res.json(getNextPendingSms(gatewayOwnerUid()));
+      res.json(getNextPendingSms(gatewayOwnerUid(), _req.get("x-gateway-device-id") || "next"));
     },
   );
 

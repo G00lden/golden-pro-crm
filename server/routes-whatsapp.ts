@@ -29,6 +29,7 @@ import { appendFileSync } from "fs";
 import path from "path";
 import type { AuthedRequest } from "./auth";
 import { logError, logEvent, redactValue } from "./logger";
+import { communicationJobStore } from "./communicationJobs";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -218,11 +219,16 @@ export function registerWhatsAppWebhookRoutes(app: Express, options: WhatsAppRou
   );
 }
 
-export function registerWhatsAppRoutes(app: Express, _options: WhatsAppRouteOptions) {
+export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptions) {
 
-  app.get("/api/whatsapp/status", requireAdmin, (_req, res) => {
-    res.json(whatsappService.getStatus());
-  });
+  app.get(
+    "/api/whatsapp/status",
+    requireAdmin,
+    asyncRoute(async (req, res) => {
+      const refresh = String(req.query.refresh || "").toLowerCase() === "true";
+      res.json(refresh ? await whatsappService.verifyConnection(true) : whatsappService.getStatus());
+    }),
+  );
 
   app.post(
     "/api/whatsapp/connect",
@@ -390,6 +396,19 @@ export function registerWhatsAppRoutes(app: Express, _options: WhatsAppRouteOpti
           }]
         : [];
       res.json({ count: linked.length, devices: linked });
+    }),
+  );
+
+  app.get(
+    "/api/whatsapp/jobs",
+    requireAdmin,
+    asyncRoute(async (req, res) => {
+      const ownerUid = options.whatsappOwnerUid();
+      const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+      res.json({
+        summary: communicationJobStore.summary(ownerUid),
+        jobs: communicationJobStore.listRecent(ownerUid, limit),
+      });
     }),
   );
 }

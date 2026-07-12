@@ -29,7 +29,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10100/);
+    assert.match(result.stdout, /"userVersion":10200/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -51,7 +51,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10100/);
+    assert.match(backups[0], /pre-schema-10200/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
