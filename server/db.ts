@@ -541,9 +541,22 @@ db.exec(`
     owner_uid TEXT PRIMARY KEY,
     provider TEXT DEFAULT 'unifonic',
     main_number TEXT DEFAULT '',
+    company_name TEXT DEFAULT '',
+    call_flow_mode TEXT DEFAULT 'unavailable_reply',
     greeting TEXT DEFAULT '',
     menu_prompt TEXT DEFAULT '',
-    ring_timeout_sec INTEGER DEFAULT 20,
+    ring_timeout_sec INTEGER DEFAULT 15,
+    timezone TEXT DEFAULT 'Asia/Riyadh',
+    business_days TEXT DEFAULT '[6,0,1,2,3,4]',
+    business_open TEXT DEFAULT '08:00',
+    business_close TEXT DEFAULT '21:00',
+    auto_reply_enabled INTEGER DEFAULT 1,
+    reply_cooldown_min INTEGER DEFAULT 10,
+    follow_up_sla_min INTEGER DEFAULT 5,
+    voice_in_hours TEXT DEFAULT '',
+    voice_after_hours TEXT DEFAULT '',
+    whatsapp_in_hours TEXT DEFAULT '',
+    whatsapp_after_hours TEXT DEFAULT '',
     enabled INTEGER DEFAULT 1,
     updated_at TEXT DEFAULT (datetime('now'))
   );
@@ -587,7 +600,11 @@ db.exec(`
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
     provider TEXT DEFAULT 'unifonic',
+    event_id TEXT,
     call_sid TEXT,
+    source TEXT DEFAULT 'unifonic',
+    direction TEXT DEFAULT 'incoming',
+    disposition TEXT DEFAULT 'unknown',
     from_phone TEXT,
     to_phone TEXT,
     department_id TEXT,
@@ -603,6 +620,11 @@ db.exec(`
     forwarded_at TEXT,
     ended_at TEXT,
     duration_sec INTEGER DEFAULT 0,
+    occurred_at TEXT,
+    phone_account_id TEXT,
+    action_state TEXT DEFAULT 'none',
+    follow_up_task_id TEXT,
+    last_customer_reply_at TEXT,
     metadata TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
@@ -610,6 +632,41 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_call_logs_owner ON call_logs(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_call_logs_sid ON call_logs(call_sid);
   CREATE INDEX IF NOT EXISTS idx_call_logs_missed ON call_logs(owner_uid, missed, created_at DESC);
+
+  -- Durable WhatsApp actions generated from a cellular call. Pending rows stay
+  -- queued while WhatsApp Web is disconnected and are retried after reconnect.
+  CREATE TABLE IF NOT EXISTS call_action_runs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    action_key TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    recipient TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    provider_message_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    sent_at TEXT,
+    UNIQUE(call_id, action_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_action_runs_pending
+    ON call_action_runs(owner_uid, status, next_attempt_at, created_at);
+
+  CREATE TABLE IF NOT EXISTS call_status_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    call_id TEXT,
+    status TEXT DEFAULT 'unknown',
+    occurred_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, event_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_status_events_call ON call_status_events(call_id, created_at DESC);
 
   -- Self-hosted phone gateway outbox. When a reply must go out as SMS (because
   -- WhatsApp isn't connected), it is queued here; the user's Android automation
@@ -728,6 +785,50 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
+
+// Missed-call automation settings. These ALTERs keep existing installations
+// compatible while fresh databases receive the same columns above.
+for (const col of [
+  ["company_name", "TEXT DEFAULT ''"],
+  ["call_flow_mode", "TEXT DEFAULT 'unavailable_reply'"],
+  ["timezone", "TEXT DEFAULT 'Asia/Riyadh'"],
+  ["business_days", "TEXT DEFAULT '[6,0,1,2,3,4]'"],
+  ["business_open", "TEXT DEFAULT '08:00'"],
+  ["business_close", "TEXT DEFAULT '21:00'"],
+  ["auto_reply_enabled", "INTEGER DEFAULT 1"],
+  ["reply_cooldown_min", "INTEGER DEFAULT 10"],
+  ["follow_up_sla_min", "INTEGER DEFAULT 5"],
+  ["voice_in_hours", "TEXT DEFAULT ''"],
+  ["voice_after_hours", "TEXT DEFAULT ''"],
+  ["whatsapp_in_hours", "TEXT DEFAULT ''"],
+  ["whatsapp_after_hours", "TEXT DEFAULT ''"],
+] as const) {
+  if (!hasColumn("telephony_config", col[0])) {
+    db.exec(`ALTER TABLE telephony_config ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+for (const col of [
+  ["event_id", "TEXT"],
+  ["source", "TEXT DEFAULT 'unifonic'"],
+  ["direction", "TEXT DEFAULT 'incoming'"],
+  ["disposition", "TEXT DEFAULT 'unknown'"],
+  ["occurred_at", "TEXT"],
+  ["phone_account_id", "TEXT"],
+  ["action_state", "TEXT DEFAULT 'none'"],
+  ["follow_up_task_id", "TEXT"],
+  ["last_customer_reply_at", "TEXT"],
+] as const) {
+  if (!hasColumn("call_logs", col[0])) {
+    db.exec(`ALTER TABLE call_logs ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_call_logs_owner_event_id
+    ON call_logs(owner_uid, event_id) WHERE event_id IS NOT NULL AND event_id <> '';
+  CREATE INDEX IF NOT EXISTS idx_call_logs_phone_time
+    ON call_logs(owner_uid, from_phone, occurred_at DESC);
+`);
 
 for (const col of [
   ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],

@@ -189,6 +189,10 @@ npm run deploy:firebase
 
 خطوات النشر التفصيلية وإعداد Secret Manager وربط سلة موثقة في `docs/cloud-deployment.md`.
 
+## الرد على المكالمات غير المجابة
+
+تم تنفيذ مسار زين المشروط → `Unifonic Voice` → رد صوتي → مهمة CRM → واتساب ويب، مع طابور دائم ومنع التكرار وتطبيق أندرويد مكمّل. دليل الإعداد والاختبار وبوابة الإطلاق موجود في `docs/zain-unifonic-missed-call-whatsapp.md`.
+
 ## أوامر الفحص
 
 ```bash

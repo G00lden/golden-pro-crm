@@ -3480,9 +3480,22 @@ export type TelephonyConfig = {
   owner_uid: string;
   provider: string;
   main_number: string;
+  company_name: string;
+  call_flow_mode: "unavailable_reply" | "menu";
   greeting: string;
   menu_prompt: string;
   ring_timeout_sec: number;
+  timezone: string;
+  business_days: number[];
+  business_open: string;
+  business_close: string;
+  auto_reply_enabled: boolean;
+  reply_cooldown_min: number;
+  follow_up_sla_min: number;
+  voice_in_hours: string;
+  voice_after_hours: string;
+  whatsapp_in_hours: string;
+  whatsapp_after_hours: string;
   enabled: boolean;
 };
 
@@ -3496,6 +3509,14 @@ export type CallLogRow = {
   agent_phone: string | null;
   customer_name: string | null;
   status: string;
+  source: string;
+  direction: string;
+  disposition: string;
+  occurred_at: string | null;
+  duration_sec: number;
+  action_state: string;
+  follow_up_task_id: string | null;
+  last_customer_reply_at: string | null;
   missed: number;
   handled: number;
   handled_at: string | null;
@@ -3547,11 +3568,30 @@ export type CallStats = { missed_unhandled: number; missed_today: number; total_
 
 export const getCallStats = () => apiFetch<CallStats>("/api/telephony/calls/summary");
 
-export const testMissedCall = (data: { from_phone: string; digit?: string; department_id?: string }) =>
-  apiFetch<{ success: boolean; callSid: string; department: string; result: unknown }>(
+export type AutomatedCallDisposition = "no_answer" | "busy" | "unreachable" | "rejected" | "after_hours";
+
+export const testMissedCall = (data: { from_phone: string; disposition?: AutomatedCallDisposition; digit?: string; department_id?: string }) =>
+  apiFetch<{ success: boolean; callSid: string; disposition: AutomatedCallDisposition; department: string | null; prepared: unknown; drained: unknown }>(
     "/api/telephony/test-missed",
     { method: "POST", body: JSON.stringify(data) },
   );
+
+export type CallActionRow = {
+  id: string;
+  call_id: string;
+  action_type: string;
+  recipient: string;
+  status: string;
+  attempts: number;
+  last_error: string | null;
+  created_at: string;
+};
+
+export const getCallActions = () =>
+  apiFetch<{ actions: CallActionRow[] }>("/api/telephony/actions").then((r) => r.actions);
+
+export const retryCallActions = () =>
+  apiFetch<{ processed: number; sent: number; pending: number; failed: number; dryRun: number }>("/api/telephony/actions/retry", { method: "POST" });
 
 /* ── Self-hosted phone gateway ─────────────────────────────────────────────── */
 

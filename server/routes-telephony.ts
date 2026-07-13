@@ -27,7 +27,6 @@ import {
   listDepartments,
   markCallHandled,
   recordCall,
-  runMissedCallFlow,
   updateCallBySid,
   updateDepartment,
   upsertTelephonyConfig,
@@ -44,6 +43,8 @@ import {
   telephonyCallsQuerySchema,
 } from "./validation";
 import { logError } from "./logger";
+import { drainCallActionQueue, listCallActions, prepareCallAutomation } from "./callAutomation";
+import type { CallDisposition } from "./callPolicy";
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -158,7 +159,7 @@ export function registerTelephonyWebhookRoutes(app: Express, options: TelephonyR
         (req.query || {}) as Record<string, unknown>,
       );
       try {
-        const result = await handleCallStatus(status);
+        const result = await handleCallStatus(ownerUid, status);
         res.status(200).json({ received: true, ...result });
       } catch (error) {
         // Best-effort: always 200 so the provider doesn't retry-storm.
@@ -248,6 +249,14 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
     res.json(callStats(owner()));
   });
 
+  app.get("/api/telephony/actions", requireAdmin, (_req, res) => {
+    res.json({ actions: listCallActions(owner()) });
+  });
+
+  app.post("/api/telephony/actions/retry", requireAdmin, asyncRoute(async (_req, res) => {
+    res.json(await drainCallActionQueue(owner(), 50, true));
+  }));
+
   // Mark a (missed) call as handled/followed-up.
   app.post("/api/telephony/calls/:id/handle", requireAdmin, (req, res) => {
     const ok = markCallHandled(owner(), req.params.id, (req as AuthedRequest).user?.uid || "admin");
@@ -263,37 +272,47 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
     validate(telephonyTestMissedSchema),
     asyncRoute(async (req, res) => {
       const ownerUid = owner();
-      const body = req.body as { from_phone: string; digit?: string; department_id?: string };
+      const body = req.body as {
+        from_phone: string;
+        digit?: string;
+        department_id?: string;
+        disposition?: CallDisposition;
+      };
       const departments = listDepartments(ownerUid);
       const department = body.department_id
         ? departments.find((d) => d.id === body.department_id)
         : body.digit
           ? departments.find((d) => d.digit === body.digit)
           : departments[0];
-      if (!department) throw httpError(400, "لا يوجد قسم مطابق. أنشئ قسماً أولاً.");
-      const agent = department.agents.find((a) => a.active && a.phone) || department.agents[0];
+      const agent = department?.agents.find((a) => a.active && a.phone) || department?.agents[0];
 
       const callSid = `test_${crypto.randomUUID().slice(0, 12)}`;
-      recordCall({
+      const disposition = body.disposition || "no_answer";
+      const call = recordCall({
         ownerUid,
         provider: getTelephonyConfig(ownerUid).provider,
         callSid,
         from: body.from_phone,
         to: getTelephonyConfig(ownerUid).main_number || "",
-        status: "no_answer",
+        status: disposition,
+        source: "simulator",
+        disposition,
+        occurredAt: new Date().toISOString(),
       });
       updateCallBySid(callSid, {
-        department_id: department.id,
-        department_name: department.name,
-        selected_digit: department.digit,
+        department_id: department?.id || null,
+        department_name: department?.name || null,
+        selected_digit: department?.digit || null,
         agent_user_id: agent?.user_id || null,
         agent_phone: agent?.phone || null,
         agent_name: agent?.name || null,
-        status: "no_answer",
+        status: disposition,
+        disposition,
         missed: 1,
       });
-      const result = await runMissedCallFlow(callSid);
-      res.json({ success: true, callSid, department: department.name, result });
+      const prepared = prepareCallAutomation(call.id, getTelephonyConfig(ownerUid));
+      const drained = await drainCallActionQueue(ownerUid);
+      res.json({ success: true, callSid, disposition, department: department?.name || null, prepared, drained });
     }),
   );
 }

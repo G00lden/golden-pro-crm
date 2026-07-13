@@ -26,15 +26,42 @@ const STATUS_LABEL: Record<string, string> = {
   menu: "في القائمة",
   forwarding: "جارٍ التحويل",
   in_progress: "قيد المكالمة",
-  completed: "تمت",
+  answered: "تم الرد",
   no_answer: "لم يُرد",
   busy: "مشغول",
-  failed: "فشلت",
-  voicemail: "بريد صوتي",
+  unreachable: "مغلق أو خارج التغطية",
+  rejected: "مرفوضة",
+  after_hours: "خارج الدوام",
+  blocked: "محظورة",
+  outgoing: "صادرة",
+  unknown: "غير مؤكدة",
   ringing: "يرن",
   routed: "مُحوّلة لموظف",
   handled: "تمت المعالجة",
 };
+
+const ACTION_LABEL: Record<string, string> = {
+  none: "تسجيل فقط",
+  queued: "في طابور واتساب",
+  sent: "أُرسلت الرسالة",
+  dry_run: "اختبار جاف",
+  waiting_whatsapp: "بانتظار ربط واتساب",
+  failed_whatsapp: "الرقم غير متاح على واتساب",
+  cooldown: "مُنعت للتكرار",
+  task_created: "أُنشئت مهمة",
+  customer_replied: "رد العميل",
+  not_applicable: "تسجيل فقط",
+};
+
+const BUSINESS_DAYS = [
+  { value: 6, label: "السبت" },
+  { value: 0, label: "الأحد" },
+  { value: 1, label: "الاثنين" },
+  { value: 2, label: "الثلاثاء" },
+  { value: 3, label: "الأربعاء" },
+  { value: 4, label: "الخميس" },
+  { value: 5, label: "الجمعة" },
+];
 
 type DraftAgent = { name: string; phone: string };
 type DraftDept = {
@@ -59,27 +86,28 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   const [config, setConfig] = useState<api.TelephonyConfig | null>(null);
   const [departments, setDepartments] = useState<api.TelephonyDepartment[]>([]);
   const [calls, setCalls] = useState<api.CallLogRow[]>([]);
-  const [gateway, setGateway] = useState<api.GatewayStatus | null>(null);
+  const [actions, setActions] = useState<api.CallActionRow[]>([]);
   const [draft, setDraft] = useState<DraftDept>(emptyDraft());
   const [savingDept, setSavingDept] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [testPhone, setTestPhone] = useState("");
   const [testDigit, setTestDigit] = useState("");
+  const [testDisposition, setTestDisposition] = useState<api.AutomatedCallDisposition>("no_answer");
 
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, depts, log, gw] = await Promise.all([
+      const [cfg, depts, log, queuedActions] = await Promise.all([
         api.getTelephonyConfig(),
         api.getTelephonyDepartments(),
         api.getCallLogs({ limit: 100 }),
-        api.getGatewayStatus().catch(() => null),
+        api.getCallActions().catch(() => []),
       ]);
       setConfig(cfg);
       setDepartments(depts);
       setCalls(log);
-      setGateway(gw);
+      setActions(queuedActions);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر تحميل نظام المكالمات", false);
     } finally {
@@ -97,13 +125,8 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
     if (!config) return;
     setSavingConfig(true);
     try {
-      const saved = await api.updateTelephonyConfig({
-        main_number: config.main_number,
-        greeting: config.greeting,
-        menu_prompt: config.menu_prompt,
-        ring_timeout_sec: config.ring_timeout_sec,
-        enabled: config.enabled,
-      });
+      const { owner_uid: _ownerUid, provider: _provider, ...patch } = config;
+      const saved = await api.updateTelephonyConfig(patch);
       setConfig(saved);
       notify("تم حفظ إعدادات المكالمات", true);
     } catch (error) {
@@ -186,8 +209,12 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
       return;
     }
     try {
-      const res = await api.testMissedCall({ from_phone: testPhone.trim(), digit: testDigit.trim() || undefined });
-      notify(`تمت محاكاة مكالمة فائتة لقسم ${res.department}`, true);
+      const res = await api.testMissedCall({
+        from_phone: testPhone.trim(),
+        disposition: testDisposition,
+        digit: testDigit.trim() || undefined,
+      });
+      notify(`تمت محاكاة الحالة: ${STATUS_LABEL[res.disposition] || res.disposition}`, true);
       setTestPhone("");
       setTestDigit("");
       await refresh();
@@ -213,58 +240,27 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             <PhoneCall size={22} /> نظام المكالمات والتحويل
           </h1>
           <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
-            قائمة صوتية ترد على المتصلين وتحوّلهم للموظف المختص، وعند عدم الرد ترسل واتساب للعميل والموظف.
+            تحويل زين المشروط إلى Unifonic، ثم رد صوتي ورسالة واتساب ومهمة متابعة داخل CRM.
           </p>
         </div>
         <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} /> تحديث</button>
       </header>
 
-      {/* Self-hosted gateway (no external provider, no WhatsApp QR) */}
       <div className="card" style={{ padding: 16, display: "grid", gap: 10, border: "1px solid rgba(96,165,250,0.35)" }}>
         <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <Smartphone size={18} /> البوابة الذاتية (جوالك) — بدون مزوّد خارجي
-          <span style={{ fontSize: 12, padding: "2px 10px", borderRadius: 8,
-            background: gateway?.configured ? "rgba(15,191,108,0.15)" : "rgba(245,158,11,0.15)",
-            color: gateway?.configured ? "#0fbf6c" : "#f59e0b" }}>
-            {gateway?.configured ? "مُفعّلة (التوكن مضبوط)" : "تحتاج ضبط GATEWAY_TOKEN"}
-          </span>
+          <Smartphone size={18} /> مسار المكالمة التجاري
         </h3>
-        <p style={{ margin: 0, opacity: 0.8, fontSize: 13, lineHeight: 1.8 }}>
-          ضع شريحة الشركة في جوال أندرويد وشغّل تطبيق أتمتة مجاني (MacroDroid/Tasker) ليرسل أحداث المكالمات لخادمك ويرسل ردود SMS من شريحتك.
-          نمط التوجيه الحالي: <strong>{gateway?.routing_mode === "direct" ? "تحويل مباشر" : "قائمة عبر SMS (يرد العميل برقم)"}</strong> — يُضبط عبر <code>GATEWAY_ROUTING_MODE</code>.
+        <p style={{ margin: 0, opacity: 0.82, fontSize: 13, lineHeight: 1.9 }}>
+          رقم زين يحوّل المكالمة المشروطة بعد 15 ثانية إلى Unifonic. يرد Unifonic صوتياً، ثم يحفظ CRM الحدث ويرسل من واتساب ويب وينشئ مهمة متابعة. تطبيق أندرويد يسجل المكالمات المجابة والصادرة فقط، ولا تعتمد عليه حالات الهاتف المطفأ.
         </p>
-        <div style={{ display: "grid", gap: 4, fontSize: 12 }}>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/event  (ترويسة x-gateway-token)</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>GET  {baseUrl}/api/gateway/outbox   ← الرسائل المنتظرة للإرسال</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/outbox/ack  ← تأكيد الإرسال</code>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
+          <span>إجراءات مرسلة: <strong>{actions.filter((action) => action.status === "sent").length}</strong></span>
+          <span>بالطابور: <strong>{actions.filter((action) => ["pending", "retry", "sending"].includes(action.status)).length}</strong></span>
+          <span>اختبار جاف: <strong>{actions.filter((action) => action.status === "dry_run").length}</strong></span>
+          <button className="btn muted" type="button" onClick={async () => { await api.retryCallActions(); await refresh(); }}>
+            إعادة محاولة الطابور
+          </button>
         </div>
-        <p style={{ margin: 0, opacity: 0.7, fontSize: 12 }}>
-          الدليل الكامل لإعداد الجوال في <code>docs/gateway-setup.md</code>. الرسائل المنتظرة الآن: <strong>{gateway?.pending ?? 0}</strong>.
-          {!gateway?.configured && " تظهر الردود محلياً حتى تضبط التوكن."}
-        </p>
-        {gateway && gateway.recent.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead><tr style={{ textAlign: "right", opacity: 0.7 }}>
-                <th style={{ padding: 5 }}>الوقت</th><th style={{ padding: 5 }}>إلى</th>
-                <th style={{ padding: 5 }}>النوع</th><th style={{ padding: 5 }}>الحالة</th><th style={{ padding: 5 }}>النص</th>
-              </tr></thead>
-              <tbody>
-                {gateway.recent.slice(0, 12).map((m) => (
-                  <tr key={m.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-                    <td style={{ padding: 5, whiteSpace: "nowrap" }}>{fmtDateTime(m.created_at)}</td>
-                    <td style={{ padding: 5 }}>{m.to_phone}</td>
-                    <td style={{ padding: 5 }}>{m.role === "agent" ? "موظف" : "عميل"}</td>
-                    <td style={{ padding: 5, color: m.status === "sent" ? "#0fbf6c" : m.status === "failed" ? "#ef4444" : "#f59e0b" }}>
-                      {m.status === "sent" ? "أُرسلت" : m.status === "failed" ? "فشلت" : "بالانتظار"}
-                    </td>
-                    <td style={{ padding: 5, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.body}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
       {/* Config */}
@@ -273,6 +269,11 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
           <h3 style={{ margin: 0 }}>الإعدادات العامة</h3>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
             <label className="field">
+              <span>اسم الشركة في الرسائل</span>
+              <input className="input" value={config.company_name}
+                onChange={(e) => setConfig({ ...config, company_name: e.target.value })} />
+            </label>
+            <label className="field">
               <span>الرقم الأساسي (للإعلانات)</span>
               <input className="input" value={config.main_number}
                 onChange={(e) => setConfig({ ...config, main_number: e.target.value })}
@@ -280,8 +281,16 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             </label>
             <label className="field">
               <span>مهلة الرنين (ثانية)</span>
-              <input className="input" type="number" min={5} max={120} value={config.ring_timeout_sec}
-                onChange={(e) => setConfig({ ...config, ring_timeout_sec: Number(e.target.value) || 20 })} />
+              <input className="input" type="number" min={15} max={120} value={config.ring_timeout_sec}
+                onChange={(e) => setConfig({ ...config, ring_timeout_sec: Number(e.target.value) || 15 })} />
+            </label>
+            <label className="field">
+              <span>آلية الرد</span>
+              <select className="input" value={config.call_flow_mode}
+                onChange={(e) => setConfig({ ...config, call_flow_mode: e.target.value as api.TelephonyConfig["call_flow_mode"] })}>
+                <option value="unavailable_reply">رسالة تعذر الرد ثم إنهاء</option>
+                <option value="menu">قائمة صوتية قديمة</option>
+              </select>
             </label>
             <label className="field" style={{ alignSelf: "end" }}>
               <span>تفعيل النظام</span>
@@ -291,19 +300,48 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
                 <option value="0">متوقف</option>
               </select>
             </label>
+            <label className="field" style={{ alignSelf: "end" }}>
+              <span>إرسال الاعتذار التلقائي</span>
+              <select className="input" value={config.auto_reply_enabled ? "1" : "0"}
+                onChange={(e) => setConfig({ ...config, auto_reply_enabled: e.target.value === "1" })}>
+                <option value="1">مفعّل</option>
+                <option value="0">متوقف — تسجيل فقط</option>
+              </select>
+            </label>
           </div>
-          <label className="field">
-            <span>رسالة الترحيب</span>
-            <input className="input" value={config.greeting}
-              onChange={(e) => setConfig({ ...config, greeting: e.target.value })}
-              placeholder="مرحباً بكم في شركتنا." />
-          </label>
-          <label className="field">
-            <span>نص القائمة (اتركه فارغاً لتوليده تلقائياً من الأقسام)</span>
-            <input className="input" value={config.menu_prompt}
-              onChange={(e) => setConfig({ ...config, menu_prompt: e.target.value })}
-              placeholder="للمبيعات اضغط 1، للصيانة اضغط 2" />
-          </label>
+          <div className="field">
+            <span>أيام الدوام</span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {BUSINESS_DAYS.map((day) => (
+                <label key={day.value} style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 9px", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }}>
+                  <input type="checkbox" checked={config.business_days.includes(day.value)} onChange={(e) => setConfig({
+                    ...config,
+                    business_days: e.target.checked
+                      ? [...config.business_days, day.value]
+                      : config.business_days.filter((value) => value !== day.value),
+                  })} />
+                  {day.label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+            <label className="field"><span>بداية الدوام</span><input className="input" type="time" value={config.business_open} onChange={(e) => setConfig({ ...config, business_open: e.target.value })} /></label>
+            <label className="field"><span>نهاية الدوام</span><input className="input" type="time" value={config.business_close} onChange={(e) => setConfig({ ...config, business_close: e.target.value })} /></label>
+            <label className="field"><span>المنطقة الزمنية</span><input className="input" value={config.timezone} onChange={(e) => setConfig({ ...config, timezone: e.target.value })} /></label>
+            <label className="field"><span>منع التكرار (دقيقة)</span><input className="input" type="number" min={0} value={config.reply_cooldown_min} onChange={(e) => setConfig({ ...config, reply_cooldown_min: Number(e.target.value) || 0 })} /></label>
+            <label className="field"><span>مهلة المتابعة داخل الدوام</span><input className="input" type="number" min={1} value={config.follow_up_sla_min} onChange={(e) => setConfig({ ...config, follow_up_sla_min: Number(e.target.value) || 5 })} /></label>
+          </div>
+          <label className="field"><span>الصوت داخل الدوام</span><textarea className="input" rows={2} value={config.voice_in_hours} onChange={(e) => setConfig({ ...config, voice_in_hours: e.target.value })} /></label>
+          <label className="field"><span>الصوت خارج الدوام</span><textarea className="input" rows={2} value={config.voice_after_hours} onChange={(e) => setConfig({ ...config, voice_after_hours: e.target.value })} /></label>
+          <label className="field"><span>واتساب داخل الدوام</span><textarea className="input" rows={2} value={config.whatsapp_in_hours} onChange={(e) => setConfig({ ...config, whatsapp_in_hours: e.target.value })} /></label>
+          <label className="field"><span>واتساب خارج الدوام</span><textarea className="input" rows={2} value={config.whatsapp_after_hours} onChange={(e) => setConfig({ ...config, whatsapp_after_hours: e.target.value })} /></label>
+          {config.call_flow_mode === "menu" && (
+            <>
+              <label className="field"><span>رسالة الترحيب للقائمة</span><input className="input" value={config.greeting} onChange={(e) => setConfig({ ...config, greeting: e.target.value })} /></label>
+              <label className="field"><span>نص القائمة</span><input className="input" value={config.menu_prompt} onChange={(e) => setConfig({ ...config, menu_prompt: e.target.value })} /></label>
+            </>
+          )}
           <div>
             <button className="btn primary" type="button" onClick={saveConfig} disabled={savingConfig}>
               <Save size={14} /> {savingConfig ? "…" : "حفظ الإعدادات"}
@@ -403,6 +441,9 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         <p style={{ opacity: 0.7, marginBottom: 0 }}>
           أرسل السر المشترك في الترويسة <code>x-telephony-webhook-secret</code> (نفس قيمة <code>TELEPHONY_WEBHOOK_SECRET</code>).
         </p>
+        <p style={{ marginBottom: 0, color: "#f59e0b" }}>
+          شرط الإطلاق: اختبر من رقم ثالث أن التحويل المشروط من زين يحافظ على رقم المتصل الأصلي داخل Webhook في الحالات الأربع. لا تفعّل الإرسال التجاري قبل نجاح هذا الاختبار.
+        </p>
       </div>
 
       {/* Test missed call */}
@@ -412,6 +453,14 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input className="input" style={{ flex: 2, minWidth: 180 }} value={testPhone} placeholder="رقم جوال العميل 9665XXXXXXXX"
             onChange={(e) => setTestPhone(e.target.value)} />
+          <select className="input" style={{ flex: 1, minWidth: 170 }} value={testDisposition}
+            onChange={(e) => setTestDisposition(e.target.value as api.AutomatedCallDisposition)}>
+            <option value="no_answer">لم يُرد خلال 15 ثانية</option>
+            <option value="busy">مشغول</option>
+            <option value="unreachable">مغلق أو خارج التغطية</option>
+            <option value="rejected">مرفوضة</option>
+            <option value="after_hours">خارج الدوام</option>
+          </select>
           <input className="input" style={{ flex: 1, minWidth: 90 }} maxLength={1} value={testDigit} placeholder="القسم (رقم)"
             onChange={(e) => setTestDigit(e.target.value.replace(/[^0-9]/g, ""))} />
           <button className="btn primary" type="button" onClick={runTest}><PhoneMissed size={14} /> تشغيل الاختبار</button>
@@ -436,6 +485,8 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
                   <th style={{ padding: 6 }}>القسم</th>
                   <th style={{ padding: 6 }}>الموظف</th>
                   <th style={{ padding: 6 }}>الحالة</th>
+                  <th style={{ padding: 6 }}>المصدر</th>
+                  <th style={{ padding: 6 }}>إجراء واتساب</th>
                   <th style={{ padding: 6 }}>المتابعة</th>
                 </tr>
               </thead>
@@ -450,7 +501,9 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
                     </td>
                     <td style={{ padding: 6 }}>{c.department_name || (c.selected_digit ? `#${c.selected_digit}` : "—")}</td>
                     <td style={{ padding: 6 }}>{c.agent_name || c.agent_phone || "—"}</td>
-                    <td style={{ padding: 6, color: c.missed && !c.handled ? "#ef4444" : undefined }}>{STATUS_LABEL[c.status] || c.status}</td>
+                    <td style={{ padding: 6, color: c.missed && !c.handled ? "#ef4444" : undefined }}>{STATUS_LABEL[c.disposition] || STATUS_LABEL[c.status] || c.disposition || c.status}</td>
+                    <td style={{ padding: 6 }}>{c.source === "android" ? "أندرويد" : c.source === "unifonic" ? "Unifonic" : c.source || "—"}</td>
+                    <td style={{ padding: 6 }}>{ACTION_LABEL[c.action_state] || c.action_state || "—"}</td>
                     <td style={{ padding: 6 }}>
                       {c.handled
                         ? <span style={{ color: "#0fbf6c" }}>✓ تمت المعالجة</span>

@@ -57,6 +57,7 @@ export class WhatsAppService {
   // callbacks so whatsapp.ts has no dependency on the routing engine.
   private incomingCallHandler?: (fromPhone: string) => void | Promise<void>;
   private inboundMessageHandler?: (fromPhone: string, text: string) => void | Promise<void>;
+  private connectedHandler?: () => void | Promise<void>;
   private handledCalls = new Set<string>();
   private answeredCalls = new Set<string>();
 
@@ -188,6 +189,11 @@ export class WhatsAppService {
     this.inboundMessageHandler = handler;
   }
 
+  /** Register a handler used to resume durable outbound work after QR reconnect. */
+  onConnected(handler: () => void | Promise<void>) {
+    this.connectedHandler = handler;
+  }
+
   private jidToPhone(jid: string | undefined): string {
     return String(jid || "").split("@")[0].split(":")[0];
   }
@@ -279,6 +285,13 @@ export class WhatsAppService {
     }
 
     const jid = this.toJid(phone);
+    if (typeof this.sock.onWhatsApp === "function") {
+      const registration = await this.sock.onWhatsApp(jid);
+      const first = Array.isArray(registration) ? registration[0] : null;
+      if (first && first.exists === false) {
+        throw new Error("Recipient number is not registered on WhatsApp.");
+      }
+    }
     const result = await this.sock.sendMessage(jid, { text: message });
     // Remember the content so Baileys can resend it if the recipient's device
     // fails to decrypt (retry receipt) — otherwise it stays "Waiting for this
@@ -390,6 +403,9 @@ export class WhatsAppService {
         this.user = sock.user?.id || "";
         this.connectedAt = this.connectedAt || new Date().toISOString();
         this.notifyWaiters();
+        Promise.resolve(this.connectedHandler?.()).catch(() => {
+          // Queue retry failures are persisted by the handler itself.
+        });
       }
 
       if (connection === "close") {

@@ -135,14 +135,28 @@ export const telephonyDepartmentUpdateSchema = telephonyDepartmentSchema.partial
 
 export const telephonyConfigSchema = z.object({
   main_number: z.string().max(32).optional(),
+  company_name: z.string().min(1).max(160).optional(),
+  call_flow_mode: z.enum(['unavailable_reply', 'menu']).optional(),
   greeting: z.string().max(2000).optional(),
   menu_prompt: z.string().max(2000).optional(),
   ring_timeout_sec: z.coerce.number().int().min(5).max(120).optional(),
+  timezone: z.string().min(1).max(80).optional(),
+  business_days: z.array(z.coerce.number().int().min(0).max(6)).min(1).max(7).optional(),
+  business_open: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  business_close: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  auto_reply_enabled: z.boolean().optional(),
+  reply_cooldown_min: z.coerce.number().int().min(0).max(1440).optional(),
+  follow_up_sla_min: z.coerce.number().int().min(1).max(1440).optional(),
+  voice_in_hours: z.string().min(1).max(2000).optional(),
+  voice_after_hours: z.string().min(1).max(2000).optional(),
+  whatsapp_in_hours: z.string().min(1).max(2000).optional(),
+  whatsapp_after_hours: z.string().min(1).max(2000).optional(),
   enabled: z.boolean().optional(),
 });
 
 export const telephonyTestMissedSchema = z.object({
   from_phone: z.string().min(1, 'from_phone is required').max(32),
+  disposition: z.enum(['no_answer', 'busy', 'unreachable', 'rejected', 'after_hours']).optional(),
   digit: z.string().regex(/^[0-9]$/, 'digit must be a single 0-9 character').optional(),
   department_id: z.string().max(160).optional(),
 });
@@ -155,11 +169,18 @@ export const telephonyCallsQuerySchema = z.object({
 // Self-hosted phone gateway schemas
 
 export const gatewayEventSchema = z.object({
+  eventId: z.string().max(160).optional(),
   type: z.string().min(1, 'type is required').max(40),
   from: z.string().max(32).optional(),
   to: z.string().max(32).optional(),
   text: z.string().max(2000).optional(),
   ts: z.string().max(40).optional(),
+  callSid: z.string().max(160).optional(),
+  source: z.string().max(40).optional(),
+  disposition: z.string().max(40).optional(),
+  durationSeconds: z.coerce.number().int().min(0).max(86400).optional(),
+  occurredAt: z.string().max(40).optional(),
+  phoneAccountId: z.string().max(160).optional(),
 }).passthrough();
 
 export const gatewayOutboxQuerySchema = z.object({
