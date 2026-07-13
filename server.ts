@@ -35,6 +35,8 @@ import {
   registerGatewayWebhookRoutes,
 } from "./server/routes-gateway";
 import { registerPaymentRoutes, registerPaymentWebhookRoute } from "./server/routes-payment";
+import { registerAssetPublicRoutes, registerAssetRoutes } from "./server/routes-assets";
+import { runAssetReminders } from "./server/assetMaintenance";
 import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
@@ -254,6 +256,8 @@ async function startServer() {
   // ── Route modules ──
   registerHealthRoutes(app);
 
+  registerAssetPublicRoutes(app);
+
   registerStoreRoutes(app, { webhookRateLimit });
 
   // WhatsApp webhook callbacks + admin endpoints
@@ -329,6 +333,8 @@ async function startServer() {
   registerSallaRoutes(app);
 
   registerPaymentRoutes(app);
+
+  registerAssetRoutes(app);
 
   registerMaintenanceRoutes(app);
 
@@ -463,6 +469,7 @@ async function startServer() {
       async () => {
         try {
           await runDueReminders({ mode: "scheduled" });
+          await runAssetReminders({ trigger: "scheduled", limit: 500 });
         } catch (error) {
           logError("scheduler.reminder_failed", error);
         }

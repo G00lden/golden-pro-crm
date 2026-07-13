@@ -287,6 +287,35 @@ export class WhatsAppService {
     return { jid, messageId: result?.key?.id || null };
   }
 
+  async sendMedia(
+    phone: string,
+    media: { type: "image" | "video"; url: string; caption?: string },
+    options: OutboundSendOptions = {},
+  ) {
+    const decision = decideOutbound(phone, options);
+    if (!decision.allowed) return dryRunSendResult(phone, this.provider, decision.reason);
+    if (!/^https:\/\//i.test(media.url)) throw new Error("WhatsApp media URL must use HTTPS.");
+
+    if (this.provider === "cloud_api") {
+      const to = this.toInternationalPhone(phone);
+      return this.sendCloudPayload(to, {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: media.type,
+        [media.type]: { link: media.url, caption: media.caption || undefined },
+      });
+    }
+    if (this.status !== "connected" || !this.sock) throw new Error("WhatsApp is not connected.");
+    const jid = this.toJid(phone);
+    const content = media.type === "image"
+      ? { image: { url: media.url }, caption: media.caption || "" }
+      : { video: { url: media.url }, caption: media.caption || "" };
+    const result = await this.sock.sendMessage(jid, content);
+    this.rememberSentMessage(result?.key?.id, result?.message);
+    return { jid, messageId: result?.key?.id || null };
+  }
+
   private async startSocket() {
     if (this.starting) return this.starting;
 
@@ -561,13 +590,14 @@ export class WhatsAppService {
   }
 
   private async sendCloudText(phone: string, message: string) {
+    const to = this.toInternationalPhone(phone);
+    return this.sendCloudPayload(to, this.buildCloudPayload(to, message));
+  }
+
+  private async sendCloudPayload(to: string, payload: Record<string, unknown>) {
     const token = this.cloudToken();
     const phoneNumberId = this.cloudPhoneNumberId();
-    if (!token || !phoneNumberId) {
-      throw new Error("WhatsApp Cloud API credentials are missing.");
-    }
-
-    const to = this.toInternationalPhone(phone);
+    if (!token || !phoneNumberId) throw new Error("WhatsApp Cloud API credentials are missing.");
     const version = process.env.WHATSAPP_CLOUD_API_VERSION || "v23.0";
     const response = await fetch(`https://graph.facebook.com/${version}/${phoneNumberId}/messages`, {
       method: "POST",
@@ -575,7 +605,7 @@ export class WhatsAppService {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(this.buildCloudPayload(to, message)),
+      body: JSON.stringify(payload),
     });
 
     const body = await response.json().catch(() => ({}));

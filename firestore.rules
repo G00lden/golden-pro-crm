@@ -244,5 +244,35 @@ service cloud.firestore {
       allow read: if ownsExisting();
       allow create, update, delete: if false;
     }
+
+    match /customer_assets/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /service_cycles/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /asset_events/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /marketing_campaigns/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /odoo_import_runs/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /replacement_links/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
   }
 }

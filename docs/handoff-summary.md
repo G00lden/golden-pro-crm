@@ -348,3 +348,11 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 **مُعلَّم لهيرميز** (ملفات المتجر — لم ألمسها): `server/routes-store.ts:37` يسجّل `req.originalUrl` بسلسلة الاستعلام مثل الخطأ المُصلَح في #51 — يُنصَح بنفس المعالجة (`loggablePath`).
 
 **متبقٍّ من تدقيق الفوترة السابق** (بلا تغيير — يحتاج قرار محاسبي): بنود الخصم/ضريبة الترويسة (#4)، ومحدِّد شامل/غير شامل لكل بند غير مفعّل (#5). لا نتائج تدقيق مفتوحة أخرى من هذه الجولة.
+# 2026-07-13 — Asset maintenance, QR activation and warranty
+
+- Added independent customer assets with pre-printed unassigned QR labels and authenticated technician activation.
+- Added per-product service policies with multiple independent tasks, optional WhatsApp media, dynamic CTA metadata, and invoice-date warranty countdown.
+- Added overdue cadence (10 days for 12 attempts, then monthly) and next-cycle scheduling from actual completion.
+- Added manual wholesale campaigns, explicit customer type, Odoo CSV preview/import plus optional JSON-RPC customer sync.
+- Salla policy-enabled device orders stage assets for technician activation; compatible consumables auto-link to one device or enter a staff selection queue.
+- Added SQLite schema/adapters, Supabase migration/RLS, Firestore indexes/rules, unit tests, docs, and responsive React UI under **الأجهزة والتذكيرات**.

@@ -30,6 +30,7 @@ export type Page =
   | "invoices"
   | "odooCrm"
   | "products"
+  | "assets"
   | "installations"
   | "bookings"
   | "storeOrders"

@@ -132,7 +132,7 @@ export function registerSallaRoutes(app: Express) {
         if (message.includes("not linked") || message.includes("token")) {
           throw httpError(412, message);
         }
-        throw error;
+        throw httpError(424, message.includes("Salla") ? message : `Salla sync failed: ${message}`);
       }
     }),
   );

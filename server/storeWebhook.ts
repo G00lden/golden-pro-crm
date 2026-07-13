@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import type { Request } from "express";
 import { adminDb } from "./firebaseAdmin";
+import { stageAssetsFromStoreOrder } from "./assetMaintenance";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
 
@@ -1155,6 +1156,7 @@ export async function importStoreOrderForUser(
   extras: Record<string, unknown> = {},
 ): Promise<ImportedOrderResult> {
   const imported = await importStoreOrder(uid, order);
+  await stageAssetsFromStoreOrder(uid, order, imported);
 
   if (!localStoreFallbackEnabled()) {
     const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);

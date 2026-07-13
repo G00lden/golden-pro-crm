@@ -11,6 +11,7 @@ import {
   Package,
   PhoneCall,
   Plus,
+  QrCode,
   Receipt,
   RefreshCcw,
   Settings,
@@ -26,6 +27,8 @@ import {
   useEffect,
   useRef,
   useState,
+  lazy,
+  Suspense,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -70,6 +73,8 @@ import {
   type Toast,
   fmtDate,
 } from "./shared";
+
+const AssetsPage = lazy(() => import("./pages/Assets"));
 
 type AuthMode = "login" | "register";
 
@@ -338,6 +343,7 @@ export default function App() {
     { id: "invoices" as Page, label: "الفواتير", icon: Receipt },
     { id: "odooCrm" as Page, label: "CRM Odoo", icon: ClipboardList },
     { id: "products" as Page, label: "المنتجات", icon: Package },
+    { id: "assets" as Page, label: "الأجهزة والتذكيرات", icon: QrCode, badge: summary.overdue },
     { id: "installations" as Page, label: "الصيانة", icon: Wrench, badge: summary.overdue },
     { id: "bookings" as Page, label: "الحجوزات", icon: CalendarDays },
     { id: "storeOrders" as Page, label: "طلبات المتجر", icon: ClipboardList },
@@ -368,6 +374,7 @@ export default function App() {
     invoices: <InvoicesPage notify={notify} refreshStats={stats.refresh} />,
     odooCrm: <OdooCrmPage notify={notify} />,
     products: <ProductsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
+    assets: <Suspense fallback={<Loading />}><AssetsPage notify={notify} /></Suspense>,
     installations: <InstallationsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     bookings: <BookingsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     storeOrders: <StoreOrdersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
