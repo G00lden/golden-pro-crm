@@ -20,9 +20,10 @@ import {
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
 import QRCode from "qrcode";
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal, flushSync } from "react-dom";
 import * as api from "../api";
+import { useDialogAccessibility } from "../dialogAccessibility";
 import { calculateDocumentLineAmounts, calculateDocumentTotals } from "../../shared/financial";
 import { generateZatcaQrBase64, resolveInvoiceTaxType } from "../../shared/zatca";
 
@@ -404,25 +405,25 @@ function InvoiceBadge({ status }: { status: api.InvoiceStatus }) {
 /* ── Modal ─────────────────────────────────────────────── */
 
 function InvoiceModal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [onClose]);
+  const dialogRef = useRef<HTMLElement>(null);
+  const titleId = useId();
+  useDialogAccessibility(dialogRef, onClose);
+
   return createPortal(
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <section className="modal wide invoice-modal" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        ref={dialogRef}
+        className="modal wide invoice-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <header className="modal-head">
-          <h2>{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           <button className="icon-btn" type="button" title="إغلاق" aria-label="إغلاق" onClick={onClose}>
-            <X size={16} />
+            <X size={16} aria-hidden="true" />
           </button>
         </header>
         {children}
@@ -461,6 +462,7 @@ function invoiceShareText(invoice: api.Invoice) {
     invoice.discount ? `الخصم: ${money(invoice.discount, invoice.currency)}` : "",
     `الخاضع للضريبة بعد الخصم: ${money(invoice.total_without_vat, invoice.currency)}`,
     `ضريبة القيمة المضافة (${invoice.vat_percent}%): ${money(invoice.vat_amount, invoice.currency)}`,
+    Number(invoice.additional_fee || 0) > 0 ? `رسوم إضافية: ${money(invoice.additional_fee, invoice.currency)}` : "",
     `الإجمالي شامل الضريبة: ${money(invoice.total_with_vat, invoice.currency)}`,
     invoice.terms ? `الشروط: ${invoice.terms}` : "",
   ].filter(Boolean).join("\n");
@@ -474,6 +476,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   const [editing, setEditing] = useState<api.Invoice | null>(null);
   const [preview, setPreview] = useState<api.Invoice | null>(null);
   const [creating, setCreating] = useState(false);
+  const [invoiceFormDirty, setInvoiceFormDirty] = useState(false);
   const [sendingInvoiceId, setSendingInvoiceId] = useState("");
   const invoices = useAsyncData(() => api.getInvoices({ search, status }), [search, status]);
   const stats = invoices.data?.stats || {
@@ -501,6 +504,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
         await api.createInvoice(payload);
         notify("تم إصدار الفاتورة");
       }
+      setInvoiceFormDirty(false);
       setCreating(false);
       setEditing(null);
       await refreshAll();
@@ -509,7 +513,34 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     }
   };
 
+  const openNewInvoice = () => {
+    setInvoiceFormDirty(false);
+    setEditing(null);
+    setCreating(true);
+  };
+
+  const openInvoiceEditor = (invoice: api.Invoice) => {
+    setInvoiceFormDirty(false);
+    setCreating(false);
+    setEditing(invoice);
+  };
+
+  const closeInvoiceEditor = useCallback(() => {
+    if (invoiceFormDirty && !window.confirm("إغلاق نموذج الفاتورة؟ ستفقد التغييرات غير المحفوظة.")) return;
+    setInvoiceFormDirty(false);
+    setCreating(false);
+    setEditing(null);
+  }, [invoiceFormDirty]);
+
   const setInvoiceStatus = async (invoice: api.Invoice, nextStatus: api.InvoiceStatus) => {
+    if (
+      (nextStatus === "cancelled" || nextStatus === "refunded")
+      && !window.confirm(
+        nextStatus === "cancelled"
+          ? `تأكيد إلغاء الفاتورة ${invoice.invoice_number}؟`
+          : `تأكيد تعليم الفاتورة ${invoice.invoice_number} كمستردة؟`,
+      )
+    ) return;
     try {
       await api.setInvoiceStatus(invoice.id, nextStatus);
       notify(nextStatus === "paid" ? "تم تأكيد الدفع" : nextStatus === "cancelled" ? "تم إلغاء الفاتورة" : "تم تحديث حالة الفاتورة");
@@ -571,11 +602,13 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     }
     setSendingInvoiceId(invoice.id);
     try {
-      await api.sendInvoiceWhatsApp(invoice, invoiceShareText(invoice));
-      if (invoice.status === "draft" || invoice.status === "issued") {
+      const response = await api.sendInvoiceWhatsApp(invoice, invoiceShareText(invoice));
+      const typedResponse = response as { dry_run?: boolean; result?: { dryRun?: boolean } };
+      const dryRun = Boolean(typedResponse.dry_run || typedResponse.result?.dryRun);
+      if (!dryRun && (invoice.status === "draft" || invoice.status === "issued")) {
         await api.setInvoiceStatus(invoice.id, "sent");
       }
-      notify("تم إرسال الفاتورة عبر واتساب");
+      notify(dryRun ? "تمت محاكاة إرسال الفاتورة فقط؛ لم تُرسل للعميل ولم تتغير حالتها" : "تم إرسال الفاتورة عبر واتساب");
       await refreshAll();
     } catch (err) {
       notify(err instanceof Error ? err.message : "تعذر إرسال الفاتورة واتساب", false);
@@ -610,7 +643,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
           <h1>الفواتير الضريبية (ZATCA)</h1>
           <p>إصدار فواتير ضريبية واضحة مع رمز QR لحقول المرحلة الأولى. التكامل مع منصة فاتورة للمرحلة الثانية غير مفعّل بعد.</p>
           <div className="hero-actions">
-            <button className="btn primary" type="button" onClick={() => setCreating(true)}>
+            <button className="btn primary" type="button" onClick={openNewInvoice}>
               <Plus size={16} /> إصدار فاتورة
             </button>
             <button className="btn muted" type="button" onClick={invoices.refresh}>
@@ -717,7 +750,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                 <button className="icon-btn" type="button" title="نسخ" aria-label="نسخ نص الفاتورة" onClick={() => copyInvoice(invoice)}>
                   <Copy size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="تعديل" aria-label="تعديل الفاتورة" onClick={() => setEditing(invoice)}>
+                <button className="icon-btn" type="button" title="تعديل" aria-label="تعديل الفاتورة" onClick={() => openInvoiceEditor(invoice)}>
                   <Edit3 size={15} />
                 </button>
                 {invoice.customer_phone && (
@@ -760,18 +793,19 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
         <div className="empty">
           <FileText size={30} />
           <p>لا توجد فواتير بعد</p>
-          <button className="btn primary" type="button" onClick={() => setCreating(true)}>
+          <button className="btn primary" type="button" onClick={openNewInvoice}>
             <Plus size={16} /> إصدار أول فاتورة
           </button>
         </div>
       )}
 
       {(creating || editing) && (
-        <InvoiceModal title={editing ? "تعديل الفاتورة" : "إصدار فاتورة ضريبية"} onClose={() => { setCreating(false); setEditing(null); }}>
+        <InvoiceModal title={editing ? "تعديل الفاتورة" : "إصدار فاتورة ضريبية"} onClose={closeInvoiceEditor}>
           <InvoiceForm
             initial={editing || undefined}
             notify={notify}
-            onCancel={() => { setCreating(false); setEditing(null); }}
+            onCancel={closeInvoiceEditor}
+            onDirtyChange={setInvoiceFormDirty}
             onSave={saveInvoice}
           />
         </InvoiceModal>
@@ -800,6 +834,7 @@ function invoiceBreakdown(invoice: api.Invoice) {
     discountValue: invoice.discount_value ?? invoice.discount,
     discountMode: invoice.discount_mode === "percent" ? "percent" : "fixed",
     vatPercent: invoice.vat_percent,
+    additionalTax: invoice.additional_fee,
   });
 }
 
@@ -925,6 +960,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
             <p><span>الخصم</span><strong>{money(invoice.discount, invoice.currency)}</strong></p>
             <p><span>الخاضع للضريبة بعد الخصم</span><strong>{money(invoice.total_without_vat, invoice.currency)}</strong></p>
             <p><span>ضريبة القيمة المضافة ({invoice.vat_percent}%)</span><strong>{money(invoice.vat_amount, invoice.currency)}</strong></p>
+            {Number(invoice.additional_fee || 0) > 0 && <p><span>رسوم إضافية</span><strong>{money(invoice.additional_fee, invoice.currency)}</strong></p>}
             <p className="grand"><span>الإجمالي شامل الضريبة</span><strong>{money(invoice.total_with_vat, invoice.currency)}</strong></p>
           </div>
         </section>
@@ -964,13 +1000,16 @@ function InvoiceForm({
   initial,
   notify,
   onCancel,
+  onDirtyChange,
   onSave,
 }: {
   initial?: api.Invoice;
   notify: Notifier;
   onCancel: () => void;
+  onDirtyChange: (dirty: boolean) => void;
   onSave: (payload: api.InvoiceInput) => Promise<void>;
 }) {
+  const additionalFeeHelpId = useId();
   const customers = useAsyncData(() => api.getCustomers(""), []);
   const products = useAsyncData(() => api.getProducts(), []);
   const settings = useAsyncData(() => api.getSettings(), []);
@@ -987,6 +1026,7 @@ function InvoiceForm({
   const [vatPercent, setVatPercent] = useState(String(initial?.vat_percent ?? 15));
   const [discountMode, setDiscountMode] = useState<api.DiscountMode>(initial?.discount_mode || "fixed");
   const [discountValue, setDiscountValue] = useState(String(initial?.discount_value ?? initial?.discount ?? 0));
+  const [additionalFee, setAdditionalFee] = useState(String(initial?.additional_fee ?? 0));
   const [sellerName, setSellerName] = useState(initial?.seller_name || "");
   const [sellerVat, setSellerVat] = useState(initial?.seller_vat_number || "");
   const [sellerAddress, setSellerAddress] = useState(initial?.seller_address || "");
@@ -1031,7 +1071,8 @@ function InvoiceForm({
     discountValue: Number(discountValue || 0),
     discountMode,
     vatPercent: Number(vatPercent || 0),
-  }), [normalizedItems, discountValue, discountMode, vatPercent]);
+    additionalTax: Number(additionalFee || 0),
+  }), [normalizedItems, discountValue, discountMode, vatPercent, additionalFee]);
   const vatRate = financialTotals.vatPercent / 100;
   const resolvedInvoiceType = resolveInvoiceTaxType({
     requested: invoiceType,
@@ -1077,6 +1118,7 @@ function InvoiceForm({
         discount: financialTotals.discountAmount,
         discount_mode: discountMode,
         discount_value: Number(discountValue || 0),
+        additional_fee: financialTotals.additionalTax,
         currency: "SAR",
         items: normalizedItems.filter((item) => item.description.trim()),
         notes: notes.trim(),
@@ -1093,7 +1135,12 @@ function InvoiceForm({
   };
 
   return (
-    <form className="form quote-form" onSubmit={submit}>
+    <form
+      className="form quote-form"
+      aria-busy={saving}
+      onChange={() => onDirtyChange(true)}
+      onSubmit={submit}
+    >
       <div className="form-grid">
         <label className="field">
           <span>عميل موجود</span>
@@ -1209,10 +1256,29 @@ function InvoiceForm({
         </label>
       </div>
 
+      <div className="form-grid">
+        <label className="field">
+          <span>رسوم إضافية بعد الضريبة</span>
+          <input
+            className="input"
+            name="additional_fee"
+            autoComplete="off"
+            inputMode="decimal"
+            type="number"
+            min={0}
+            step="0.01"
+            value={additionalFee}
+            aria-describedby={additionalFeeHelpId}
+            onChange={(event) => setAdditionalFee(event.target.value)}
+          />
+          <small id={additionalFeeHelpId}>لا تدخل ضريبة القيمة المضافة هنا؛ هذا الحقل للرسوم المستقلة فقط.</small>
+        </label>
+      </div>
+
       <div className="quote-price-mode" aria-label="طريقة الخصم">
         <span>طريقة الخصم</span>
-        <button type="button" className={discountMode === "fixed" ? "active" : ""} onClick={() => setDiscountMode("fixed")}>مبلغ ثابت</button>
-        <button type="button" className={discountMode === "percent" ? "active" : ""} onClick={() => setDiscountMode("percent")}>نسبة مئوية</button>
+        <button type="button" aria-pressed={discountMode === "fixed"} className={discountMode === "fixed" ? "active" : ""} onClick={() => setDiscountMode("fixed")}>مبلغ ثابت</button>
+        <button type="button" aria-pressed={discountMode === "percent"} className={discountMode === "percent" ? "active" : ""} onClick={() => setDiscountMode("percent")}>نسبة مئوية</button>
       </div>
 
       <div className="quote-price-mode" aria-label="طريقة إدخال السعر">
@@ -1333,6 +1399,12 @@ function InvoiceForm({
           <span>ضريبة {financialTotals.vatPercent}%</span>
           <strong>{money(financialTotals.vatAmount)}</strong>
         </article>
+        {financialTotals.additionalTax > 0 && (
+          <article>
+            <span>رسوم إضافية</span>
+            <strong>{money(financialTotals.additionalTax)}</strong>
+          </article>
+        )}
         <article className="total">
           <span>الإجمالي شامل الضريبة</span>
           <strong>{money(financialTotals.total)}</strong>
@@ -1350,10 +1422,10 @@ function InvoiceForm({
       </label>
 
       <div className="form-actions">
-        <button className="btn primary" type="submit" disabled={saving}>
-          <FileText size={16} /> {saving ? "جاري الحفظ…" : "حفظ الفاتورة"}
+        <button className="btn primary" type="submit" disabled={saving} aria-busy={saving}>
+          <FileText size={16} aria-hidden="true" /> {saving ? "جاري الحفظ…" : "حفظ الفاتورة"}
         </button>
-        <button className="btn muted" type="button" onClick={onCancel}>إلغاء</button>
+        <button className="btn muted" type="button" disabled={saving} onClick={onCancel}>إلغاء</button>
       </div>
     </form>
   );

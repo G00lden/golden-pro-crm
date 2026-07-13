@@ -1,6 +1,7 @@
 import { Users, FileText, Package, UserRoundCog, Wrench, CircleAlert, CalendarDays, UserPlus, Plus, Send, PhoneMissed } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import * as api from "../api";
+import { createPerItemActionLock, isOutboundSimulation } from "../outboundAction";
 import {
   Button,
   Badge,
@@ -22,33 +23,63 @@ export default function Dashboard({
   notify,
   refreshStats,
   go,
+  canManageCalls = false,
+  canSeedDemoData = false,
 }: {
   stats: api.DashboardStats;
   notify: (message: string, ok?: boolean) => void;
   refreshStats: () => Promise<void>;
   go: (page: Page) => void;
+  canManageCalls?: boolean;
+  canSeedDemoData?: boolean;
 }) {
   const installations = useData(api.getInstallations);
-  const callStats = useData(api.getCallStats);
+  const callStats = useData(api.getCallStats, [], canManageCalls);
   const missedPending = callStats.data?.missed_unhandled || 0;
   const [seeding, setSeeding] = useState(false);
+  const [remindingIds, setRemindingIds] = useState<Set<string>>(() => new Set());
+  const reminderLock = useRef(createPerItemActionLock()).current;
+  const showDemoDataAction = canSeedDemoData && !import.meta.env.PROD;
   const urgent = (installations.data || []).filter((item) => item.status === "active" && Number(item.days_until) <= 7);
   const upcoming = (installations.data || []).filter((item) => item.status === "active" && Number(item.days_until) > 7 && Number(item.days_until) <= 30);
   const completedRate = stats.installations ? Math.round(((stats.completed || 0) / stats.installations) * 100) : 0;
   const messageLimit = stats.maxDaily || 24;
   const messageUsage = Math.min(100, Math.round(((stats.sentToday || 0) / messageLimit) * 100));
 
+  const setReminderPending = (installationId: string, pending: boolean) => {
+    setRemindingIds((current) => {
+      const next = new Set(current);
+      if (pending) next.add(installationId);
+      else next.delete(installationId);
+      return next;
+    });
+  };
+
   const sendReminder = async (installation: api.Installation) => {
+    if (!reminderLock.acquire(installation.id)) return;
+    setReminderPending(installation.id, true);
     try {
-      await api.remindInstallation(installation.id, installation.next_remind_type || "first");
-      notify("تم إرسال التذكير");
+      const result = await api.remindInstallation(installation.id, installation.next_remind_type || "first");
+      if (isOutboundSimulation(result)) {
+        notify("محاكاة فقط: لم تُرسل رسالة للعميل ولم يتغير عداد أو مرحلة التذكير.", false);
+        return;
+      }
+      if (!result.success) {
+        notify(result.error || result.reason || "لم يُرسل التذكير. راجع إعدادات واتساب.", false);
+        return;
+      }
+      notify("تم إرسال التذكير فعلياً");
       await Promise.all([installations.refresh(), refreshStats()]);
     } catch (error) {
       notify(error instanceof Error ? error.message : "فشل إرسال التذكير", false);
+    } finally {
+      reminderLock.release(installation.id);
+      setReminderPending(installation.id, false);
     }
   };
 
   const addDemoData = async () => {
+    if (!window.confirm("ستُضاف سجلات تجريبية جديدة إلى حسابك المحلي. هل تريد المتابعة؟")) return;
     setSeeding(true);
     try {
       const result = await api.seedDemoData(10);
@@ -71,7 +102,9 @@ export default function Dashboard({
           <p>المهام الحرجة، الصيانة، ورعاية العملاء في شاشة واحدة.</p>
           <div className="hero-actions">
             <Button onClick={() => go("installations")}><Plus size={16} /> إضافة صيانة</Button>
-            <Button tone="muted" loading={seeding} onClick={addDemoData}><Plus size={16} /> إضافة 10 تجربة</Button>
+            {showDemoDataAction && (
+              <Button tone="muted" loading={seeding} onClick={addDemoData}><Plus size={16} /> إضافة 10 تجربة</Button>
+            )}
           </div>
         </div>
         <div className="hero-status-grid">
@@ -95,7 +128,9 @@ export default function Dashboard({
         actions={
           <>
             <Button onClick={() => go("installations")}><Plus size={16} /> إضافة صيانة</Button>
-            <Button tone="muted" loading={seeding} onClick={addDemoData}><Plus size={16} /> إضافة 10 تجربة</Button>
+            {showDemoDataAction && (
+              <Button tone="muted" loading={seeding} onClick={addDemoData}><Plus size={16} /> إضافة 10 تجربة</Button>
+            )}
           </>
         }
       />
@@ -109,7 +144,9 @@ export default function Dashboard({
         <Stat title="متأخرة" value={stats.overdue || 0} icon={<CircleAlert size={20} />} tone="danger" />
         <Stat title="خلال أسبوع" value={stats.week || 0} icon={<CalendarDays size={20} />} tone="warn" />
         <Stat title="تحتاج رعاية" value={stats.care || 0} icon={<UserPlus size={20} />} tone={stats.care ? "danger" : "success"} />
-        <Stat title="مكالمات فائتة للمتابعة" value={missedPending} icon={<PhoneMissed size={20} />} tone={missedPending ? "danger" : "success"} onClick={() => go("callSystem")} />
+        {canManageCalls && (
+          <Stat title="مكالمات فائتة للمتابعة" value={missedPending} icon={<PhoneMissed size={20} />} tone={missedPending ? "danger" : "success"} onClick={() => go("callSystem")} />
+        )}
       </div>
 
       <section className="cloud-panel operations-strip">
@@ -139,9 +176,24 @@ export default function Dashboard({
         </div>
         {installations.loading ? <Loading /> : urgent.length ? (
           <div className="list">
-            {urgent.slice(0, 8).map((item) => (
-              <InstallationCard key={item.id} installation={item} onRemind={() => sendReminder(item)} />
-            ))}
+            {urgent.slice(0, 8).map((item) => {
+              const reminderPending = remindingIds.has(item.id);
+              return (
+                <fieldset
+                  key={item.id}
+                  disabled={reminderPending}
+                  aria-busy={reminderPending}
+                  style={{ border: 0, padding: 0, margin: 0, minInlineSize: 0 }}
+                >
+                  <InstallationCard installation={item} onRemind={() => sendReminder(item)} />
+                  {reminderPending && (
+                    <p className="note" role="status" aria-live="polite">
+                      جاري التحقق من وضع الإرسال…
+                    </p>
+                  )}
+                </fieldset>
+              );
+            })}
           </div>
         ) : (
           <Empty title="لا توجد صيانة عاجلة" />

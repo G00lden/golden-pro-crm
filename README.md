@@ -177,17 +177,17 @@ VITE_LOCAL_AUTH=false
 FIREBASE_SERVICE_ACCOUNT_PATH=/secure/path/service-account.json
 ```
 
-## Cloud Run + Hosting
+## VPS + Hosting
 
-المشروع يحتوي `Dockerfile` و`firebase.json`. Cloud Run مناسب للواجهة والـ API، أما WhatsApp Web فهو أكثر ثباتا على VPS أو سيرفر دائم لأن الجلسة تحتاج عملية طويلة العمر وتخزين دائم.
+الإصدار الحالي يُنشر كاملًا على VPS عبر Docker لأنه يعتمد على SQLite وجلسة واتساب ذات تخزين دائم. مسار Cloud Run معطّل عمدًا كي لا يُنتج نسخة ناقصة أو يفقد البيانات والجلسة.
 
 ```bash
 npm run doctor:prod
-npm run deploy:cloudrun
+npm run deploy:vps -- -HostName YOUR_VPS_HOST -SshKey YOUR_SSH_KEY
 npm run deploy:firebase
 ```
 
-خطوات النشر التفصيلية وإعداد Secret Manager وربط سلة موثقة في `docs/cloud-deployment.md`.
+خطوات النشر التفصيلية والنسخ الاحتياطي وربط سلة موثقة في `docs/vps-deployment-ar.md`.
 
 ## أوامر الفحص
 
@@ -207,4 +207,4 @@ npm run test:smoke
 - `docs/model-context.md`: سياق شامل مخصص لإرساله لأي موديل لفهم المشروع بسرعة.
 - `docs/store-webhook-architecture.md`: تفاصيل رحلة سلة والويب هوك.
 - `docs/reminder-architecture.md`: تفاصيل التذكيرات والجدولة والإرسال.
-- `docs/cloud-deployment.md`: خطوات النقل إلى VPS أو Cloud Run.
+- `docs/vps-deployment-ar.md`: خطوات النشر المدعومة على VPS.

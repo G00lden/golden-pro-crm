@@ -214,8 +214,9 @@ export function onAppAuthStateChanged(callback: (user: AppUser | null) => void) 
   };
 }
 
-// Connection Test (Only run in browser)
-if (typeof window !== 'undefined') {
+// Connection Test (Only run in a real Firebase browser session). Local QA uses
+// the loopback API and must not make an unsolicited Firestore request.
+if (typeof window !== 'undefined' && !localAuthEnabled) {
   async function testConnection() {
     try {
       await getDocFromServer(doc(db, 'test', 'connection'));

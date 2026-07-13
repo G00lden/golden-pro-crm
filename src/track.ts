@@ -3,7 +3,7 @@
  * that lands in Step 3 of the roadmap. Today this:
  *
  *   1. Pushes events to window.dataLayer (GTM-ready).
- *   2. POSTs to /api/track/event when that endpoint exists (no-op until then).
+ *   2. POSTs a privacy-minimised event to the server's validated no-storage intake.
  *   3. Logs in dev for visibility.
  *
  * Once GTM is wired (checklist 5.9), the dataLayer push becomes a real
@@ -101,7 +101,7 @@ export function trackEvent(event: TrackEvent): void {
   // 1. Dev visibility
   if (isDev) {
     // eslint-disable-next-line no-console
-    console.log("[track]", event.name, payload);
+    console.log("[track] event dispatched");
   }
 
   // 2. GTM dataLayer (becomes the trigger for every downstream tag once GTM is wired)
@@ -114,15 +114,36 @@ export function trackEvent(event: TrackEvent): void {
   ga4Event(event.name, eventParams);
   trackMetaEvent(event.name, eventParams);
 
-  // 3. Best-effort server-side fire for CAPI dedup. Endpoint may not exist yet
-  // and that's OK — we just swallow the error.
+  // 3. Privacy-minimised server intake. Attribution ids and arbitrary metadata
+  // stay out of this request; the server also strips unknown fields defensively.
+  const serverPayload = {
+    event: event.name,
+    event_id: payload.event_id,
+    value: event.value,
+    currency: event.currency,
+    page: window.location.pathname,
+    ts: payload.ts,
+  };
   try {
-    fetch("/api/track/event", {
+    void fetch("/api/track/event", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(serverPayload),
       keepalive: true,
-    }).catch(() => undefined);
+      cache: "no-store",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+    }).then((response) => {
+      if (!response.ok && isDev) {
+        // eslint-disable-next-line no-console
+        console.warn(`[track] intake rejected event (${response.status})`);
+      }
+    }).catch(() => {
+      if (isDev) {
+        // eslint-disable-next-line no-console
+        console.warn("[track] intake unavailable");
+      }
+    });
   } catch { /* ignore */ }
 }
 

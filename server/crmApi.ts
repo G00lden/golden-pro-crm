@@ -37,6 +37,7 @@ import {
   validateInstallments,
   type DiscountMode,
 } from "../shared/financial";
+import { productIsMerged, visibleCatalogProductCount, visibleCatalogProducts } from "../shared/productCatalogState";
 import {
   generateZatcaQrBase64,
   resolveInvoiceTaxType,
@@ -57,6 +58,7 @@ import {
   parseCustomerListQuery,
   sortCustomerRecords,
 } from "./customerPagination";
+import { invalidateStoreProductCatalogIndex } from "./storeWebhook";
 
 const ownedRepository = createOwnedRepository(adminDb as unknown as FirestoreLikeStore);
 const {
@@ -68,6 +70,77 @@ const {
   delete: deleteOwned,
   findBlockingReferences,
 } = ownedRepository;
+
+type ProductDeleteLifecycleEvent = {
+  phase: "after_read_before_soft_delete";
+  uid: string;
+  id: string;
+};
+
+let productDeleteLifecycleObserver:
+  ((event: ProductDeleteLifecycleEvent) => void | Promise<void>) | null = null;
+
+/** Test-only lifecycle seam for deterministic delete/deduplication races. */
+export const __crmApiTestables = {
+  setProductDeleteLifecycleObserver(
+    observer: ((event: ProductDeleteLifecycleEvent) => void | Promise<void>) | null,
+  ) {
+    productDeleteLifecycleObserver = observer;
+  },
+};
+
+/**
+ * Keep the store-order catalog index coherent with operator mutations. These
+ * functions are deliberately below the repository boundary so every server
+ * caller gets the same invalidation semantics, not just the HTTP handler.
+ */
+export async function createProductForUser(uid: string, data: Record<string, unknown>) {
+  const id = await createOwned("products", uid, data);
+  invalidateStoreProductCatalogIndex(uid);
+  return id;
+}
+
+export async function updateProductForUser(uid: string, id: string, data: Record<string, unknown>) {
+  const updated = await updateOwned("products", id, uid, data);
+  if (updated) invalidateStoreProductCatalogIndex(uid);
+  return updated;
+}
+
+function productIsStoreManaged(product: Record<string, unknown>) {
+  return String(product.source || "").trim().toLowerCase() === "salla"
+    || Boolean(String(product.store_product_id || "").trim());
+}
+
+export async function deleteProductForUser(uid: string, id: string) {
+  const existing = await getOwned("products", id, uid);
+  if (!existing || productIsMerged(existing) || productIsStoreManaged(existing)) return false;
+
+  await productDeleteLifecycleObserver?.({
+    phase: "after_read_before_soft_delete",
+    uid,
+    id,
+  });
+
+  // Re-read after the lifecycle gap. Deduplication may have converted this
+  // identity into a merged tombstone while the delete request was in flight.
+  // Treat that as a successful logical deletion without overwriting its merge
+  // metadata. No product identity is ever physically deleted here.
+  const current = await getOwned("products", id, uid);
+  if (!current) return false;
+  if (productIsMerged(current)) {
+    invalidateStoreProductCatalogIndex(uid);
+    return true;
+  }
+  if (productIsStoreManaged(current)) return false;
+
+  const retired = await updateOwned("products", id, uid, {
+    catalog_visible: false,
+    is_available: false,
+    store_status: "manual_deleted",
+  });
+  if (retired) invalidateStoreProductCatalogIndex(uid);
+  return retired;
+}
 
 type DocSnapshot = {
   id: string;
@@ -121,11 +194,6 @@ function docData(doc: DocSnapshot): Record<string, any> & { id: string } {
   return { id: doc.id, ...doc.data() };
 }
 
-function catalogProductIsVisible(product: Record<string, unknown>) {
-  const value = product.catalog_visible;
-  return value !== false && value !== 0 && String(value).toLowerCase() !== "false";
-}
-
 async function stats(uid: string) {
   const [
     customerCount,
@@ -141,7 +209,7 @@ async function stats(uid: string) {
   ] = await Promise.all([
     countOwned("customers", uid),
     listOwned("products", uid, undefined, MAX_OWNED_SCAN_LIMIT)
-      .then((rows) => rows.filter(catalogProductIsVisible).length),
+      .then(visibleCatalogProductCount),
     countOwned("technicians", uid),
     countOwned("installations", uid),
     countOwned("quotes", uid),
@@ -677,11 +745,11 @@ export function registerCrmApiRoutes(app: express.Express) {
 
   app.get("/api/products", asyncRoute(async (req, res) => {
     const products = await listOwned("products", userId(req), "name", MAX_OWNED_SCAN_LIMIT);
-    res.json(products.filter(catalogProductIsVisible));
+    res.json(visibleCatalogProducts(products));
   }));
 
   app.post("/api/products", validate(productCreateSchema), asyncRoute(async (req, res) => {
-    const id = await createOwned("products", userId(req), {
+    const id = await createProductForUser(userId(req), {
       ...req.body,
       interval_months: Number(req.body?.interval_months || 1),
       category: req.body?.category || "",
@@ -695,7 +763,7 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.put("/api/products/:id", validateParams(crmIdParamsSchema), validate(productUpdateSchema), asyncRoute(async (req, res) => {
-    if (!(await updateOwned("products", req.params.id, userId(req), {
+    if (!(await updateProductForUser(userId(req), req.params.id, {
       ...req.body,
       interval_months: req.body?.interval_months ? Number(req.body.interval_months) : undefined,
     }))) return res.status(404).json({ error: "Product was not found." });
@@ -712,7 +780,7 @@ export function registerCrmApiRoutes(app: express.Express) {
     if (blocking) {
       return res.status(409).json({ error: `لا يمكن حذف المنتج لارتباطه بسجلات: ${blocking}. احذفها أو أعد إسنادها أولًا.` });
     }
-    if (!(await deleteOwned("products", id, uid))) return res.status(404).json({ error: "Product was not found." });
+    if (!(await deleteProductForUser(uid, id))) return res.status(404).json({ error: "Product was not found." });
     res.json({ success: true });
   }));
 
@@ -1005,12 +1073,14 @@ function invoiceTotals(
   discountValue = 0,
   vatPercent = 15,
   discountMode: DiscountMode = "fixed",
+  additionalFee = 0,
 ) {
   const totals = calculateDocumentTotals({
     lines: items,
     discountValue,
     discountMode,
     vatPercent,
+    additionalTax: additionalFee,
   });
   return {
     subtotal: totals.subtotal,
@@ -1020,6 +1090,7 @@ function invoiceTotals(
     vat: totals.vatAmount,
     vat_percent: totals.vatPercent,
     vat_amount: totals.vatAmount,
+    additional_fee: totals.additionalTax,
     total_without_vat: totals.totalWithoutVat,
     total_with_vat: totals.total,
   };
@@ -1028,7 +1099,13 @@ function invoiceTotals(
 function normalizeInvoice(row: Record<string, any>): Record<string, any> {
   const items = normalizeInvoiceItems(row.items);
   const discountMode: DiscountMode = row.discount_mode === "percent" ? "percent" : "fixed";
-  const totals = invoiceTotals(items, row.discount_value ?? row.discount, row.vat_percent, discountMode);
+  const totals = invoiceTotals(
+    items,
+    row.discount_value ?? row.discount,
+    row.vat_percent,
+    discountMode,
+    row.additional_fee,
+  );
   const vatAmount = Number(row.vat_amount ?? row.vat ?? totals.vat_amount);
   const totalWithoutVat = Number(row.total_without_vat ?? totals.total_without_vat);
   const sellerVatNumber = String(row.seller_vat_number || row.seller_vat || "").trim();
@@ -1049,8 +1126,9 @@ function normalizeInvoice(row: Record<string, any>): Record<string, any> {
     vat: vatAmount,
     vat_percent: Number(row.vat_percent ?? totals.vat_percent),
     vat_amount: vatAmount,
+    additional_fee: Number(row.additional_fee ?? totals.additional_fee),
     total_without_vat: totalWithoutVat,
-    total_with_vat: Number(row.total_with_vat ?? totalWithoutVat + vatAmount),
+    total_with_vat: Number(row.total_with_vat ?? totals.total_with_vat),
     seller_vat: String(row.seller_vat || sellerVatNumber).trim(),
     seller_vat_number: sellerVatNumber,
     invoice_type: invoiceType,
@@ -1069,6 +1147,7 @@ function invoiceBreakdown(invoice: Record<string, any>) {
     discountValue: invoice.discount_value ?? invoice.discount,
     discountMode: invoice.discount_mode === "percent" ? "percent" : "fixed",
     vatPercent: invoice.vat_percent,
+    additionalTax: invoice.additional_fee,
   });
 }
 
@@ -1199,6 +1278,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       <p><span>الخصم</span><strong>${escapeHtml(formatMoney(invoice.discount, currency))}</strong></p>
       <p><span>الخاضع للضريبة بعد الخصم</span><strong>${escapeHtml(formatMoney(invoice.total_without_vat, currency))}</strong></p>
       <p><span>ضريبة القيمة المضافة (${escapeHtml(normalizeVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
+      ${Number(invoice.additional_fee || 0) > 0 ? `<p><span>رسوم إضافية</span><strong>${escapeHtml(formatMoney(invoice.additional_fee, currency))}</strong></p>` : ""}
       <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
     </section>
     ${invoice.terms ? `<section class="terms">${escapeHtml(invoice.terms)}</section>` : ""}
@@ -1263,7 +1343,13 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const all = await listOwned("invoices", uid, undefined, 10000);
     const settings = await getSettings(uid);
     const discountMode: DiscountMode = req.body?.discount_mode === "percent" ? "percent" : "fixed";
-    const totals = invoiceTotals(items, req.body?.discount_value ?? req.body?.discount, req.body?.vat_percent, discountMode);
+    const totals = invoiceTotals(
+      items,
+      req.body?.discount_value ?? req.body?.discount,
+      req.body?.vat_percent,
+      discountMode,
+      req.body?.additional_fee,
+    );
     const invoiceType = resolveInvoiceTaxType({
       requested: req.body?.invoice_type,
       buyerVat: req.body?.customer_vat,
@@ -1330,7 +1416,14 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const settings = await getSettings(uid);
     const discountMode: DiscountMode = (req.body?.discount_mode ?? existing.discount_mode) === "percent" ? "percent" : "fixed";
     const discountValue = req.body?.discount_value ?? req.body?.discount ?? existing.discount_value ?? existing.discount;
-    const totals = invoiceTotals(items, discountValue, req.body?.vat_percent ?? existing.vat_percent, discountMode);
+    const additionalFee = req.body?.additional_fee ?? existing.additional_fee ?? 0;
+    const totals = invoiceTotals(
+      items,
+      discountValue,
+      req.body?.vat_percent ?? existing.vat_percent,
+      discountMode,
+      additionalFee,
+    );
     const customerVat = String(req.body?.customer_vat ?? existing.customer_vat ?? "").trim();
     const invoiceType = resolveInvoiceTaxType({
       requested: req.body?.invoice_type ?? existing.invoice_type,
@@ -1428,6 +1521,9 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       `الخصم: ${Number(invoice.discount || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       `الخاضع للضريبة بعد الخصم: ${Number(invoice.total_without_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       `ضريبة ${Number(invoice.vat_percent || 0).toLocaleString("ar-SA")}%: ${Number(invoice.vat_amount || invoice.vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
+      Number(invoice.additional_fee || 0) > 0
+        ? `رسوم إضافية: ${Number(invoice.additional_fee).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`
+        : "",
       `الإجمالي شامل الضريبة: ${Number(invoice.total_with_vat || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
       "",
       `الرقم الضريبي: ${invoice.seller_vat_number || invoice.seller_vat || "313049114100003"}`,
@@ -1462,11 +1558,12 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
         document_url: documentUrl,
       },
     });
-    if (invoice.status === "draft" || invoice.status === "issued") {
+    const dryRun = Boolean((result as { dryRun?: boolean })?.dryRun);
+    if (!dryRun && (invoice.status === "draft" || invoice.status === "issued")) {
       await updateOwned("invoices", req.params.id, uid, { status: "sent" });
     }
     const updatedInvoice = await getOwned("invoices", req.params.id, uid);
-    res.json({ success: true, result, invoice: updatedInvoice ? normalizeInvoice(updatedInvoice) : null });
+    res.json({ success: true, dry_run: dryRun, result, invoice: updatedInvoice ? normalizeInvoice(updatedInvoice) : null });
   }));
 
   app.get("/api/invoices/:id/qr", asyncRoute(async (req, res) => {
@@ -1507,6 +1604,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       quote.discount_value ?? quote.discount,
       quote.vat_percent,
       quote.discount_mode === "percent" ? "percent" : "fixed",
+      quote.tax,
     );
     const invoiceType = resolveInvoiceTaxType({
       requested: req.body?.invoice_type,
@@ -1522,9 +1620,11 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       customer_phone: quote.customer_phone || "",
       customer_city: quote.customer_city || "",
       customer_vat: quote.customer_vat || "",
+      title: quote.title || "",
       invoice_type: invoiceType,
       status: "issued",
       issue_date: todayInTimeZone(),
+      payment_method: quote.payment_method || "",
       currency: quote.currency || "SAR",
       items,
       notes: quote.notes || "",

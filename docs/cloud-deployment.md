@@ -1,4 +1,10 @@
-# خطة تشغيل Golden Pro CRM كسحابة
+# خطة Cloud Run مؤجلة وغير مدعومة في الإصدار الحالي
+
+> تحذير تشغيلي: هذا المستند محفوظ كتصميم مستقبلي فقط. الإصدار الحالي يعتمد
+> SQLite وجلسة واتساب ذات volumes دائمة، ولذلك يمنع أمر `npm run deploy:cloudrun`
+> النشر عمدًا. استخدم مسار VPS الموثق في `docs/vps-deployment-ar.md`.
+
+# التصميم التاريخي لتشغيل Golden Pro CRM كسحابة
 
 ## الهدف
 
@@ -99,15 +105,12 @@ npm run deploy:firestore
 - `firestore.rules`
 - `firestore.indexes.json`
 
-## 5. نشر Cloud Run
+## 5. نشر Cloud Run (تصميم مستقبلي غير قابل للتنفيذ حاليًا)
 
-أول نشر:
+لا تنفّذ أوامر هذا القسم في الإصدار الحالي. مسار النشر المدعوم:
 
 ```bash
-gcloud auth login
-gcloud config set project YOUR_PROJECT_ID
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
-npm run deploy:cloudrun
+npm run deploy:vps -- -HostName YOUR_VPS_HOST -SshKey YOUR_SSH_KEY
 ```
 
 بعد النشر ضع متغيرات البيئة في Cloud Run من واجهة Google Cloud أو بالأوامر:
@@ -197,6 +200,6 @@ npm run doctor:prod
 npm run lint
 npm run build
 npm run test:smoke
-npm run deploy:cloudrun
+npm run deploy:vps -- -HostName YOUR_VPS_HOST -SshKey YOUR_SSH_KEY
 npm run deploy:firebase
 ```

@@ -321,8 +321,8 @@ export function Button({
   onClick?: () => void;
 }) {
   return (
-    <button className={`btn ${tone}`} type={type} disabled={disabled || loading} onClick={onClick}>
-      {loading ? <RefreshCcw size={15} className="spin" /> : children}
+    <button className={`btn ${tone}`} type={type} disabled={disabled || loading} aria-busy={loading || undefined} onClick={onClick}>
+      {loading ? <RefreshCcw size={15} className="spin" aria-hidden="true" /> : children}
     </button>
   );
 }
@@ -375,7 +375,7 @@ export function Badge({ children, tone = "muted" }: { children: ReactNode; tone?
 export function Empty({ title, action }: { title: string; action?: ReactNode }) {
   return (
     <div className="empty">
-      <ClipboardList size={30} />
+      <ClipboardList size={30} aria-hidden="true" />
       <p>{title}</p>
       {action}
     </div>
@@ -384,17 +384,17 @@ export function Empty({ title, action }: { title: string; action?: ReactNode }) 
 
 export function Loading() {
   return (
-    <div className="empty">
-      <RefreshCcw size={26} className="spin" />
-      <p>جاري التحميل...</p>
+    <div className="empty" role="status" aria-live="polite">
+      <RefreshCcw size={26} className="spin" aria-hidden="true" />
+      <p>جاري التحميل…</p>
     </div>
   );
 }
 
 export function ErrorBlock({ message, retry }: { message: string; retry?: () => void }) {
   return (
-    <div className="error-box">
-      <CircleAlert size={18} />
+    <div className="error-box" role="alert">
+      <CircleAlert size={18} aria-hidden="true" />
       <span>{message}</span>
       {retry && <Button onClick={retry} tone="muted">إعادة المحاولة</Button>}
     </div>
@@ -414,13 +414,27 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
 }
 
 export function Stat({ title, value, icon, tone = "default", onClick }: { title: string; value: number; icon: ReactNode; tone?: string; onClick?: () => void }) {
-  return (
-    <article className={`stat ${tone}`} onClick={onClick} style={onClick ? { cursor: "pointer" } : undefined}>
-      <span>{icon}</span>
+  const content = (
+    <>
+      <span aria-hidden="true">{icon}</span>
       <div>
         <strong>{value}</strong>
         <p>{title}</p>
       </div>
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button className={`stat stat-button ${tone}`} type="button" onClick={onClick}>
+        {content}
+      </button>
+    );
+  }
+
+  return (
+    <article className={`stat ${tone}`}>
+      {content}
     </article>
   );
 }

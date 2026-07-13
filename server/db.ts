@@ -2,12 +2,13 @@ import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { PUBLIC_LEAD_SCHEMA_SQL } from "./publicLeadStorage";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10304;
+const TARGET_SCHEMA_VERSION = 10307;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -315,6 +316,8 @@ db.exec(`
     variants TEXT DEFAULT '[]',
     catalog_visible INTEGER DEFAULT 1,
     is_available INTEGER DEFAULT 1,
+    merged_into TEXT,
+    merged_at TEXT,
     unlimited_quantity INTEGER DEFAULT 0,
     last_synced_at TEXT,
     product_type TEXT DEFAULT 'install_maintenance',
@@ -387,11 +390,16 @@ db.exec(`
     customer_name TEXT,
     installation_id TEXT,
     installation_label TEXT,
+    product_id TEXT,
     product_name TEXT,
     remind_type TEXT,
     status TEXT DEFAULT 'pending',
+    trigger TEXT,
     sent_at TEXT DEFAULT (datetime('now')),
     message TEXT DEFAULT '',
+    error TEXT,
+    whatsapp_jid TEXT,
+    whatsapp_message_id TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
 
@@ -562,6 +570,7 @@ db.exec(`
     vat NUMERIC DEFAULT 0,
     vat_percent NUMERIC DEFAULT 15,
     vat_amount NUMERIC DEFAULT 0,
+    additional_fee NUMERIC DEFAULT 0,
     total_without_vat NUMERIC DEFAULT 0,
     total_with_vat NUMERIC DEFAULT 0,
     currency TEXT DEFAULT 'SAR',
@@ -897,9 +906,34 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(tap_charge_id);
 `);
 
+// Public landing-page enquiries are deliberately isolated from authenticated
+// CRM customers. This additive CREATE TABLE is safe for existing databases and
+// runs before the public route can accept traffic.
+db.exec(PUBLIC_LEAD_SCHEMA_SQL);
+
 // Post-schema column migrations. These run AFTER the main schema block above,
 // so every referenced table is guaranteed to exist (fixes "no such table" on a
 // fresh database).
+// The store webhook moved from the original minimal event ledger to a richer
+// Firestore-shaped record. Keep SQLite additive so both fresh and existing QA
+// databases can persist the exact fields processStoreWebhook writes.
+for (const col of [
+  ["provider", "TEXT"],
+  ["order_id", "TEXT"],
+  ["order_number", "TEXT"],
+  ["status", "TEXT DEFAULT 'processing'"],
+  ["auth_mode", "TEXT"],
+  ["received_at", "TEXT"],
+  ["raw_payload", "TEXT"],
+  ["processed_at", "TEXT"],
+  ["imported", "TEXT"],
+] as const) {
+  if (!hasColumn("store_webhook_events", col[0])) {
+    db.exec(`ALTER TABLE store_webhook_events ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_store_webhook_events_owner_received ON store_webhook_events(owner_uid, received_at DESC)");
+
 for (const col of [
   ["completed_at", "TEXT"],
   ["store_order_id", "TEXT"],
@@ -910,6 +944,21 @@ for (const col of [
 ] as const) {
   if (!hasColumn("bookings", col[0])) {
     db.exec(`ALTER TABLE bookings ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+// Reminder delivery records are written through the Firestore-shaped adapter.
+// Keep these columns additive because production databases created before
+// 1.3.6 have the original, smaller reminders table.
+for (const col of [
+  ["product_id", "TEXT"],
+  ["trigger", "TEXT"],
+  ["error", "TEXT"],
+  ["whatsapp_jid", "TEXT"],
+  ["whatsapp_message_id", "TEXT"],
+] as const) {
+  if (!hasColumn("reminders", col[0])) {
+    db.exec(`ALTER TABLE reminders ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
 
@@ -960,6 +1009,8 @@ for (const col of [
   ["variants", "TEXT DEFAULT '[]'"],
   ["catalog_visible", "INTEGER DEFAULT 1"],
   ["is_available", "INTEGER DEFAULT 1"],
+  ["merged_into", "TEXT"],
+  ["merged_at", "TEXT"],
   ["unlimited_quantity", "INTEGER DEFAULT 0"],
   ["last_synced_at", "TEXT"],
 ] as const) {
@@ -1048,6 +1099,7 @@ for (const col of [
   ["vat", "NUMERIC DEFAULT 0"],
   ["vat_percent", "NUMERIC DEFAULT 15"],
   ["vat_amount", "NUMERIC DEFAULT 0"],
+  ["additional_fee", "NUMERIC DEFAULT 0"],
   ["total_without_vat", "NUMERIC DEFAULT 0"],
   ["total_with_vat", "NUMERIC DEFAULT 0"],
   ["currency", "TEXT DEFAULT 'SAR'"],
@@ -1121,6 +1173,9 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10300, '1.3.0');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10303, '1.3.3');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10304, '1.3.4');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10305, '1.3.5');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10306, '1.3.6');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10307, '1.3.7');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

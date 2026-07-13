@@ -13,7 +13,10 @@ import { getFirestore } from "firebase-admin/firestore";
 import { createSupabaseFirestoreAdapter } from "./supabaseFirestoreAdapter";
 import { createSqliteFirestoreAdapter } from "./sqliteFirestoreAdapter";
 
-dotenv.config();
+// Use the same explicit environment file as the server bootstrap. This is
+// critical for isolated QA: falling back to the repository .env here would
+// load real provider credentials before server.ts can apply its configuration.
+dotenv.config({ path: process.env.ENV_FILE || ".env", quiet: true });
 
 type FirebaseAppletConfig = {
   projectId: string;

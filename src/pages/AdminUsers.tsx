@@ -1,7 +1,8 @@
 import { Edit3, Plus, RefreshCcw, Save, Search, Trash2, UserPlus, UserRoundCog, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import * as api from "../api";
 import { UserRoleBadge } from "../components/UserRoleBadge";
+import { useDialogAccessibility } from "../dialogAccessibility";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -11,16 +12,6 @@ const ROLE_OPTIONS: Array<{ value: api.AppUserRole; label: string }> = [
   { value: "sales", label: "مبيعات" },
   { value: "technician", label: "فني" },
   { value: "user", label: "مستخدم" },
-];
-
-const PERMISSION_OPTIONS: Array<{ key: string; label: string }> = [
-  { key: "manage_customers", label: "إدارة العملاء" },
-  { key: "manage_products", label: "إدارة المنتجات" },
-  { key: "manage_installations", label: "إدارة الصيانة" },
-  { key: "manage_bookings", label: "إدارة الحجوزات" },
-  { key: "manage_technicians", label: "إدارة الفنيين" },
-  { key: "send_messages", label: "إرسال رسائل واتساب" },
-  { key: "view_reports", label: "عرض التقارير" },
 ];
 
 function fmtDateTime(value?: string | null) {
@@ -88,7 +79,6 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
           email: payload.email,
           phone: payload.phone,
           role: payload.role,
-          permissions: payload.permissions,
           active: payload.active,
         });
         notify("تم حفظ تعديلات المستخدم");
@@ -98,7 +88,6 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
           email: payload.email || undefined,
           phone: payload.phone || undefined,
           role: (payload.role as api.AppUserRole) || "user",
-          permissions: payload.permissions,
         });
         notify("تم إضافة المستخدم");
       }
@@ -180,13 +169,19 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
         <Search size={16} />
         <input
           className="input"
-          placeholder="بحث بالاسم أو البريد أو الجوال"
+          name="admin_user_search"
+          autoComplete="off"
+          aria-label="بحث في المستخدمين"
+          placeholder="بحث بالاسم أو البريد أو الجوال…"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           style={{ flex: 1, minWidth: 220 }}
         />
         <select
           className="input"
+          name="admin_user_role_filter"
+          autoComplete="off"
+          aria-label="تصفية المستخدمين حسب الدور"
           value={roleFilter}
           onChange={(event) => setRoleFilter(event.target.value)}
           style={{ minWidth: 140 }}
@@ -198,6 +193,9 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
         </select>
         <select
           className="input"
+          name="admin_user_status_filter"
+          autoComplete="off"
+          aria-label="تصفية المستخدمين حسب الحالة"
           value={activeFilter}
           onChange={(event) => setActiveFilter(event.target.value)}
           style={{ minWidth: 140 }}
@@ -215,7 +213,7 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
       )}
 
       {loading ? (
-        <div className="empty"><RefreshCcw size={26} className="spin" /><p>جاري التحميل...</p></div>
+        <div className="empty" role="status" aria-live="polite"><RefreshCcw size={26} className="spin" aria-hidden="true" /><p>جاري التحميل…</p></div>
       ) : users.length === 0 ? (
         <div className="empty">
           <UserRoundCog size={30} />
@@ -248,17 +246,19 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
                   className={`icon-btn ${user.active ? "" : "success"}`}
                   type="button"
                   title={user.active ? "تعليق" : "تفعيل"}
+                  aria-label={`${user.active ? "تعليق" : "تفعيل"} المستخدم ${user.name || user.email || user.id}`}
                   onClick={() => toggleActive(user)}
                 >
                   {user.active ? <X size={15} /> : <UserPlus size={15} />}
                 </button>
-                <button className="icon-btn" type="button" title="تعديل" onClick={() => setEdit(user)}>
+                <button className="icon-btn" type="button" title="تعديل" aria-label={`تعديل المستخدم ${user.name || user.email || user.id}`} onClick={() => setEdit(user)}>
                   <Edit3 size={15} />
                 </button>
                 <button
                   className="icon-btn danger"
                   type="button"
                   title="حذف"
+                  aria-label={`حذف المستخدم ${user.name || user.email || user.id}`}
                   onClick={() => remove(user)}
                 >
                   <Trash2 size={15} />
@@ -270,22 +270,42 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
       )}
 
       {(edit || create) && (
-        <div className="modal-backdrop" onMouseDown={() => { setEdit(null); setCreate(false); }}>
-          <section className="modal" onMouseDown={(event) => event.stopPropagation()}>
-            <header className="modal-head">
-              <h2>{edit ? "تعديل مستخدم" : "إضافة مستخدم"}</h2>
-              <button className="icon-btn" type="button" title="إغلاق" onClick={() => { setEdit(null); setCreate(false); }}>
-                <X size={16} />
-              </button>
-            </header>
-            <UserForm
-              initial={edit || undefined}
-              onCancel={() => { setEdit(null); setCreate(false); }}
-              onSave={(payload) => handleSave(edit ? edit.id : null, payload)}
-            />
-          </section>
-        </div>
+        <UserModal title={edit ? "تعديل مستخدم" : "إضافة مستخدم"} onClose={() => { setEdit(null); setCreate(false); }}>
+          <UserForm
+            initial={edit || undefined}
+            onCancel={() => { setEdit(null); setCreate(false); }}
+            onSave={(payload) => handleSave(edit ? edit.id : null, payload)}
+          />
+        </UserModal>
       )}
+    </div>
+  );
+}
+
+function UserModal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const titleId = useId();
+  useDialogAccessibility(dialogRef, onClose);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        ref={dialogRef}
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="modal-head">
+          <h2 id={titleId}>{title}</h2>
+          <button className="icon-btn" type="button" title="إغلاق" aria-label="إغلاق" onClick={onClose}>
+            <X size={16} aria-hidden="true" />
+          </button>
+        </header>
+        {children}
+      </section>
     </div>
   );
 }
@@ -304,12 +324,7 @@ function UserForm({
   const [phone, setPhone] = useState(initial?.phone || "");
   const [role, setRole] = useState<api.AppUserRole>(initial?.role || "user");
   const [active, setActive] = useState<boolean>(initial?.active ?? true);
-  const [permissions, setPermissions] = useState<Record<string, boolean>>(initial?.permissions || {});
   const [saving, setSaving] = useState(false);
-
-  const togglePerm = (key: string) => {
-    setPermissions((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -321,7 +336,6 @@ function UserForm({
         phone: phone.trim(),
         role,
         active,
-        permissions,
       });
     } finally {
       setSaving(false);
@@ -329,10 +343,10 @@ function UserForm({
   };
 
   return (
-    <form className="form" onSubmit={submit}>
+    <form className="form" aria-busy={saving} onSubmit={submit}>
       <label className="field">
         <span>الاسم</span>
-        <input className="input" value={name} onChange={(event) => setName(event.target.value)} required />
+        <input className="input" name="managed_user_name" autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} required />
       </label>
       <label className="field">
         <span>البريد الإلكتروني</span>
@@ -340,17 +354,20 @@ function UserForm({
           className="input"
           dir="ltr"
           type="email"
+          name="managed_user_email"
+          autoComplete="email"
+          spellCheck={false}
           value={email}
           onChange={(event) => setEmail(event.target.value)}
         />
       </label>
       <label className="field">
         <span>الجوال</span>
-        <input className="input" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="05xxxxxxxx" />
+        <input className="input" type="tel" inputMode="tel" name="managed_user_phone" autoComplete="tel" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="مثال: 05xxxxxxxx…" />
       </label>
       <label className="field">
         <span>الدور</span>
-        <select className="input" value={role} onChange={(event) => setRole(event.target.value as api.AppUserRole)}>
+        <select className="input" name="managed_user_role" autoComplete="off" value={role} onChange={(event) => setRole(event.target.value as api.AppUserRole)}>
           {ROLE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
@@ -361,6 +378,7 @@ function UserForm({
         <label className="field" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <input
             type="checkbox"
+            name="managed_user_active"
             checked={active}
             onChange={(event) => setActive(event.target.checked)}
           />
@@ -368,30 +386,11 @@ function UserForm({
         </label>
       )}
 
-      <fieldset className="permission-box">
-        <legend style={{ padding: "0 6px", fontSize: 13 }}>صلاحيات إضافية</legend>
-        <div className="permission-grid">
-          {PERMISSION_OPTIONS.map((opt) => (
-            <label key={opt.key} className="check-row">
-              <input
-                type="checkbox"
-                checked={!!permissions[opt.key]}
-                onChange={() => togglePerm(opt.key)}
-              />
-              <span>{opt.label}</span>
-            </label>
-          ))}
-        </div>
-        <p className="helper-text">
-          المسؤول (admin) يحصل على جميع الصلاحيات تلقائياً بدون الحاجة لتفعيلها.
-        </p>
-      </fieldset>
-
       <div className="form-actions">
-        <button className="btn primary" type="submit" disabled={saving}>
-          <Save size={16} /> {saving ? "جاري الحفظ..." : "حفظ"}
+        <button className="btn primary" type="submit" disabled={saving} aria-busy={saving}>
+          <Save size={16} aria-hidden="true" /> {saving ? "جاري الحفظ…" : "حفظ"}
         </button>
-        <button className="btn muted" type="button" onClick={onCancel}>إلغاء</button>
+        <button className="btn muted" type="button" disabled={saving} onClick={onCancel}>إلغاء</button>
       </div>
     </form>
   );

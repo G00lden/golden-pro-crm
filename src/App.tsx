@@ -25,6 +25,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type FormEvent,
@@ -58,6 +59,8 @@ import OdooCrmPage from "./pages/OdooCrm";
 import TechniciansPage from "./pages/Technicians";
 import SettingsPage from "./pages/Settings";
 import CallSystemPage from "./pages/CallSystem";
+import { hasAppCapability, normalizeAppRole } from "../shared/accessControl";
+import { useDialogAccessibility } from "./dialogAccessibility";
 import {
   AccessDenied,
   Button,
@@ -275,15 +278,26 @@ function EmailAuthPage({ notify }: { notify: (message: string, ok?: boolean) => 
   );
 }
 
-function Modal({ modal, onClose }: { modal: ModalState; onClose: () => void }) {
-  if (!modal) return null;
+function Modal({ modal, onClose }: { modal: Exclude<ModalState, null>; onClose: () => void }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const titleId = useId();
+  useDialogAccessibility(dialogRef, onClose);
+
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <section className={`modal ${modal.wide ? "wide" : ""}`} onMouseDown={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        ref={dialogRef}
+        className={`modal ${modal.wide ? "wide" : ""}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <header className="modal-head">
-          <h2>{modal.title}</h2>
+          <h2 id={titleId}>{modal.title}</h2>
           <IconButton title="إغلاق" onClick={onClose}>
-            <X size={16} />
+            <X size={16} aria-hidden="true" />
           </IconButton>
         </header>
         {modal.content}
@@ -295,11 +309,13 @@ function Modal({ modal, onClose }: { modal: ModalState; onClose: () => void }) {
 export default function App() {
   const [page, setPage] = useState<Page>(pageFromLocation);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobileLayout, setIsMobileLayout] = useState(() => window.matchMedia("(max-width: 820px)").matches);
   const [modal, setModal] = useState<ModalState>(null);
   const [toast, setToast] = useState<Toast>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authed, setAuthed] = useState(false);
   const [lightMode, setLightMode] = useState(() => localStorage.getItem("gp_light_mode") !== "false");
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("light-mode", lightMode);
@@ -311,6 +327,28 @@ export default function App() {
     window.addEventListener("popstate", restorePageFromUrl);
     return () => window.removeEventListener("popstate", restorePageFromUrl);
   }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 820px)");
+    const updateLayout = () => {
+      setIsMobileLayout(media.matches);
+      if (!media.matches) setSidebarOpen(false);
+    };
+    updateLayout();
+    media.addEventListener("change", updateLayout);
+    return () => media.removeEventListener("change", updateLayout);
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarOpen || !isMobileLayout) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setSidebarOpen(false);
+      window.requestAnimationFrame(() => menuButtonRef.current?.focus());
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [isMobileLayout, sidebarOpen]);
 
   useEffect(() => {
     return onAppAuthStateChanged((user) => {
@@ -325,9 +363,14 @@ export default function App() {
   }, []);
 
   const me = useData(api.getMe, [], authed && authReady);
-  const currentRole = (me.data?.role || "user") as api.AppUserRole;
-  const isAdmin = currentRole === "admin";
-  const isManagerOrAdmin = currentRole === "admin" || currentRole === "manager";
+  const currentRole = normalizeAppRole(me.data?.role);
+  const canManageUsers = hasAppCapability(currentRole, "users.manage");
+  const canManageWhatsApp = hasAppCapability(currentRole, "whatsapp.manage");
+  const canManageCampaigns = hasAppCapability(currentRole, "campaigns.manage");
+  const canManageCalls = hasAppCapability(currentRole, "calls.manage");
+  const canManagePublicLeads = hasAppCapability(currentRole, "public_leads.manage");
+  const canPrepareOperations = hasAppCapability(currentRole, "operations.prepare");
+  const canSeedDemoData = hasAppCapability(currentRole, "demo.seed");
   const currentUid = me.data?.uid || null;
 
   const stats = useData(api.getStats, [page], authed && authReady);
@@ -383,13 +426,19 @@ export default function App() {
     { id: "storeOrders" as Page, label: "طلبات المتجر", icon: ClipboardList },
     { id: "care" as Page, label: "رعاية العملاء", icon: UserPlus, badge: summary.care },
     { id: "technicians" as Page, label: "الفنيون", icon: UserRoundCog },
-    { id: "messages" as Page, label: "واتساب والسجل", icon: MessageCircle },
-    ...(isManagerOrAdmin
+    ...(canManageWhatsApp
+      ? [{ id: "messages" as Page, label: "واتساب والسجل", icon: MessageCircle }]
+      : []),
+    ...(canManageCampaigns
       ? [
           { id: "campaigns" as Page, label: "الحملات", icon: Megaphone },
-          { id: "callSystem" as Page, label: "نظام المكالمات", icon: PhoneCall },
-          { id: "adminUsers" as Page, label: "إدارة المستخدمين", icon: UserRoundCog },
         ]
+      : []),
+    ...(canManageCalls
+      ? [{ id: "callSystem" as Page, label: "نظام المكالمات", icon: PhoneCall }]
+      : []),
+    ...(canManageUsers
+      ? [{ id: "adminUsers" as Page, label: "إدارة المستخدمين", icon: UserRoundCog }]
       : []),
     { id: "settings" as Page, label: "الإعدادات", icon: Settings },
   ];
@@ -404,38 +453,73 @@ export default function App() {
     if (nextPage === "dash") url.searchParams.delete("section");
     else url.searchParams.set("section", nextPage);
     if (url.href !== window.location.href) window.history.pushState({}, "", url);
+    window.requestAnimationFrame(() => document.getElementById("main-content")?.focus());
+  };
+
+  const closeMobileSidebar = () => {
+    setSidebarOpen(false);
+    window.requestAnimationFrame(() => menuButtonRef.current?.focus());
   };
 
   const pages: Record<Page, ReactNode> = {
-    dash: <Dashboard stats={summary} notify={notify} refreshStats={stats.refresh} go={openPage} />,
+    dash: (
+      <Dashboard
+        stats={summary}
+        notify={notify}
+        refreshStats={stats.refresh}
+        go={openPage}
+        canManageCalls={canManageCalls}
+        canSeedDemoData={canSeedDemoData}
+      />
+    ),
     customers: <CustomersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     quotes: <QuotesPage notify={notify} refreshStats={stats.refresh} />,
     invoices: <InvoicesPage notify={notify} refreshStats={stats.refresh} />,
-    odooCrm: <OdooCrmPage notify={notify} />,
+    odooCrm: <OdooCrmPage notify={notify} go={openPage} canManagePublicLeads={canManagePublicLeads} />,
     products: <ProductsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     installations: <InstallationsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     bookings: <BookingsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     storeOrders: <StoreOrdersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     care: <CustomerCarePage notify={notify} refreshStats={stats.refresh} />,
     technicians: <TechniciansPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
-    messages: <WhatsAppConsole notify={notify} />,
-    campaigns: isManagerOrAdmin ? <CampaignsPage notify={notify} /> : <AccessDenied />,
-    callSystem: isManagerOrAdmin ? <CallSystemPage notify={notify} /> : <AccessDenied />,
-    settings: <SettingsPage notify={notify} />,
-    adminUsers: isManagerOrAdmin
+    messages: canManageWhatsApp ? <WhatsAppConsole notify={notify} /> : <AccessDenied />,
+    campaigns: canManageCampaigns ? <CampaignsPage notify={notify} /> : <AccessDenied />,
+    callSystem: canManageCalls ? <CallSystemPage notify={notify} /> : <AccessDenied />,
+    settings: (
+      <SettingsPage
+        notify={notify}
+        canPrepareOperations={canPrepareOperations}
+        canSeedDemoData={canSeedDemoData}
+      />
+    ),
+    adminUsers: canManageUsers
       ? <AdminUsersPage notify={notify} currentUid={currentUid} />
       : <AccessDenied />,
   };
 
   return (
     <div className="app-shell" dir="rtl">
-      <button className="mobile-menu" type="button" onClick={() => setSidebarOpen(true)} aria-label="فتح القائمة">
-        <Menu size={20} />
+      <a className="skip-link" href="#main-content">تجاوز القائمة والانتقال إلى المحتوى</a>
+      <button
+        ref={menuButtonRef}
+        className="mobile-menu"
+        type="button"
+        onClick={() => setSidebarOpen(true)}
+        aria-label="فتح القائمة"
+        aria-controls="primary-sidebar"
+        aria-expanded={sidebarOpen}
+      >
+        <Menu size={20} aria-hidden="true" />
       </button>
 
-      {sidebarOpen && <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />}
+      {sidebarOpen && <button className="sidebar-scrim" type="button" aria-label="إغلاق القائمة" onClick={closeMobileSidebar} />}
 
-      <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+      <aside
+        id="primary-sidebar"
+        className={`sidebar ${sidebarOpen ? "open" : ""}`}
+        aria-hidden={isMobileLayout && !sidebarOpen ? "true" : undefined}
+        inert={isMobileLayout && !sidebarOpen}
+      >
         <div className="brand">
           <div className="brand-mark">BP</div>
           <div>
@@ -447,8 +531,8 @@ export default function App() {
           {nav.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={page === item.id ? "active" : ""} type="button" onClick={() => openPage(item.id)}>
-                <Icon size={18} />
+              <button key={item.id} className={page === item.id ? "active" : ""} type="button" aria-current={page === item.id ? "page" : undefined} onClick={() => openPage(item.id)}>
+                <Icon size={18} aria-hidden="true" />
                 <span>{item.label}</span>
                 {!!item.badge && <b>{item.badge}</b>}
               </button>
@@ -474,13 +558,13 @@ export default function App() {
         </div>
       </aside>
 
-      <main>{pages[page]}</main>
+      <main id="main-content" tabIndex={-1}>{pages[page]}</main>
 
-      <Modal modal={modal} onClose={() => setModal(null)} />
+      {modal && <Modal modal={modal} onClose={() => setModal(null)} />}
 
       {toast && (
-        <div className={`toast ${toast.ok ? "ok" : "bad"}`}>
-          {toast.ok ? <Check size={16} /> : <CircleAlert size={16} />}
+        <div className={`toast ${toast.ok ? "ok" : "bad"}`} role={toast.ok ? "status" : "alert"} aria-live="polite">
+          {toast.ok ? <Check size={16} aria-hidden="true" /> : <CircleAlert size={16} aria-hidden="true" />}
           {toast.message}
         </div>
       )}

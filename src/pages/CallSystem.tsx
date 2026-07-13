@@ -10,6 +10,7 @@ import {
   Users as UsersIcon,
 } from "lucide-react";
 import * as api from "../api";
+import { createDepartmentDeletionController } from "../callSystemDelete";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -62,6 +63,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   const [gateway, setGateway] = useState<api.GatewayStatus | null>(null);
   const [draft, setDraft] = useState<DraftDept>(emptyDraft());
   const [savingDept, setSavingDept] = useState(false);
+  const [deletingDeptId, setDeletingDeptId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [testPhone, setTestPhone] = useState("");
   const [testDigit, setTestDigit] = useState("");
@@ -92,6 +94,15 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   }, [refresh]);
 
   const missedCount = useMemo(() => calls.filter((c) => c.missed).length, [calls]);
+
+  const departmentDeletion = useMemo(
+    () => createDepartmentDeletionController({
+      confirm: (message) => window.confirm(message),
+      remove: (id) => api.deleteTelephonyDepartment(id),
+      onPendingChange: setDeletingDeptId,
+    }),
+    [],
+  );
 
   const saveConfig = async () => {
     if (!config) return;
@@ -159,11 +170,12 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
     }
   };
 
-  const removeDept = async (id: string) => {
+  const removeDept = async (department: api.TelephonyDepartment) => {
     try {
-      await api.deleteTelephonyDepartment(id);
+      const result = await departmentDeletion.request(department);
+      if (result !== "deleted") return;
       notify("تم حذف القسم", true);
-      if (draft.id === id) setDraft(emptyDraft());
+      if (draft.id === department.id) setDraft(emptyDraft());
       await refresh();
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر الحذف", false);
@@ -198,19 +210,19 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
   if (loading) {
     return (
-      <div className="empty" dir="rtl">
-        <RefreshCcw className="spin" size={26} />
+      <div className="empty" dir="rtl" role="status" aria-live="polite">
+        <RefreshCcw className="spin" size={26} aria-hidden="true" />
         <p>جاري تحميل نظام المكالمات…</p>
       </div>
     );
   }
 
   return (
-    <section dir="rtl" style={{ display: "grid", gap: 18 }}>
+    <section dir="rtl" className="call-system-page">
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
           <h1 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-            <PhoneCall size={22} /> نظام المكالمات والتحويل
+            <PhoneCall size={22} aria-hidden="true" /> نظام المكالمات والتحويل
           </h1>
           <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
             قائمة صوتية ترد على المتصلين وتحوّلهم للموظف المختص، وعند عدم الرد ترسل واتساب للعميل والموظف.
@@ -243,11 +255,11 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
           {!gateway?.configured && " تظهر الردود محلياً حتى تضبط التوكن."}
         </p>
         {gateway && gateway.recent.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
+          <div className="scrollable-table-region" role="region" aria-label="رسائل البوابة الذاتية الأخيرة" tabIndex={0}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead><tr style={{ textAlign: "right", opacity: 0.7 }}>
-                <th style={{ padding: 5 }}>الوقت</th><th style={{ padding: 5 }}>إلى</th>
-                <th style={{ padding: 5 }}>النوع</th><th style={{ padding: 5 }}>الحالة</th><th style={{ padding: 5 }}>النص</th>
+                <th scope="col" style={{ padding: 5 }}>الوقت</th><th scope="col" style={{ padding: 5 }}>إلى</th>
+                <th scope="col" style={{ padding: 5 }}>النوع</th><th scope="col" style={{ padding: 5 }}>الحالة</th><th scope="col" style={{ padding: 5 }}>النص</th>
               </tr></thead>
               <tbody>
                 {gateway.recent.slice(0, 12).map((m) => (
@@ -269,23 +281,28 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
       {/* Config */}
       {config && (
-        <div className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
+        <form
+          className="card"
+          style={{ padding: 16, display: "grid", gap: 12 }}
+          aria-busy={savingConfig}
+          onSubmit={(event) => { event.preventDefault(); void saveConfig(); }}
+        >
           <h3 style={{ margin: 0 }}>الإعدادات العامة</h3>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
             <label className="field">
               <span>الرقم الأساسي (للإعلانات)</span>
-              <input className="input" value={config.main_number}
+              <input className="input" type="tel" inputMode="tel" name="telephony_main_number" autoComplete="tel" value={config.main_number}
                 onChange={(e) => setConfig({ ...config, main_number: e.target.value })}
-                placeholder="9665XXXXXXXX" />
+                placeholder="مثال: 9665XXXXXXXX…" />
             </label>
             <label className="field">
               <span>مهلة الرنين (ثانية)</span>
-              <input className="input" type="number" min={5} max={120} value={config.ring_timeout_sec}
+              <input className="input" type="number" inputMode="numeric" name="telephony_ring_timeout" autoComplete="off" min={5} max={120} value={config.ring_timeout_sec}
                 onChange={(e) => setConfig({ ...config, ring_timeout_sec: Number(e.target.value) || 20 })} />
             </label>
             <label className="field" style={{ alignSelf: "end" }}>
               <span>تفعيل النظام</span>
-              <select className="input" value={config.enabled ? "1" : "0"}
+              <select className="input" name="telephony_enabled" autoComplete="off" value={config.enabled ? "1" : "0"}
                 onChange={(e) => setConfig({ ...config, enabled: e.target.value === "1" })}>
                 <option value="1">مفعّل</option>
                 <option value="0">متوقف</option>
@@ -294,26 +311,26 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
           </div>
           <label className="field">
             <span>رسالة الترحيب</span>
-            <input className="input" value={config.greeting}
+            <input className="input" name="telephony_greeting" autoComplete="off" value={config.greeting}
               onChange={(e) => setConfig({ ...config, greeting: e.target.value })}
-              placeholder="مرحباً بكم في شركتنا." />
+              placeholder="مثال: مرحباً بكم في شركتنا…" />
           </label>
           <label className="field">
             <span>نص القائمة (اتركه فارغاً لتوليده تلقائياً من الأقسام)</span>
-            <input className="input" value={config.menu_prompt}
+            <input className="input" name="telephony_menu_prompt" autoComplete="off" value={config.menu_prompt}
               onChange={(e) => setConfig({ ...config, menu_prompt: e.target.value })}
-              placeholder="للمبيعات اضغط 1، للصيانة اضغط 2" />
+              placeholder="مثال: للمبيعات اضغط 1، للصيانة اضغط 2…" />
           </label>
           <div>
-            <button className="btn primary" type="button" onClick={saveConfig} disabled={savingConfig}>
-              <Save size={14} /> {savingConfig ? "…" : "حفظ الإعدادات"}
+            <button className="btn primary" type="submit" disabled={savingConfig} aria-busy={savingConfig}>
+              <Save size={14} aria-hidden="true" /> {savingConfig ? "جاري الحفظ…" : "حفظ الإعدادات"}
             </button>
           </div>
-        </div>
+        </form>
       )}
 
       {/* Departments + editor */}
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(0,1fr)", gap: 16 }}>
+      <div className="call-departments-grid">
         <div className="card" style={{ padding: 16 }}>
           <h3 style={{ marginTop: 0 }}>الأقسام ({departments.length})</h3>
           {departments.length === 0 ? (
@@ -322,15 +339,25 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             <div style={{ display: "grid", gap: 10 }}>
               {departments.map((d) => (
                 <div key={d.id} style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, padding: 12 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <div className="call-department-head">
                     <strong style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ background: "rgba(96,165,250,0.18)", color: "#60a5fa", borderRadius: 8, padding: "2px 10px", fontSize: 16 }}>{d.digit}</span>
                       {d.name}
                       {!d.active && <span style={{ fontSize: 11, color: "#f59e0b" }}>(متوقف)</span>}
                     </strong>
-                    <span style={{ display: "flex", gap: 6 }}>
+                    <span className="call-department-actions">
                       <button className="icon-btn muted" title="تعديل" type="button" onClick={() => editDept(d)}>تعديل</button>
-                      <button className="icon-btn danger" title="حذف" type="button" onClick={() => removeDept(d.id)}><Trash2 size={14} /></button>
+                      <button
+                        className="icon-btn danger"
+                        title={deletingDeptId === d.id ? "جارٍ حذف القسم" : "حذف القسم"}
+                        aria-label={`حذف قسم ${d.name}`}
+                        aria-busy={deletingDeptId === d.id}
+                        type="button"
+                        disabled={deletingDeptId !== null}
+                        onClick={() => removeDept(d)}
+                      >
+                        {deletingDeptId === d.id ? "…" : <Trash2 size={14} />}
+                      </button>
                     </span>
                   </div>
                   <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -343,36 +370,41 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
           )}
         </div>
 
-        <div className="card" style={{ padding: 16 }}>
+        <form
+          className="card"
+          style={{ padding: 16 }}
+          aria-busy={savingDept}
+          onSubmit={(event) => { event.preventDefault(); void saveDept(); }}
+        >
           <h3 style={{ marginTop: 0 }}>{draft.id ? "تعديل قسم" : "إضافة قسم"}</h3>
           <div style={{ display: "grid", gap: 10 }}>
             <label className="field">
               <span>رقم الاختيار (0-9)</span>
-              <input className="input" maxLength={1} value={draft.digit}
+              <input className="input" inputMode="numeric" name="telephony_department_digit" autoComplete="off" maxLength={1} value={draft.digit}
                 onChange={(e) => setDraft({ ...draft, digit: e.target.value.replace(/[^0-9]/g, "") })}
-                placeholder="1" />
+                placeholder="مثال: 1…" />
             </label>
             <label className="field">
               <span>اسم القسم</span>
-              <input className="input" value={draft.name}
-                onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="المبيعات" />
+              <input className="input" name="telephony_department_name" autoComplete="organization-title" value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="مثال: المبيعات…" />
             </label>
             <label className="field">
               <span>مهلة الرنين (ثانية)</span>
-              <input className="input" type="number" min={5} max={120} value={draft.ring_timeout_sec}
+              <input className="input" type="number" inputMode="numeric" name="telephony_department_timeout" autoComplete="off" min={5} max={120} value={draft.ring_timeout_sec}
                 onChange={(e) => setDraft({ ...draft, ring_timeout_sec: Number(e.target.value) || 20 })} />
             </label>
 
             <div style={{ display: "grid", gap: 6 }}>
               <span style={{ fontSize: 13, opacity: 0.8 }}>الموظفون (تُجرّب أرقامهم بالترتيب)</span>
               {draft.agents.map((a, i) => (
-                <div key={i} style={{ display: "flex", gap: 6 }}>
-                  <input className="input" style={{ flex: 1 }} value={a.name} placeholder="الاسم"
+                <div key={i} className="call-agent-row">
+                  <input className="input" value={a.name} name={`telephony_agent_${i}_name`} autoComplete="name" aria-label={`اسم الموظف ${i + 1}`} placeholder="اسم الموظف…"
                     onChange={(e) => setDraft({ ...draft, agents: draft.agents.map((x, j) => j === i ? { ...x, name: e.target.value } : x) })} />
-                  <input className="input" style={{ flex: 1 }} value={a.phone} placeholder="9665XXXXXXXX"
+                  <input className="input" type="tel" inputMode="tel" value={a.phone} name={`telephony_agent_${i}_phone`} autoComplete="tel" aria-label={`جوال الموظف ${i + 1}`} placeholder="مثال: 9665XXXXXXXX…"
                     onChange={(e) => setDraft({ ...draft, agents: draft.agents.map((x, j) => j === i ? { ...x, phone: e.target.value } : x) })} />
-                  <button className="icon-btn danger" title="حذف الموظف" type="button"
-                    onClick={() => setDraft({ ...draft, agents: draft.agents.filter((_, j) => j !== i) })}><Trash2 size={13} /></button>
+                  <button className="icon-btn danger" title="حذف الموظف" aria-label={`حذف الموظف ${i + 1}`} type="button"
+                    onClick={() => setDraft({ ...draft, agents: draft.agents.filter((_, j) => j !== i) })}><Trash2 size={13} aria-hidden="true" /></button>
                 </div>
               ))}
               <button className="btn muted" type="button" onClick={() => setDraft({ ...draft, agents: [...draft.agents, { name: "", phone: "" }] })}>
@@ -380,16 +412,16 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
               </button>
             </div>
 
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn primary" type="button" onClick={saveDept} disabled={savingDept}>
-                <Save size={14} /> {savingDept ? "…" : draft.id ? "حفظ التعديل" : "إضافة القسم"}
+            <div className="form-actions">
+              <button className="btn primary" type="submit" disabled={savingDept} aria-busy={savingDept}>
+                <Save size={14} aria-hidden="true" /> {savingDept ? "جاري الحفظ…" : draft.id ? "حفظ التعديل" : "إضافة القسم"}
               </button>
               {draft.id && (
                 <button className="btn muted" type="button" onClick={() => setDraft(emptyDraft())}>إلغاء</button>
               )}
             </div>
           </div>
-        </div>
+        </form>
       </div>
 
       {/* Setup hint */}
@@ -397,26 +429,34 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         <h3 style={{ marginTop: 0 }}>ربط Unifonic</h3>
         <p style={{ opacity: 0.85, margin: "0 0 6px" }}>في لوحة Unifonic، اضبط العناوين التالية لرقمك الأساسي:</p>
         <div style={{ display: "grid", gap: 4 }}>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>IVR Endpoint: {baseUrl}/webhooks/telephony/ivr</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>Status Callback: {baseUrl}/webhooks/telephony/status</code>
+          <code className="call-endpoint">IVR Endpoint: {baseUrl}/webhooks/telephony/ivr</code>
+          <code className="call-endpoint">Status Callback: {baseUrl}/webhooks/telephony/status</code>
         </div>
         <p style={{ opacity: 0.7, marginBottom: 0 }}>
           أرسل السر المشترك في الترويسة <code>x-telephony-webhook-secret</code> (نفس قيمة <code>TELEPHONY_WEBHOOK_SECRET</code>).
         </p>
       </div>
 
-      {/* Test missed call */}
-      <div className="card" style={{ padding: 16, display: "grid", gap: 10 }}>
+      {/* This simulator can enqueue the real missed-call communication flow, so
+          production builds do not expose it. The server also rejects direct
+          production requests; this condition is only the matching UX policy. */}
+      {import.meta.env.DEV && <div className="card" style={{ padding: 16, display: "grid", gap: 10 }}>
         <h3 style={{ margin: 0 }}>اختبار مكالمة فائتة</h3>
         <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>محاكاة مكالمة لم يُرد عليها لاختبار وصول الواتساب للعميل والموظف (بدون مكالمة حقيقية).</p>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <input className="input" style={{ flex: 2, minWidth: 180 }} value={testPhone} placeholder="رقم جوال العميل 9665XXXXXXXX"
-            onChange={(e) => setTestPhone(e.target.value)} />
-          <input className="input" style={{ flex: 1, minWidth: 90 }} maxLength={1} value={testDigit} placeholder="القسم (رقم)"
-            onChange={(e) => setTestDigit(e.target.value.replace(/[^0-9]/g, ""))} />
-          <button className="btn primary" type="button" onClick={runTest}><PhoneMissed size={14} /> تشغيل الاختبار</button>
-        </div>
-      </div>
+        <form className="call-test-form" onSubmit={(event) => { event.preventDefault(); void runTest(); }}>
+          <label className="field">
+            <span>رقم جوال العميل</span>
+            <input className="input" type="tel" inputMode="tel" name="missed_call_test_phone" autoComplete="tel" value={testPhone} placeholder="مثال: 9665XXXXXXXX…"
+              onChange={(e) => setTestPhone(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>رقم القسم</span>
+            <input className="input" inputMode="numeric" name="missed_call_test_digit" autoComplete="off" maxLength={1} value={testDigit} placeholder="مثال: 1…"
+              onChange={(e) => setTestDigit(e.target.value.replace(/[^0-9]/g, ""))} />
+          </label>
+          <button className="btn primary" type="submit"><PhoneMissed size={14} aria-hidden="true" /> تشغيل الاختبار</button>
+        </form>
+      </div>}
 
       {/* Call log */}
       <div className="card" style={{ padding: 16 }}>
@@ -427,16 +467,16 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         {calls.length === 0 ? (
           <p style={{ opacity: 0.7 }}>لا توجد مكالمات بعد.</p>
         ) : (
-          <div style={{ overflowX: "auto" }}>
+          <div className="scrollable-table-region" role="region" aria-label="سجل المكالمات" tabIndex={0}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
                 <tr style={{ textAlign: "right", opacity: 0.7 }}>
-                  <th style={{ padding: 6 }}>الوقت</th>
-                  <th style={{ padding: 6 }}>المتصل</th>
-                  <th style={{ padding: 6 }}>القسم</th>
-                  <th style={{ padding: 6 }}>الموظف</th>
-                  <th style={{ padding: 6 }}>الحالة</th>
-                  <th style={{ padding: 6 }}>المتابعة</th>
+                  <th scope="col" style={{ padding: 6 }}>الوقت</th>
+                  <th scope="col" style={{ padding: 6 }}>المتصل</th>
+                  <th scope="col" style={{ padding: 6 }}>القسم</th>
+                  <th scope="col" style={{ padding: 6 }}>الموظف</th>
+                  <th scope="col" style={{ padding: 6 }}>الحالة</th>
+                  <th scope="col" style={{ padding: 6 }}>المتابعة</th>
                 </tr>
               </thead>
               <tbody>

@@ -7,7 +7,8 @@ param(
   [string]$Domain = "crm.breexe-pro.com",
   [string]$SshKey = "",
   [switch]$SkipBootstrap,
-  [switch]$SkipDns
+  [switch]$SkipDns,
+  [switch]$AllowFirstDeployWithoutBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +56,40 @@ $buildCommit = (& git rev-parse --short=12 HEAD).Trim()
 Assert-NativeSuccess "Build commit detection"
 if ($buildCommit -notmatch '^[0-9a-f]{7,40}$') {
   throw "Unable to determine a safe Git build commit."
+}
+$release = Get-Content -LiteralPath "release.json" -Raw | ConvertFrom-Json
+$releaseVersion = [string]$release.version
+if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') {
+  throw "release.json does not contain a valid release version."
+}
+
+# Validate the two public/proxy build inputs before any remote write. Values are
+# intentionally never printed because this parser also reads the secrets file.
+$productionEnvPath = Join-Path $root ".env.production"
+if (-not (Test-Path -LiteralPath $productionEnvPath -PathType Leaf)) {
+  throw ".env.production is required for VPS deployment."
+}
+$productionEnv = @{}
+foreach ($rawLine in Get-Content -LiteralPath $productionEnvPath) {
+  $line = $rawLine.Trim()
+  if (-not $line -or $line.StartsWith("#")) { continue }
+  if ($line -match '^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+    $value = $Matches[2].Trim()
+    if ($value.Length -ge 2 -and (
+      ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+      ($value.StartsWith("'") -and $value.EndsWith("'"))
+    )) {
+      $value = $value.Substring(1, $value.Length - 2)
+    }
+    $productionEnv[$Matches[1]] = $value
+  }
+}
+if ($productionEnv["TRUST_PROXY_HEADERS"] -cne "true") {
+  throw "TRUST_PROXY_HEADERS must be true for the bundled trusted Caddy proxy."
+}
+$publicContactPhone = [string]$productionEnv["VITE_PUBLIC_CONTACT_PHONE"]
+if ($publicContactPhone -notmatch '^\+[1-9][0-9]{7,14}$') {
+  throw "VITE_PUBLIC_CONTACT_PHONE must be a valid E.164 number."
 }
 
 Write-Host "Running local production checks..."
@@ -106,33 +141,82 @@ if ($SshKey) {
   $sshOptions = @("-i", $SshKey)
 }
 
-if (-not $SkipBootstrap) {
-  Write-Host "Uploading and running VPS bootstrap..."
-  scp @sshOptions "deploy/bootstrap-vps.sh" "${sshTarget}:/tmp/golden-bootstrap-vps.sh"
-  Assert-NativeSuccess "Bootstrap upload"
-  ssh @sshOptions $sshTarget "sed -i 's/\r$//' /tmp/golden-bootstrap-vps.sh && APP_DIR='$AppDir' bash /tmp/golden-bootstrap-vps.sh"
-  Assert-NativeSuccess "VPS bootstrap"
+# Back up the currently running deployment before uploading or extracting any
+# new source. A first deployment requires an explicit acknowledgement because
+# there is no state to protect yet.
+$deploymentState = @(
+  ssh @sshOptions $sshTarget "if command -v docker >/dev/null 2>&1 && [ -f '$AppDir/scripts/vps-backup.sh' ] && [ -f '$AppDir/deploy/docker-compose.yml' ] && [ -f '$AppDir/.env.production' ] && docker compose --env-file '$AppDir/.env.production' -f '$AppDir/deploy/docker-compose.yml' ps -q crm 2>/dev/null | grep -q .; then printf running; else printf absent; fi"
+)
+Assert-NativeSuccess "Remote deployment state probe"
+$deploymentStateText = ($deploymentState -join "").Trim()
+$hasPreservedDeployment = $deploymentStateText -eq "running"
+if ($deploymentStateText -eq "running") {
+  Write-Host "Creating a fail-closed backup of the current VPS state..."
+  ssh @sshOptions $sshTarget "cd '$AppDir' && APP_DIR='$AppDir' bash scripts/vps-backup.sh"
+  Assert-NativeSuccess "Pre-deployment VPS backup"
+
+  Write-Host "Preserving the exact running Compose, Caddy, environment, and image state..."
+  scp @sshOptions "scripts/vps-preserve-deploy-state.sh" "${sshTarget}:/tmp/golden-preserve-deploy-state.sh"
+  Assert-NativeSuccess "Deployment-state helper upload"
+  scp @sshOptions "deploy/remote-rollback.sh" "${sshTarget}:/tmp/golden-remote-rollback.sh"
+  Assert-NativeSuccess "Trusted rollback helper upload"
+  ssh @sshOptions $sshTarget "sed -i 's/\r$//' /tmp/golden-preserve-deploy-state.sh /tmp/golden-remote-rollback.sh && chmod 700 /tmp/golden-remote-rollback.sh && APP_DIR='$AppDir' bash /tmp/golden-preserve-deploy-state.sh"
+  Assert-NativeSuccess "Pre-extraction deployment-state preservation"
+} elseif (-not $AllowFirstDeployWithoutBackup) {
+  throw "No running CRM deployment was found to back up. Use -AllowFirstDeployWithoutBackup only for a verified first deployment."
 }
 
-Write-Host "Uploading project archive..."
-ssh @sshOptions $sshTarget "mkdir -p '$AppDir'"
-Assert-NativeSuccess "Remote application directory preparation"
-scp @sshOptions $archiveRelative "${sshTarget}:/tmp/golden-pro-crm-vps.tar.gz"
-Assert-NativeSuccess "Project archive upload"
-ssh @sshOptions $sshTarget "tar -xzf /tmp/golden-pro-crm-vps.tar.gz -C '$AppDir'"
-Assert-NativeSuccess "Project archive extraction"
-ssh @sshOptions $sshTarget "find '$AppDir/deploy' '$AppDir/scripts' -type f -name '*.sh' -exec sed -i 's/\r$//' {} +"
-Assert-NativeSuccess "Linux script line-ending normalization"
+try {
+  if (-not $SkipBootstrap) {
+    Write-Host "Uploading and running VPS bootstrap..."
+    scp @sshOptions "deploy/bootstrap-vps.sh" "${sshTarget}:/tmp/golden-bootstrap-vps.sh"
+    Assert-NativeSuccess "Bootstrap upload"
+    ssh @sshOptions $sshTarget "sed -i 's/\r$//' /tmp/golden-bootstrap-vps.sh && APP_DIR='$AppDir' bash /tmp/golden-bootstrap-vps.sh"
+    Assert-NativeSuccess "VPS bootstrap"
+  }
 
-Write-Host "Uploading .env.production separately..."
-scp @sshOptions ".env.production" "${sshTarget}:${AppDir}/.env.production"
-Assert-NativeSuccess "Production environment upload"
-ssh @sshOptions $sshTarget "chmod 600 '$AppDir/.env.production'"
-Assert-NativeSuccess "Production environment permissions"
+  Write-Host "Uploading project archive..."
+  ssh @sshOptions $sshTarget "mkdir -p '$AppDir'"
+  Assert-NativeSuccess "Remote application directory preparation"
+  scp @sshOptions $archiveRelative "${sshTarget}:/tmp/golden-pro-crm-vps.tar.gz"
+  Assert-NativeSuccess "Project archive upload"
+  ssh @sshOptions $sshTarget "tar -xzf /tmp/golden-pro-crm-vps.tar.gz -C '$AppDir'"
+  Assert-NativeSuccess "Project archive extraction"
+  ssh @sshOptions $sshTarget "find '$AppDir/deploy' '$AppDir/scripts' -type f -name '*.sh' -exec sed -i 's/\r$//' {} +"
+  Assert-NativeSuccess "Linux script line-ending normalization"
 
-Write-Host "Starting Docker Compose on VPS..."
-ssh @sshOptions $sshTarget "cd '$AppDir' && BUILD_COMMIT='$buildCommit' CRM_DOMAIN='$Domain' bash deploy/remote-start.sh"
-Assert-NativeSuccess "Remote Docker deployment"
+  Write-Host "Uploading .env.production separately..."
+  scp @sshOptions ".env.production" "${sshTarget}:${AppDir}/.env.production"
+  Assert-NativeSuccess "Production environment upload"
+  ssh @sshOptions $sshTarget "chmod 600 '$AppDir/.env.production'"
+  Assert-NativeSuccess "Production environment permissions"
+
+  Write-Host "Starting Docker Compose on VPS..."
+  ssh @sshOptions $sshTarget "cd '$AppDir' && EXPECTED_VERSION='$releaseVersion' EXPECTED_BUILD='$buildCommit' BUILD_COMMIT='$buildCommit' CRM_DOMAIN='$Domain' bash deploy/remote-start.sh"
+  Assert-NativeSuccess "Remote Docker deployment"
+
+  Write-Host "Verifying the public HTTPS release contract..."
+  $health = Invoke-RestMethod -Uri "https://$Domain/api/health" -TimeoutSec 30
+  if ($health.status -ne "ok" -or $health.release.version -ne $releaseVersion -or $health.commit -ne $buildCommit) {
+    throw "Public health verification did not match the expected release."
+  }
+  $version = Invoke-RestMethod -Uri "https://$Domain/api/version" -TimeoutSec 30
+  if ($version.version -ne $releaseVersion -or $version.commit -ne $buildCommit -or $version.runtime -ne "production") {
+    throw "Public version verification did not match the deployed production release."
+  }
+} catch {
+  $deploymentError = $_.Exception.Message
+  if ($hasPreservedDeployment) {
+    Write-Warning "Deployment verification or mutation failed; restoring the preserved deployment."
+    ssh @sshOptions $sshTarget "APP_DIR='$AppDir' CRM_DOMAIN='$Domain' bash /tmp/golden-remote-rollback.sh"
+    $rollbackExitCode = $LASTEXITCODE
+    if ($rollbackExitCode -ne 0) {
+      throw "Deployment failed and automatic rollback also failed (exit $rollbackExitCode). Original error: $deploymentError"
+    }
+    throw "Deployment failed; the previous deployment was restored. Original error: $deploymentError"
+  }
+  throw "First deployment failed and no previous deployment exists to restore. Original error: $deploymentError"
+}
 
 if (-not $SkipDns) {
   $env:CLOUDFLARE_RECORD_NAME = "crm"

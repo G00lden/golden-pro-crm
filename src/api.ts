@@ -19,12 +19,14 @@ import {
   getCurrentAppUser,
   buildLocalToken,
 } from "./firebase";
-import { serverDataEnabled } from "./dataProvider";
+import { browserLocalDataEnabled, serverDataEnabled } from "./dataProvider";
 import {
   calculateDocumentTotals,
   type DiscountMode,
 } from "../shared/financial";
 import { resolveInvoiceTaxType, type InvoiceTaxType } from "../shared/zatca";
+import { isOutboundSimulation, prepareManualOutboundAction } from "./outboundAction";
+import { visibleCatalogProductCount, visibleCatalogProducts } from "../shared/productCatalogState";
 
 export type { DiscountMode } from "../shared/financial";
 export type { InvoiceTaxType } from "../shared/zatca";
@@ -125,6 +127,8 @@ export type Product = {
   variants?: ProductVariant[] | string;
   catalog_visible?: boolean | number;
   is_available?: boolean | number;
+  merged_into?: string | null;
+  merged_at?: string | null;
   unlimited_quantity?: boolean | number;
   last_synced_at?: string;
   product_type?: "sale_only" | "install_maintenance" | "maintenance_existing" | "external_maintenance" | "needs_review";
@@ -262,7 +266,21 @@ export type TechnicianNotificationResult = {
   message_id?: string | null;
   provider?: string;
   dry_run?: boolean;
+  simulated?: boolean;
   reason?: string;
+};
+
+export type ReminderSendResult = {
+  success: boolean;
+  skipped?: boolean;
+  dry_run?: boolean;
+  simulated?: boolean;
+  installation_id?: string;
+  reminder_id?: string;
+  remind_count: number;
+  next_remind_type: string | null;
+  reason?: string;
+  error?: string;
 };
 
 export type ReminderRunResult = {
@@ -271,6 +289,8 @@ export type ReminderRunResult = {
   sent: number;
   failed: number;
   skipped: number;
+  dry_run?: boolean;
+  simulated?: boolean;
   blocked?: boolean;
   error?: string;
   results: Array<{ success?: boolean; skipped?: boolean; installation_id?: string; error?: string; reason?: string }>;
@@ -854,6 +874,7 @@ export type Invoice = {
   discount_value?: number;
   vat_percent: number;  // 15 for ZATCA standard
   vat_amount: number;
+  additional_fee?: number;
   total_with_vat: number;
   total_without_vat: number;
   currency: string;
@@ -938,8 +959,16 @@ const withoutId = <T extends { id: string }>(item: T): Omit<T, "id"> => {
   return data;
 };
 
-function getUserOrThrow() {
+function getDataUser() {
   const user = getCurrentAppUser();
+  if (user?.local && !browserLocalDataEnabled(user.local)) {
+    return { ...user, local: false };
+  }
+  return user;
+}
+
+function getUserOrThrow() {
+  const user = getDataUser();
   if (!user) throw new Error("يجب تسجيل الدخول أولا.");
   return user;
 }
@@ -1161,6 +1190,10 @@ async function sendLocalReminderViaWhatsApp(data: LocalDb, installationId: strin
 
       return {
         success: false,
+        skipped: true,
+        dry_run: true,
+        simulated: true,
+        reason: whatsAppResult.result.reason,
         error: whatsAppResult.result.reason,
         remind_count: Number(installation.remind_count || 0),
         next_remind_type: installation.next_remind_type || null,
@@ -1283,13 +1316,6 @@ function hasRecentReminderAttempt(data: LocalDb, installationId: string, minutes
   );
 }
 
-function requestOutboundCode() {
-  if (typeof window === "undefined") return "";
-  const code = window.prompt("أدخل كود الإرسال");
-  if (!code?.trim()) throw new Error("كود الإرسال مطلوب قبل إرسال أي رسالة.");
-  return code.trim();
-}
-
 async function getApiAuthorizationToken() {
   const user = getCurrentAppUser();
   return user?.local ? buildLocalToken(user.uid) : user?.getIdToken?.();
@@ -1337,7 +1363,7 @@ export type DashboardStats = {
 };
 
 export const getStats = async (): Promise<DashboardStats> => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) {
     return {
       customers: 0,
@@ -1363,7 +1389,7 @@ export const getStats = async (): Promise<DashboardStats> => {
     const data = loadLocalDb(uid);
     return {
       customers: data.customers.length,
-      products: data.products.length,
+      products: visibleCatalogProductCount(data.products),
       technicians: data.technicians.length,
       installations: data.installations.length,
       quotes: data.quotes.length,
@@ -1398,7 +1424,7 @@ export const getStats = async (): Promise<DashboardStats> => {
 
   const [
     custCount,
-    prodCount,
+    prodSnapshot,
     techCount,
     instCount,
     quoteCount,
@@ -1411,7 +1437,7 @@ export const getStats = async (): Promise<DashboardStats> => {
   ] =
     await Promise.all([
       getCountFromServer(query(collection(db, "customers"), where("createdBy", "==", uid))),
-      getCountFromServer(query(collection(db, "products"), where("createdBy", "==", uid))),
+      getDocs(query(collection(db, "products"), where("createdBy", "==", uid), limit(10_000))),
       getCountFromServer(query(collection(db, "technicians"), where("createdBy", "==", uid))),
       getCountFromServer(query(collection(db, "installations"), where("createdBy", "==", uid))),
       getCountFromServer(query(collection(db, "quotes"), where("createdBy", "==", uid))),
@@ -1453,7 +1479,7 @@ export const getStats = async (): Promise<DashboardStats> => {
 
   return {
     customers: custCount.data().count,
-    products: prodCount.data().count,
+    products: visibleCatalogProductCount(prodSnapshot.docs.map((product) => product.data())),
     technicians: techCount.data().count,
     installations: instCount.data().count,
     quotes: quoteCount.data().count,
@@ -1670,7 +1696,7 @@ export const getCustomers = async (
   search = "",
   requested: CustomerListOptions = {},
 ): Promise<CustomerListResult> => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   const all = requested.all ?? (requested.page === undefined && requested.pageSize === undefined);
   const options = {
     ...requested,
@@ -2007,7 +2033,7 @@ function ensureLocalQuoteCustomer(localDb: LocalDb, uid: string, quote: Quote) {
 }
 
 export const getQuotes = async (filter: { search?: string; status?: string } = {}): Promise<QuoteListResponse> => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return { data: [], total: 0, stats: quoteStats([]) };
   const uid = user.uid;
   if (user.local) {
@@ -2154,33 +2180,35 @@ export const deleteQuote = (id: string) => {
 };
 
 export const sendQuoteWhatsApp = async (quote: Quote, message: string) => {
-  const outboundCode = requestOutboundCode();
-  const user = getCurrentAppUser();
+  const outbound = await prepareManualOutboundAction(getOutboundSafetyStatus);
+  const user = getDataUser();
   const metadata = {
     kind: "quote",
     quote_id: quote.id,
     quote_number: quote.quote_number,
   };
   if (serverDataEnabled() && !user?.local) {
-    return apiFetch<{ success: boolean; result: unknown }>(`/api/quotes/${quote.id}/send-whatsapp`, {
+    const response = await apiFetch<{ success: boolean; dry_run?: boolean; result: unknown }>(`/api/quotes/${quote.id}/send-whatsapp`, {
       method: "POST",
       body: JSON.stringify({
         phone: quote.customer_phone,
         message,
-        outboundCode,
+        outboundCode: outbound.outboundCode,
         metadata,
       }),
     });
+    return { ...response, dry_run: isOutboundSimulation(response.result, outbound.dryRun) };
   }
-  return apiFetch<{ success: boolean; result: unknown }>("/api/whatsapp/send-test", {
+  const response = await apiFetch<{ success: boolean; dry_run?: boolean; result: unknown }>("/api/whatsapp/send-test", {
     method: "POST",
     body: JSON.stringify({
       phone: quote.customer_phone,
       message,
-      outboundCode,
+      outboundCode: outbound.outboundCode,
       metadata,
     }),
   });
+  return { ...response, dry_run: isOutboundSimulation(response.result, outbound.dryRun) };
 };
 
 /* ── Invoice helpers ───────────────────────────────────── */
@@ -2212,12 +2240,19 @@ function normalizeInvoiceItems(items: InvoiceItem[] = []) {
 // Treat an explicit 0 (zero-rated) as a valid VAT rate. Only an unset value
 // (undefined / null / "") or a non-numeric value falls back to the default —
 // `0 || 15` would otherwise turn a 0% invoice into 15%.
-function invoiceTotals(items: InvoiceItem[], discountValue = 0, vat_percent = 15, discountMode: DiscountMode = "fixed") {
+function invoiceTotals(
+  items: InvoiceItem[],
+  discountValue = 0,
+  vat_percent = 15,
+  discountMode: DiscountMode = "fixed",
+  additionalFee = 0,
+) {
   const totals = calculateDocumentTotals({
     lines: items,
     discountValue,
     discountMode,
     vatPercent: vat_percent,
+    additionalTax: additionalFee,
   });
   return {
     subtotal: totals.subtotal,
@@ -2226,6 +2261,7 @@ function invoiceTotals(items: InvoiceItem[], discountValue = 0, vat_percent = 15
     discount_value: totals.discountValue,
     vat_percent: totals.vatPercent,
     vat_amount: totals.vatAmount,
+    additional_fee: totals.additionalTax,
     total_with_vat: totals.total,
     total_without_vat: totals.totalWithoutVat,
   };
@@ -2260,7 +2296,8 @@ function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings
   const items = normalizeInvoiceItems(data.items);
   const discountMode: DiscountMode = (data.discount_mode ?? existing?.discount_mode) === "percent" ? "percent" : "fixed";
   const discountValue = data.discount_value ?? data.discount ?? existing?.discount_value ?? existing?.discount ?? 0;
-  const totals = invoiceTotals(items, discountValue, data.vat_percent ?? existing?.vat_percent, discountMode);
+  const additionalFee = data.additional_fee ?? existing?.additional_fee ?? 0;
+  const totals = invoiceTotals(items, discountValue, data.vat_percent ?? existing?.vat_percent, discountMode, additionalFee);
   const now = nowIso();
   return {
     id: existing?.id || localId("inv"),
@@ -2300,7 +2337,7 @@ function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings
 /* ── Invoice API ───────────────────────────────────────── */
 
 export const getInvoices = async (filter: { search?: string; status?: string } = {}): Promise<InvoiceListResponse> => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return { data: [], total: 0, stats: invoiceStats([]) };
   const uid = user.uid;
   if (user.local) {
@@ -2384,10 +2421,22 @@ export const updateInvoice = async (id: string, data: InvoiceInput) => {
       invoice_type: resolveInvoiceTaxType({
         requested: data.invoice_type,
         buyerVat: data.customer_vat,
-        taxableAmount: invoiceTotals(items, data.discount_value ?? data.discount, data.vat_percent, data.discount_mode).total_without_vat,
+        taxableAmount: invoiceTotals(
+          items,
+          data.discount_value ?? data.discount,
+          data.vat_percent,
+          data.discount_mode,
+          data.additional_fee,
+        ).total_without_vat,
       }),
       customer_vat: String(data.customer_vat || "").trim(),
-      ...invoiceTotals(items, data.discount_value ?? data.discount, data.vat_percent, data.discount_mode),
+      ...invoiceTotals(
+        items,
+        data.discount_value ?? data.discount,
+        data.vat_percent,
+        data.discount_mode,
+        data.additional_fee,
+      ),
       updatedAt: nowIso(),
     }),
     OperationType.UPDATE,
@@ -2477,12 +2526,17 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
     customer_name: quote.customer_name,
     customer_phone: quote.customer_phone,
     customer_city: quote.customer_city,
+    customer_vat: quote.customer_vat,
     title: quote.title || "",
     issue_date: today(),
     due_date: addDays(today(), 30),
     currency: quote.currency || "SAR",
     discount: quote.discount,
-    vat_percent: 15,
+    discount_mode: quote.discount_mode,
+    discount_value: quote.discount_value ?? quote.discount,
+    vat_percent: quote.vat_percent ?? 15,
+    additional_fee: quote.tax ?? 0,
+    payment_method: quote.payment_method || "",
     items: quote.items.map((item) => ({
       product_id: item.product_id || null,
       product_sku: item.product_sku || "",
@@ -2530,47 +2584,52 @@ export const generateInvoiceQRCode = (invoice: Invoice): string => {
 };
 
 export const sendInvoiceWhatsApp = async (invoice: Invoice, message: string) => {
-  const outboundCode = requestOutboundCode();
-  const user = getCurrentAppUser();
+  const outbound = await prepareManualOutboundAction(getOutboundSafetyStatus);
+  const user = getDataUser();
   const metadata = {
     kind: "invoice",
     invoice_id: invoice.id,
     invoice_number: invoice.invoice_number,
   };
   if (serverDataEnabled() && !user?.local) {
-    return apiFetch<{ success: boolean; result: unknown }>(`/api/invoices/${invoice.id}/send-whatsapp`, {
+    const response = await apiFetch<{ success: boolean; dry_run?: boolean; result: unknown }>(`/api/invoices/${invoice.id}/send-whatsapp`, {
       method: "POST",
       body: JSON.stringify({
         phone: invoice.customer_phone,
         message,
-        outboundCode,
+        outboundCode: outbound.outboundCode,
         metadata,
       }),
     });
+    return { ...response, dry_run: isOutboundSimulation(response.result, outbound.dryRun) };
   }
-  return apiFetch<{ success: boolean; result: unknown }>("/api/whatsapp/send-test", {
+  const response = await apiFetch<{ success: boolean; dry_run?: boolean; result: unknown }>("/api/whatsapp/send-test", {
     method: "POST",
     body: JSON.stringify({
       phone: invoice.customer_phone,
       message,
-      outboundCode,
+      outboundCode: outbound.outboundCode,
       metadata,
     }),
   });
+  return { ...response, dry_run: isOutboundSimulation(response.result, outbound.dryRun) };
 };
 
 /* ── Products ──────────────────────────────────────────── */
 
 export const getProducts = async () => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return [] as Product[];
   const uid = user.uid;
   if (user.local) {
-    return loadLocalDb(uid).products.sort((a, b) => a.name.localeCompare(b.name));
+    return visibleCatalogProducts(loadLocalDb(uid).products)
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
   if (serverDataEnabled()) return apiFetch<Product[]>("/api/products");
-  const snap = await getDocs(query(collection(db, "products"), where("createdBy", "==", uid), orderBy("name"), limit(100)));
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Product);
+  const snap = await getDocs(query(collection(db, "products"), where("createdBy", "==", uid), orderBy("name"), limit(10_000)));
+  return visibleCatalogProducts(
+    snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Product),
+  );
 };
 
 export const createProduct = (data: Omit<Product, "id">) => {
@@ -2647,18 +2706,35 @@ export const deleteProduct = (id: string) => {
   const user = getUserOrThrow();
   if (user.local) {
     const localDb = loadLocalDb(user.uid);
-    localDb.products = localDb.products.filter((item) => item.id !== id);
+    localDb.products = localDb.products.map((item) => item.id === id
+      ? {
+          ...item,
+          catalog_visible: false,
+          is_available: false,
+          store_status: "manual_deleted",
+          updatedAt: nowIso(),
+        }
+      : item);
     saveLocalDb(user.uid, localDb);
     return Promise.resolve();
   }
   if (serverDataEnabled()) {
     return apiFetch(`/api/products/${id}`, { method: "DELETE" }).then(() => undefined);
   }
-  return wrap(() => deleteDoc(doc(db, "products", id)), OperationType.DELETE, `products/${id}`);
+  return wrap(
+    () => updateDoc(doc(db, "products", id), {
+      catalog_visible: false,
+      is_available: false,
+      store_status: "manual_deleted",
+      updatedAt: nowIso(),
+    }),
+    OperationType.DELETE,
+    `products/${id}`,
+  );
 };
 
 export const getInstallations = async () => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return [] as Installation[];
   const uid = user.uid;
   if (user.local) {
@@ -2797,23 +2873,32 @@ export const deleteInstallation = (id: string) => {
 
 export const remindInstallation = async (id: string, type?: string) => {
   const user = getUserOrThrow();
-  const outboundCode = requestOutboundCode();
+  const outbound = await prepareManualOutboundAction(getOutboundSafetyStatus);
   if (user.local) {
     const localDb = loadLocalDb(user.uid);
-    const result = await sendLocalReminderViaWhatsApp(localDb, id, user.uid, type, outboundCode);
+    const result = await sendLocalReminderViaWhatsApp(localDb, id, user.uid, type, outbound.outboundCode);
     saveLocalDb(user.uid, localDb);
-    if (!result.success) throw new Error(result.error || "تعذر إرسال التذكير عبر واتساب.");
-    return result;
+    const dryRun = isOutboundSimulation(result, outbound.dryRun);
+    if (!result.success && !dryRun) throw new Error(result.error || "تعذر إرسال التذكير عبر واتساب.");
+    return { ...result, dry_run: dryRun, simulated: dryRun } satisfies ReminderSendResult;
   }
-  return apiFetch<{ success: boolean; remind_count: number; next_remind_type: string | null }>(`/api/installations/${id}/remind`, {
+  const result = await apiFetch<ReminderSendResult>(`/api/installations/${id}/remind`, {
     method: "POST",
-    body: JSON.stringify({ type, outboundCode }),
+    body: JSON.stringify({ type, outboundCode: outbound.outboundCode }),
   });
+  const dryRun = isOutboundSimulation(result, outbound.dryRun);
+  return {
+    ...result,
+    dry_run: dryRun,
+    simulated: dryRun,
+  } satisfies ReminderSendResult;
 };
 
 export const runDueReminders = async (options: { automatic?: boolean } = {}) => {
   const user = getUserOrThrow();
-  const outboundCode = options.automatic ? "" : requestOutboundCode();
+  const outbound = options.automatic
+    ? { dryRun: false, outboundCode: undefined }
+    : await prepareManualOutboundAction(getOutboundSafetyStatus);
   if (user.local) {
     const whatsapp = await getWhatsAppStatus().catch(() => null);
     if (whatsapp?.status !== "connected") {
@@ -2827,6 +2912,8 @@ export const runDueReminders = async (options: { automatic?: boolean } = {}) => 
         error: "واتساب غير متصل. افتح تبويب واتساب والسجل واربط الجلسة أولا.",
         results: [],
         whatsapp: whatsapp || undefined,
+        dry_run: isOutboundSimulation(whatsapp, outbound.dryRun),
+        simulated: outbound.dryRun || isOutboundSimulation(whatsapp),
       } satisfies ReminderRunResult;
     }
     const localDb = loadLocalDb(user.uid);
@@ -2842,14 +2929,14 @@ export const runDueReminders = async (options: { automatic?: boolean } = {}) => 
     const results = [];
     for (const item of due) {
       try {
-        results.push(await sendLocalReminderViaWhatsApp(localDb, item.id, user.uid, item.next_remind_type || undefined, outboundCode));
+        results.push(await sendLocalReminderViaWhatsApp(localDb, item.id, user.uid, item.next_remind_type || undefined, outbound.outboundCode));
       } catch (error) {
         results.push({ success: false, installation_id: item.id, error: error instanceof Error ? error.message : String(error) });
       }
       if (options.automatic && results.length >= 5) break;
     }
     saveLocalDb(user.uid, localDb);
-    return {
+    const result = {
       success: true,
       checked: due.length,
       sent: results.filter((item) => item.success).length,
@@ -2859,15 +2946,19 @@ export const runDueReminders = async (options: { automatic?: boolean } = {}) => 
       results,
       whatsapp,
     } satisfies ReminderRunResult;
+    const simulated = outbound.dryRun || isOutboundSimulation(result);
+    return { ...result, dry_run: simulated, simulated } satisfies ReminderRunResult;
   }
-  return apiFetch<ReminderRunResult>("/api/reminders/run-due", {
+  const result = await apiFetch<ReminderRunResult>("/api/reminders/run-due", {
     method: "POST",
-    body: JSON.stringify({ mode: options.automatic ? "automatic" : "manual", outboundCode }),
+    body: JSON.stringify({ mode: options.automatic ? "automatic" : "manual", outboundCode: outbound.outboundCode }),
   });
+  const simulated = outbound.dryRun || isOutboundSimulation(result);
+  return { ...result, dry_run: simulated, simulated } satisfies ReminderRunResult;
 };
 
 export const getTechnicians = async () => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return [] as Technician[];
   const uid = user.uid;
   if (user.local) {
@@ -2955,7 +3046,7 @@ export const deleteTechnician = (id: string) => {
 };
 
 export const getBookings = async (params: { date?: string } = {}) => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return [] as Booking[];
   const uid = user.uid;
   if (user.local) {
@@ -3055,13 +3146,27 @@ export const deleteBooking = (id: string) => {
 
 export const notifyTechnicianBooking = async (id: string, trigger = "manual") => {
   const user = getUserOrThrow();
-  const outboundCode = requestOutboundCode();
-  if (user.local) return sendLocalTechnicianNotification(user.uid, id, trigger, outboundCode);
+  const outbound = await prepareManualOutboundAction(getOutboundSafetyStatus);
+  if (user.local) {
+    const result = await sendLocalTechnicianNotification(user.uid, id, trigger, outbound.outboundCode);
+    const dryRun = isOutboundSimulation(result, outbound.dryRun);
+    return {
+      ...result,
+      dry_run: dryRun,
+      simulated: dryRun,
+    } satisfies TechnicianNotificationResult;
+  }
 
-  return apiFetch<TechnicianNotificationResult>(`/api/bookings/${id}/notify-technician`, {
+  const result = await apiFetch<TechnicianNotificationResult>(`/api/bookings/${id}/notify-technician`, {
     method: "POST",
-    body: JSON.stringify({ trigger, outboundCode }),
+    body: JSON.stringify({ trigger, outboundCode: outbound.outboundCode }),
   });
+  const dryRun = isOutboundSimulation(result, outbound.dryRun);
+  return {
+    ...result,
+    dry_run: dryRun,
+    simulated: dryRun,
+  } satisfies TechnicianNotificationResult;
 };
 
 export const completeBooking = async (id: string) => {
@@ -3104,7 +3209,7 @@ export const completeBooking = async (id: string) => {
 };
 
 export const getReminders = async () => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return [] as Reminder[];
   const uid = user.uid;
   if (user.local) {
@@ -3116,7 +3221,7 @@ export const getReminders = async () => {
 };
 
 export const getCustomerCareQueue = async () => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return [] as CustomerCareItem[];
   const uid = user.uid;
 
@@ -3155,7 +3260,7 @@ export const getCustomerCareQueue = async () => {
 };
 
 export const getSettings = async (): Promise<Settings> => {
-  const user = getCurrentAppUser();
+  const user = getDataUser();
   if (!user) return defaultSettings();
   const uid = user.uid;
   if (user.local) return loadLocalDb(uid).settings;
@@ -3373,6 +3478,9 @@ export const seedDemoData = async (count = 10) => {
 
 export const getWhatsAppStatus = async () => apiFetch<WhatsAppStatus>("/api/whatsapp/status");
 
+const getOutboundSafetyStatus = async () =>
+  apiFetch<{ outbound: NonNullable<WhatsAppStatus["outbound"]> }>("/api/health/details");
+
 export const connectWhatsApp = async () =>
   apiFetch<WhatsAppStatus>("/api/whatsapp/connect", { method: "POST" });
 
@@ -3381,12 +3489,19 @@ export const getWhatsAppQR = async () => apiFetch<{ qr: string }>("/api/whatsapp
 export const disconnectWhatsApp = async () =>
   apiFetch<WhatsAppStatus>("/api/whatsapp/disconnect", { method: "POST" });
 
-export const testWhatsApp = async (phone: string, message: string, metadata?: Record<string, unknown>) => {
-  const outboundCode = requestOutboundCode();
-  return apiFetch<{ success: boolean; result: unknown }>("/api/whatsapp/send-test", {
+export const testWhatsApp = async (
+  phone: string,
+  message: string,
+  metadata?: Record<string, unknown>,
+  suppliedCode?: string,
+) => {
+  const outbound = await prepareManualOutboundAction(getOutboundSafetyStatus, undefined, suppliedCode);
+  const response = await apiFetch<{ success: boolean; dry_run?: boolean; result: unknown }>("/api/whatsapp/send-test", {
     method: "POST",
-    body: JSON.stringify({ phone, message, outboundCode, metadata }),
+    body: JSON.stringify({ phone, message, outboundCode: outbound.outboundCode, metadata }),
   });
+  const dryRun = isOutboundSimulation(response, outbound.dryRun);
+  return { ...response, dry_run: dryRun, simulated: dryRun };
 };
 
 export const getReminderDiagnostics = async (): Promise<ReminderDiagnostics> => {
@@ -3698,11 +3813,20 @@ export const assignStoreOrderTechnician = async (
   id: string,
   data: { itemSku?: string; technicianId: string; scheduledDate: string; scheduledTime?: string; sendNow?: boolean },
 ) => {
-  const outboundCode = data.sendNow ? requestOutboundCode() : undefined;
-  return apiFetch<StoreOrderTechnicianAssignmentResult>(`/api/store/orders/${id}/assign-technician`, {
+  const outbound = data.sendNow
+    ? await prepareManualOutboundAction(getOutboundSafetyStatus)
+    : null;
+  const result = await apiFetch<StoreOrderTechnicianAssignmentResult>(`/api/store/orders/${id}/assign-technician`, {
     method: "POST",
-    body: JSON.stringify({ ...data, outboundCode }),
+    body: JSON.stringify({ ...data, outboundCode: outbound?.outboundCode }),
   });
+  if (result.notification && isOutboundSimulation(result.notification, outbound?.dryRun === true)) {
+    return {
+      ...result,
+      notification: { ...result.notification, dry_run: true, simulated: true },
+    };
+  }
+  return result;
 };
 
 // ============================================================
@@ -4020,18 +4144,29 @@ export const updateCommunicationPreference = (data: {
   { method: "PUT", body: JSON.stringify(data) },
 );
 
-export const sendWhatsAppTemplateMessage = (data: {
+export const sendWhatsAppTemplateMessage = async (data: {
   phone: string;
   template: string;
   vars?: Record<string, string>;
   installation_id?: string;
   booking_id?: string;
   outboundCode?: string;
-}) =>
-  apiFetch<{ success: boolean; result: { messageId?: string | null; template?: string; body?: string } }>(
+}) => {
+  const outbound = await prepareManualOutboundAction(getOutboundSafetyStatus, undefined, data.outboundCode);
+  const response = await apiFetch<{
+    success: boolean;
+    dry_run?: boolean;
+    result: { messageId?: string | null; template?: string; body?: string; dryRun?: boolean };
+  }>(
     "/api/whatsapp/send-template",
-    { method: "POST", body: JSON.stringify(data) },
+    {
+      method: "POST",
+      body: JSON.stringify({ ...data, outboundCode: outbound.outboundCode }),
+    },
   );
+  const dryRun = isOutboundSimulation(response, outbound.dryRun);
+  return { ...response, dry_run: dryRun, simulated: dryRun };
+};
 
 export const getConversationByPhone = (phone: string, limit = 200) =>
   apiFetch<{ phone: string; count: number; messages: WhatsAppMessage[] }>(
@@ -4116,6 +4251,24 @@ export type OdooAuditLog = {
   created_at?: string;
 };
 
+export type PublicLeadInboxItem = {
+  id: string;
+  name: string;
+  phone: string;
+  service: string;
+  message: string;
+  source: "landing" | "landing-v2";
+  status: "new" | "contacted" | "qualified" | "closed" | "spam";
+  projection_status: "pending" | "projected" | "failed";
+  projection_attempts: number;
+  projection_target_id?: string | null;
+  projection_last_error?: string | null;
+  projection_next_retry_at?: string | null;
+  projected_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type Customer360 = {
   customer: Customer;
   store_orders: StoreOrder[];
@@ -4147,6 +4300,17 @@ export const getCustomer360 = (id: string) => apiFetch<Customer360>(`/api/odoo/c
 export const addCustomer360Note = (id: string, body: string) =>
   apiFetch<{ note: { id: string; body: string } }>(`/api/odoo/customer-360/${id}/notes`, { method: "POST", body: JSON.stringify({ body }) });
 export const getOdooAudit = () => apiFetch<{ data: OdooAuditLog[] }>("/api/odoo/audit");
+export const getPublicLeadInbox = () =>
+  apiFetch<{ data: PublicLeadInboxItem[]; total: number }>("/api/odoo/public-leads");
+export const updatePublicLeadInboxStatus = (id: string, status: PublicLeadInboxItem["status"]) =>
+  apiFetch<{ lead: PublicLeadInboxItem }>(`/api/odoo/public-leads/${encodeURIComponent(id)}/status`, {
+    method: "PUT",
+    body: JSON.stringify({ status }),
+  });
+export const retryPublicLeadProjection = (id: string) =>
+  apiFetch<{ lead: PublicLeadInboxItem }>(`/api/odoo/public-leads/${encodeURIComponent(id)}/retry`, {
+    method: "POST",
+  });
 
 export const importText = async (text: string) => {
   const lines = text.trim().split("\n");

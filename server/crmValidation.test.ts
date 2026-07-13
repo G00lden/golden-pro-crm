@@ -21,6 +21,9 @@ test("invoice validation protects VAT and discount fields", () => {
   assert.equal(invoiceCreateSchema.safeParse({ ...base, customer_vat: "123" }).success, false);
   assert.equal(invoiceCreateSchema.safeParse({ ...base, seller_vat_number: "313049114100003" }).success, true);
   assert.equal(invoiceCreateSchema.safeParse({ ...base, discount_mode: "percent", discount_value: 101 }).success, false);
+  const fee = invoiceCreateSchema.parse({ ...base, additional_fee: 50 });
+  assert.equal(fee.additional_fee, 50, "invoice validation must preserve the post-VAT additional fee");
+  assert.equal(invoiceCreateSchema.safeParse({ ...base, additional_fee: -1 }).success, false);
   assert.equal(invoiceCreateSchema.safeParse({ ...base, seller_name: "س".repeat(128) }).success, false);
 });
 

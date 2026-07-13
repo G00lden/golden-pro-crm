@@ -1,69 +1,188 @@
 #!/usr/bin/env bash
-# Zero-touch update for the Golden Pro CRM VPS deployment.
-#
-#   1. Pulls the latest code for the deploy branch.
-#   2. Rebuilds and restarts the Docker stack (crm + Caddy).
-#   3. Waits for the container to report healthy.
-#   4. If the build fails OR the health check never passes, rolls the code back
-#      to the previous commit and rebuilds, so a bad push can't take the site down.
-#
-# Run manually:  cd /opt/golden-pro-crm && bash scripts/vps-update.sh
-# Run from CI:   invoked over SSH by .github/workflows/deploy.yml
+# Fail-closed VPS update path used by GitHub Actions and manual deployments.
 set -euo pipefail
+umask 077
 
 APP_DIR="${APP_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 BRANCH="${DEPLOY_BRANCH:-main}"
-COMPOSE="docker compose -f deploy/docker-compose.yml"
 HEALTH_RETRIES="${HEALTH_RETRIES:-30}"
 HEALTH_SLEEP="${HEALTH_SLEEP:-4}"
+ROLLBACK_HELPER="/tmp/golden-pro-crm-remote-rollback.sh"
+
+log() { printf '\n[deploy] %s\n' "$*"; }
+fail() { echo "VPS update failed: $*" >&2; exit 1; }
+
+case "$APP_DIR" in
+  /*) ;;
+  *) fail "APP_DIR must be absolute" ;;
+esac
+[ "$APP_DIR" != "/" ] || fail "APP_DIR cannot be /"
+case "$BRANCH" in
+  ''|*[!A-Za-z0-9._/-]*|*..*) fail "DEPLOY_BRANCH is invalid" ;;
+esac
+case "$HEALTH_RETRIES:$HEALTH_SLEEP" in
+  *[!0-9:]*) fail "health retry settings must be integers" ;;
+esac
+[ "$HEALTH_RETRIES" -gt 0 ] && [ "$HEALTH_SLEEP" -gt 0 ] \
+  || fail "health retry settings must be positive"
 
 cd "$APP_DIR"
+for command_name in docker git curl; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
+done
+[ -s .env.production ] || fail ".env.production is missing"
+[ -s scripts/vps-backup.sh ] || fail "the current backup script is missing"
+[ -s scripts/vps-preserve-deploy-state.sh ] || fail "the current state-preservation script is missing"
+[ -s deploy/remote-rollback.sh ] || fail "the current trusted rollback script is missing"
 
-log() { printf '\n\033[1;34m[deploy]\033[0m %s\n' "$*"; }
-
-health_ok() {
-  # Exec the same health probe the container uses, over the internal port.
-  $COMPOSE exec -T crm node -e \
-    "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
-    >/dev/null 2>&1
+env_value() {
+  local key="$1" value
+  value="$(
+    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" .env.production \
+      | tail -n 1 | tr -d '\r'
+  )"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s' "$value"
 }
 
-rebuild() { $COMPOSE up -d --build; }
+CRM_DOMAIN="$(env_value CRM_DOMAIN)"
+CRM_DOMAIN="${CRM_DOMAIN:-crm.breexe-pro.com}"
+case "$CRM_DOMAIN" in
+  *[!A-Za-z0-9.-]*|'') fail "CRM_DOMAIN is invalid" ;;
+esac
+
+COMPOSE=(docker compose --env-file "$APP_DIR/.env.production" -f "$APP_DIR/deploy/docker-compose.yml")
+RUNNING_CID="$("${COMPOSE[@]}" ps -q crm 2>/dev/null || true)"
+[ -n "$RUNNING_CID" ] || fail "a running CRM deployment is required for zero-touch update"
 
 PREV="$(git rev-parse HEAD)"
+case "$PREV" in
+  *[!0-9a-f]*) fail "the current Git commit is invalid" ;;
+esac
 log "current commit: $PREV"
 
-log "fetching origin/$BRANCH"
-git fetch --quiet origin "$BRANCH"
-git reset --hard "origin/$BRANCH"
-NEW="$(git rev-parse HEAD)"
-log "deploying commit: $NEW"
+# Both operations intentionally precede fetch/reset. Backup protects data;
+# preserve protects the exact image, env, Compose file, and running Caddyfile.
+log "creating a fail-closed data backup"
+APP_DIR="$APP_DIR" bash scripts/vps-backup.sh
+log "preserving the exact running deployment"
+APP_DIR="$APP_DIR" bash scripts/vps-preserve-deploy-state.sh
 
-rollback() {
-  log "ROLLBACK → $PREV"
+PROJECT_NAME="$(sed -n '1p' "$APP_DIR/.deploy-rollback/project-name")"
+case "$PROJECT_NAME" in
+  ''|*[!A-Za-z0-9_-]*) fail "the preserved Compose project name is invalid" ;;
+esac
+COMPOSE=(
+  docker compose --project-name "$PROJECT_NAME"
+  --env-file "$APP_DIR/.env.production"
+  -f "$APP_DIR/deploy/docker-compose.yml"
+)
+
+# Keep a trusted rollback helper outside the Git worktree. Every error after
+# source reset is routed through this helper and restores both source/runtime.
+cp deploy/remote-rollback.sh "$ROLLBACK_HELPER"
+chmod 700 "$ROLLBACK_HELPER"
+POST_RESET=false
+RESTORING=false
+cleanup_helper() { rm -f -- "$ROLLBACK_HELPER"; }
+trap cleanup_helper EXIT
+
+restore_source_and_runtime() {
+  local reason="$1" reset_status=0 rollback_status=0
+  RESTORING=true
+  trap - ERR
+  set +e
+  echo "$reason" >&2
+  log "restoring source commit $PREV"
   git reset --hard "$PREV"
-  rebuild || true
+  reset_status=$?
+  log "restoring the preserved runtime and proxy state"
+  APP_DIR="$APP_DIR" CRM_DOMAIN="$CRM_DOMAIN" HEALTH_RETRIES="$HEALTH_RETRIES" \
+    HEALTH_SLEEP="$HEALTH_SLEEP" bash "$ROLLBACK_HELPER"
+  rollback_status=$?
+  if [ "$reset_status" -ne 0 ] || [ "$rollback_status" -ne 0 ]; then
+    echo "Source reset status: $reset_status; runtime rollback status: $rollback_status" >&2
+    exit 2
+  fi
+  echo "The previous source and deployment were restored." >&2
   exit 1
 }
 
-if [ "$NEW" = "$PREV" ]; then
-  log "already up to date; rebuilding to apply any env/compose changes"
+unexpected_failure() {
+  local status="$?"
+  if [ "$POST_RESET" = true ] && [ "$RESTORING" = false ]; then
+    restore_source_and_runtime "An unexpected error occurred after source replacement."
+  fi
+  exit "$status"
+}
+trap unexpected_failure ERR
+
+log "fetching origin/$BRANCH"
+git fetch --quiet origin "$BRANCH"
+POST_RESET=true
+git reset --hard "origin/$BRANCH"
+NEW="$(git rev-parse HEAD)"
+BUILD_COMMIT="$(git rev-parse --short=12 HEAD)"
+case "$NEW:$BUILD_COMMIT" in
+  *[!0-9a-f:]*) restore_source_and_runtime "The fetched Git commit is invalid." ;;
+esac
+EXPECTED_VERSION="$(
+  sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' release.json \
+    | head -n 1
+)"
+[[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || restore_source_and_runtime "The fetched release version is invalid."
+[ -s deploy/remote-start.sh ] \
+  || restore_source_and_runtime "The fetched remote-start script is missing."
+[ -s deploy/remote-rollback.sh ] \
+  || restore_source_and_runtime "The fetched rollback script is missing."
+log "deploying commit: $NEW as release $EXPECTED_VERSION"
+
+if ! APP_DIR="$APP_DIR" CRM_DOMAIN="$CRM_DOMAIN" \
+  EXPECTED_VERSION="$EXPECTED_VERSION" EXPECTED_BUILD="$BUILD_COMMIT" BUILD_COMMIT="$BUILD_COMMIT" \
+  HEALTH_RETRIES="$HEALTH_RETRIES" HEALTH_SLEEP="$HEALTH_SLEEP" bash deploy/remote-start.sh; then
+  restore_source_and_runtime "The fetched release failed its atomic deployment contract."
 fi
 
-log "building and restarting containers"
-if ! rebuild; then
-  log "build/up failed"
-  rollback
-fi
+public_release_matches() {
+  local cid payload
+  cid="$("${COMPOSE[@]}" ps -q crm 2>/dev/null || true)"
+  [ -n "$cid" ] || return 1
+  payload="$(
+    curl --fail --silent --show-error --connect-timeout 5 --max-time 30 \
+      "https://$CRM_DOMAIN/api/health" 2>/dev/null
+  )" || return 1
+  printf '%s' "$payload" | docker exec -i \
+    -e EXPECTED_VERSION="$EXPECTED_VERSION" -e EXPECTED_BUILD="$BUILD_COMMIT" \
+    "$cid" node -e '
+      let raw = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { raw += chunk; });
+      process.stdin.on("end", () => {
+        try {
+          const payload = JSON.parse(raw);
+          const release = payload && payload.release || {};
+          if (payload.status !== "ok" || release.version !== process.env.EXPECTED_VERSION ||
+              payload.commit !== process.env.EXPECTED_BUILD) process.exit(1);
+        } catch { process.exit(1); }
+      });
+    ' >/dev/null 2>&1
+}
 
-log "waiting for health (up to $((HEALTH_RETRIES * HEALTH_SLEEP))s)"
+log "verifying the exact release through public HTTPS"
+PUBLIC_HEALTHY=false
 for _ in $(seq 1 "$HEALTH_RETRIES"); do
-  if health_ok; then
-    log "healthy ✔  deployed $NEW"
-    exit 0
+  if public_release_matches; then
+    PUBLIC_HEALTHY=true
+    break
   fi
   sleep "$HEALTH_SLEEP"
 done
+[ "$PUBLIC_HEALTHY" = true ] \
+  || restore_source_and_runtime "Public HTTPS did not expose the exact new release."
 
-log "health check never passed"
-rollback
+POST_RESET=false
+log "healthy: release $EXPECTED_VERSION at build $BUILD_COMMIT"

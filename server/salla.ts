@@ -3,11 +3,14 @@ import { promises as fs } from "fs";
 import path from "path";
 import type { Request } from "express";
 import { normalizePhoneDigits } from "../shared/phone";
+import { mergedProductTarget, productIsMerged, productIsRetired } from "../shared/productCatalogState";
 import { adminDb } from "./firebaseAdmin";
 import {
+  getStoreProductCatalogIndex,
   getStoreOrderDocId,
   getStoreOrderForUser,
   importStoreOrderForUser,
+  invalidateStoreProductCatalogIndex,
   projectStoreOrderForUser,
   type StoreItemType,
   type StoreWebhookOrder,
@@ -1648,102 +1651,353 @@ function mapSallaProduct(remoteProduct: Record<string, any>, syncedAt: string) {
   };
 }
 
+const COMPLETE_REFERENCE_SCAN_LIMIT = 2_147_483_647;
+const PRODUCT_REFERENCE_UPDATE_CONCURRENCY = 25;
+type ProductReplacement = {
+  canonicalId: string;
+  product: Record<string, any>;
+};
+type ProductReferenceScanPhase = "relink" | "verify";
+type ProductDeduplicationLifecycleEvent = {
+  phase: "after_verify_before_merge";
+  uid: string;
+  duplicateIds: string[];
+};
+type DirectProductReferenceTarget = {
+  table: string;
+  fields: (replacement: ProductReplacement) => Record<string, unknown>;
+};
+
+const DIRECT_PRODUCT_REFERENCE_TARGETS: readonly DirectProductReferenceTarget[] = [
+  {
+    table: "installations",
+    fields: ({ canonicalId, product }) => ({
+      product_id: canonicalId,
+      product_name: product.name || "",
+      product_sku: product.sku || "",
+    }),
+  },
+  {
+    table: "bookings",
+    fields: ({ canonicalId, product }) => ({ product_id: canonicalId, product_name: product.name || "" }),
+  },
+  { table: "reminders", fields: ({ canonicalId }) => ({ product_id: canonicalId }) },
+  {
+    table: "technician_notifications",
+    fields: ({ canonicalId, product }) => ({ product_id: canonicalId, product_name: product.name || "" }),
+  },
+  {
+    table: "customer_assets",
+    fields: ({ canonicalId, product }) => ({
+      product_id: canonicalId,
+      product_name: product.name || "",
+      product_sku: product.sku || "",
+    }),
+  },
+  {
+    table: "service_cycles",
+    fields: ({ canonicalId, product }) => ({ product_id: canonicalId, product_name: product.name || "" }),
+  },
+  {
+    table: "replacement_links",
+    fields: ({ canonicalId, product }) => ({ product_id: canonicalId, product_name: product.name || "" }),
+  },
+];
+const NESTED_PRODUCT_REFERENCE_TARGETS = [
+  { table: "store_orders", listFields: ["product_ids"], itemFields: ["items"] },
+  { table: "quotes", listFields: [], itemFields: ["items"] },
+  { table: "invoices", listFields: [], itemFields: ["items"] },
+  { table: "marketing_campaigns", listFields: ["selected_product_ids"], itemFields: [] },
+] as const;
+
+type ProductReferenceDocument = {
+  id: string;
+  data: () => Record<string, any>;
+  ref: { update: (data: Record<string, unknown>) => Promise<unknown> };
+};
+type ProductReferenceQuery = {
+  limit: (count: number) => ProductReferenceQuery;
+  get: () => Promise<{ docs: ProductReferenceDocument[]; size: number }>;
+};
+
+let productReferenceScanObserver: ((scan: { table: string; phase: ProductReferenceScanPhase }) => void) | null = null;
+let productDeduplicationLifecycleObserver:
+  ((event: ProductDeduplicationLifecycleEvent) => void | Promise<void>) | null = null;
+
+function missingReferenceSurface(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /invalid column: (?:product_id|owner_uid)|no such table|relation .+ does not exist|column .+ does not exist/i.test(message);
+}
+
+async function productReferenceSnapshot(query: ProductReferenceQuery, complete = true) {
+  // Firestore and SQLite return the complete query when no limit is supplied.
+  // PostgREST commonly caps responses at 1,000, so its adapter needs a large
+  // explicit limit to activate the adapter's deterministic 1,000-row paging.
+  const provider = String(process.env.DATA_PROVIDER || process.env.DB_PROVIDER || "firebase").toLowerCase();
+  try {
+    return await (provider === "supabase" && complete
+      ? query.limit(COMPLETE_REFERENCE_SCAN_LIMIT).get()
+      : query.get());
+  } catch (error) {
+    // Some historical Firestore collections do not exist in SQLite, while the
+    // SQLite reminders table predates product_id. Absence means that provider
+    // cannot contain this reference shape; network/auth/query errors still fail
+    // closed and prevent deletion.
+    if (missingReferenceSurface(error)) return { docs: [], size: 0 };
+    throw error;
+  }
+}
+
+async function scanOwnedProductReferences(
+  uid: string,
+  table: string,
+  phase: ProductReferenceScanPhase,
+) {
+  productReferenceScanObserver?.({ table, phase });
+  const query = adminDb
+    .collection(table)
+    .where("createdBy", "==", uid) as unknown as ProductReferenceQuery;
+  return productReferenceSnapshot(query);
+}
+
+async function updateProductReferencesInChunks(
+  updates: Array<{ doc: ProductReferenceDocument; patch: Record<string, unknown> }>,
+) {
+  for (let offset = 0; offset < updates.length; offset += PRODUCT_REFERENCE_UPDATE_CONCURRENCY) {
+    const batch = updates.slice(offset, offset + PRODUCT_REFERENCE_UPDATE_CONCURRENCY);
+    await Promise.all(batch.map(({ doc, patch }) => doc.ref.update(patch)));
+  }
+}
+
 async function relinkDirectProductReferences(
   uid: string,
-  fromId: string,
-  toId: string,
-  product: Record<string, any>,
+  replacements: ReadonlyMap<string, ProductReplacement>,
 ) {
-  const targets = [
-    { table: "installations", fields: { product_id: toId, product_name: product.name || "", product_sku: product.sku || "" } },
-    { table: "bookings", fields: { product_id: toId, product_name: product.name || "" } },
-    { table: "reminders", fields: { product_id: toId } },
-    { table: "technician_notifications", fields: { product_id: toId, product_name: product.name || "" } },
-    { table: "customer_assets", fields: { product_id: toId, product_name: product.name || "", product_sku: product.sku || "" } },
-    { table: "service_cycles", fields: { product_id: toId, product_name: product.name || "" } },
-    { table: "replacement_links", fields: { product_id: toId, product_name: product.name || "" } },
-  ];
   let relinked = 0;
-  for (const target of targets) {
-    const snap = await adminDb
-      .collection(target.table)
-      .where("createdBy", "==", uid)
-      .where("product_id", "==", fromId)
-      .limit(1000)
-      .get();
+  for (const target of DIRECT_PRODUCT_REFERENCE_TARGETS) {
+    const snap = await scanOwnedProductReferences(uid, target.table, "relink");
+    const updatedAt = nowIso();
+    const updates: Array<{ doc: ProductReferenceDocument; patch: Record<string, unknown> }> = [];
     for (const doc of snap.docs) {
-      await doc.ref.update({ ...target.fields, updatedAt: nowIso() });
-      relinked += 1;
+      const replacement = replacements.get(String(doc.data()?.product_id || ""));
+      if (!replacement) continue;
+      updates.push({ doc, patch: { ...target.fields(replacement), updatedAt } });
     }
+    await updateProductReferencesInChunks(updates);
+    relinked += updates.length;
   }
   return relinked;
 }
 
-function replaceProductIdList(value: unknown, fromId: string, toId: string) {
+function replaceProductIdList(
+  value: unknown,
+  replacements: ReadonlyMap<string, ProductReplacement>,
+  matchedDuplicateIds: Set<string>,
+) {
   if (!Array.isArray(value)) return value;
-  return [...new Set(value.map((item) => String(item) === fromId ? toId : item))];
-}
-
-function replaceProductIdInItems(value: unknown, fromId: string, toId: string) {
-  if (!Array.isArray(value)) return value;
-  return value.map((item) => {
-    const row = asRecord(item);
-    return String(row.product_id || "") === fromId ? { ...row, product_id: toId } : item;
+  let changed = false;
+  const replaced = value.map((item) => {
+    const fromId = String(item);
+    const replacement = replacements.get(fromId);
+    if (!replacement) return item;
+    changed = true;
+    matchedDuplicateIds.add(fromId);
+    return replacement.canonicalId;
   });
+  return changed ? [...new Set(replaced)] : value;
 }
 
-async function relinkNestedProductReferences(uid: string, fromId: string, toId: string) {
-  const targets = [
-    { table: "store_orders", listFields: ["product_ids"], itemFields: ["items"] },
-    { table: "quotes", listFields: [], itemFields: ["items"] },
-    { table: "invoices", listFields: [], itemFields: ["items"] },
-    { table: "marketing_campaigns", listFields: ["selected_product_ids"], itemFields: [] },
-  ];
+function replaceProductIdInItems(
+  value: unknown,
+  replacements: ReadonlyMap<string, ProductReplacement>,
+  matchedDuplicateIds: Set<string>,
+) {
+  if (!Array.isArray(value)) return value;
+  let changed = false;
+  const replaced = value.map((item) => {
+    const row = asRecord(item);
+    const fromId = String(row.product_id || "");
+    const replacement = replacements.get(fromId);
+    if (!replacement) return item;
+    changed = true;
+    matchedDuplicateIds.add(fromId);
+    return { ...row, product_id: replacement.canonicalId };
+  });
+  return changed ? replaced : value;
+}
+
+async function relinkNestedProductReferences(
+  uid: string,
+  replacements: ReadonlyMap<string, ProductReplacement>,
+) {
   let relinked = 0;
-  for (const target of targets) {
-    const snap = await adminDb.collection(target.table).where("createdBy", "==", uid).limit(1000).get();
+  for (const target of NESTED_PRODUCT_REFERENCE_TARGETS) {
+    const snap = await scanOwnedProductReferences(uid, target.table, "relink");
+    const updates: Array<{ doc: ProductReferenceDocument; patch: Record<string, unknown> }> = [];
     for (const doc of snap.docs) {
       const data = doc.data() || {};
       const patch: Record<string, unknown> = {};
+      const matchedDuplicateIds = new Set<string>();
       for (const field of target.listFields) {
-        const next = replaceProductIdList(data[field], fromId, toId);
-        if (JSON.stringify(next) !== JSON.stringify(data[field])) patch[field] = next;
+        const next = replaceProductIdList(data[field], replacements, matchedDuplicateIds);
+        if (next !== data[field]) patch[field] = next;
       }
       for (const field of target.itemFields) {
-        const next = replaceProductIdInItems(data[field], fromId, toId);
-        if (JSON.stringify(next) !== JSON.stringify(data[field])) patch[field] = next;
+        const next = replaceProductIdInItems(data[field], replacements, matchedDuplicateIds);
+        if (next !== data[field]) patch[field] = next;
       }
       if (Object.keys(patch).length) {
-        await doc.ref.update({ ...patch, updatedAt: nowIso() });
-        relinked += 1;
+        updates.push({ doc, patch: { ...patch, updatedAt: nowIso() } });
+        // Preserve the previous result contract: a document that referenced
+        // two distinct duplicate ids counted as two relink operations even
+        // though the bulk path now writes that document only once.
+        relinked += matchedDuplicateIds.size;
       }
     }
+    await updateProductReferencesInChunks(updates);
   }
   return relinked;
 }
 
-export async function deduplicateProductsForUser(currentUid: string) {
-  const snap = await adminDb.collection("products").where("createdBy", "==", currentUid).limit(10_000).get();
-  const records: ProductCatalogRecord[] = snap.docs.map((doc) => ({ id: doc.id, data: doc.data() || {} }));
-  const groups = buildProductDuplicateGroups(records);
-  let deduplicated = 0;
-  let relinked = 0;
+function recordContainsProductReference(
+  data: Record<string, any>,
+  target: (typeof NESTED_PRODUCT_REFERENCE_TARGETS)[number],
+  duplicateIds: ReadonlySet<string>,
+) {
+  for (const field of target.listFields) {
+    if (Array.isArray(data[field]) && data[field].some((value: unknown) => duplicateIds.has(String(value)))) return true;
+  }
+  for (const field of target.itemFields) {
+    if (
+      Array.isArray(data[field]) &&
+      data[field].some((item: unknown) => duplicateIds.has(String(asRecord(item).product_id || "")))
+    ) return true;
+  }
+  return false;
+}
 
-  for (const group of groups) {
-    const canonical = chooseCanonicalProduct(group);
-    const merged = mergeProductCatalogRecords(group, canonical.id);
-    await adminDb.collection("products").doc(canonical.id).set({ ...merged, updatedAt: nowIso() }, { merge: true });
-
-    for (const duplicate of group) {
-      if (duplicate.id === canonical.id) continue;
-      relinked += await relinkDirectProductReferences(currentUid, duplicate.id, canonical.id, merged);
-      relinked += await relinkNestedProductReferences(currentUid, duplicate.id, canonical.id);
-      await adminDb.collection("products").doc(duplicate.id).delete();
-      deduplicated += 1;
+async function remainingProductReferences(uid: string, duplicateIds: ReadonlySet<string>) {
+  const remaining: string[] = [];
+  for (const target of DIRECT_PRODUCT_REFERENCE_TARGETS) {
+    const snap = await scanOwnedProductReferences(uid, target.table, "verify");
+    if (snap.docs.some((doc) => duplicateIds.has(String(doc.data()?.product_id || "")))) {
+      remaining.push(target.table);
     }
   }
 
-  return { success: true, deduplicated, relinked, remaining: records.length - deduplicated };
+  for (const target of NESTED_PRODUCT_REFERENCE_TARGETS) {
+    const snap = await scanOwnedProductReferences(uid, target.table, "verify");
+    if (snap.docs.some((doc) => recordContainsProductReference(doc.data() || {}, target, duplicateIds))) {
+      remaining.push(target.table);
+    }
+  }
+  return remaining;
+}
+
+function resolveActiveMergedTarget(
+  recordsById: ReadonlyMap<string, ProductCatalogRecord>,
+  tombstone: ProductCatalogRecord,
+) {
+  const visited = new Set([tombstone.id]);
+  let targetId = mergedProductTarget(tombstone.data);
+  while (targetId && !visited.has(targetId)) {
+    visited.add(targetId);
+    const target = recordsById.get(targetId);
+    if (!target) return null;
+    const nextTargetId = mergedProductTarget(target.data);
+    if (!nextTargetId) return target;
+    targetId = nextTargetId;
+  }
+  return null;
+}
+
+export async function deduplicateProductsForUser(currentUid: string) {
+  invalidateStoreProductCatalogIndex(currentUid);
+  try {
+    const snap = await adminDb.collection("products").where("createdBy", "==", currentUid).limit(10_000).get();
+    const records: ProductCatalogRecord[] = snap.docs.map((doc) => ({ id: doc.id, data: doc.data() || {} }));
+    // Merged tombstones intentionally stay addressable so a writer that
+    // started before this cleanup can never commit a dangling product_id.
+    // They do not participate in duplicate grouping or catalog matching, but
+    // every cleanup run still relinks references committed late by stale
+    // writers to the active merged_into target.
+    const recordsById = new Map(records.map((record) => [record.id, record]));
+    const activeRecords = records.filter((record) => !productIsRetired(record.data));
+    const groups = buildProductDuplicateGroups(activeRecords);
+    const replacements = new Map<string, ProductReplacement>();
+    const newlyMergedIds = new Set<string>();
+    const canonicalUpdates: Array<{ id: string; product: Record<string, any> }> = [];
+
+    for (const tombstone of records.filter((record) => productIsMerged(record.data))) {
+      const canonical = resolveActiveMergedTarget(recordsById, tombstone);
+      if (!canonical) continue;
+      replacements.set(tombstone.id, { canonicalId: canonical.id, product: canonical.data });
+    }
+
+    for (const group of groups) {
+      const canonical = chooseCanonicalProduct(group);
+      const merged = mergeProductCatalogRecords(group, canonical.id);
+      canonicalUpdates.push({ id: canonical.id, product: merged });
+      for (const duplicate of group) {
+        if (duplicate.id === canonical.id) continue;
+        replacements.set(duplicate.id, { canonicalId: canonical.id, product: merged });
+        newlyMergedIds.add(duplicate.id);
+      }
+    }
+
+    if (!replacements.size) {
+      return { success: true, deduplicated: 0, relinked: 0, remaining: activeRecords.length };
+    }
+
+    for (const canonical of canonicalUpdates) {
+      await adminDb.collection("products").doc(canonical.id).set(
+        { ...canonical.product, updatedAt: nowIso() },
+        { merge: true },
+      );
+    }
+
+    const relinked = await relinkDirectProductReferences(currentUid, replacements)
+      + await relinkNestedProductReferences(currentUid, replacements);
+    const duplicateIds = new Set(replacements.keys());
+    const remainingReferences = await remainingProductReferences(currentUid, duplicateIds);
+    if (remainingReferences.length) {
+      throw new Error(
+        `Product deduplication kept duplicate products: references still exist in ${remainingReferences.join(", ")}.`,
+      );
+    }
+
+    const duplicateProductIds = [...newlyMergedIds];
+    if (duplicateProductIds.length) {
+      await productDeduplicationLifecycleObserver?.({
+        phase: "after_verify_before_merge",
+        uid: currentUid,
+        duplicateIds: duplicateProductIds,
+      });
+    }
+
+    // Never hard-delete a product identity. A webhook, manual installation, or
+    // another server instance may have selected the duplicate before the final
+    // verification and commit its reference immediately afterwards. Keeping a
+    // hidden merged tombstone makes that late reference resolvable and records
+    // its canonical target without requiring a process-local global lock.
+    for (let offset = 0; offset < duplicateProductIds.length; offset += PRODUCT_REFERENCE_UPDATE_CONCURRENCY) {
+      await Promise.all(duplicateProductIds
+        .slice(offset, offset + PRODUCT_REFERENCE_UPDATE_CONCURRENCY)
+        .map((id) => adminDb.collection("products").doc(id).set({
+          catalog_visible: false,
+          is_available: false,
+          store_status: "merged",
+          merged_into: replacements.get(id)?.canonicalId || null,
+          merged_at: nowIso(),
+          updatedAt: nowIso(),
+        }, { merge: true })));
+    }
+
+    const deduplicated = duplicateProductIds.length;
+    return { success: true, deduplicated, relinked, remaining: activeRecords.length - deduplicated };
+  } finally {
+    invalidateStoreProductCatalogIndex(currentUid);
+  }
 }
 
 function catalogVisibilityIsFalse(value: unknown) {
@@ -1759,6 +2013,7 @@ async function reconcileSallaCatalogVisibility(
   let archived = 0;
   for (const doc of docs) {
     const data = doc.data() || {};
+    if (productIsRetired(data)) continue;
     const remoteId = firstText(data.store_product_id);
     const managedBySalla = remoteId
       || firstText(data.store_provider).toLowerCase() === "salla"
@@ -1820,6 +2075,13 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       name: truncate(firstText(item.name, product.name, item.title) || "Salla item", 80),
       sku: truncate(sku, 80),
       remoteItemId: truncate(firstText(item.id, item.order_item_id, item.item_id, item.uuid), 120) || null,
+      remoteProductId: truncate(firstText(
+        item.product_id,
+        item.productId,
+        product.id,
+        product.product_id,
+        product.uuid,
+      ), 120) || null,
       quantity,
       unitPrice: unitPrice ?? null,
       totalPrice: totalPrice ?? null,
@@ -1892,6 +2154,7 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       name: "Salla order",
       sku: `SALLA-${orderId}`,
       remoteItemId: null,
+      remoteProductId: null,
       quantity: 1,
       unitPrice: null,
       totalPrice: null,
@@ -2679,6 +2942,7 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
           updatedAt: archivedAt,
         });
       }
+      invalidateStoreProductCatalogIndex(uid);
       return { archived: products.size };
     });
     return {
@@ -2737,6 +3001,9 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
     fetched = completePages.fetched;
     advertisedTotal = completePages.advertisedTotal;
     advertisedPages = completePages.advertisedPages;
+    const productCatalogIndex = completePages.orders.length
+      ? await getStoreProductCatalogIndex(currentUid)
+      : undefined;
 
     for (const remoteOrder of completePages.orders) {
       const normalized = mapSallaOrder(remoteOrder);
@@ -2805,7 +3072,7 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
           remote_status_name: remoteStatusName,
           remote_status_slug: remoteStatusSlug,
           sync_origin: "salla_sync",
-        }, { suppressRealtime: true });
+        }, { suppressRealtime: true, productCatalogIndex });
         if (existing) updated += 1;
         else imported += 1;
         lastRemoteUpdate = newestRemoteTimestamp(lastRemoteUpdate, remoteVersionAt);
@@ -2904,6 +3171,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   const existingBySku = new Map<string, { id: string; data: Record<string, any> }>();
   for (const doc of existingProductsSnap.docs as Array<{ id: string; data: () => Record<string, any> }>) {
     const data = doc.data() || {};
+    if (productIsRetired(data)) continue;
     const remoteId = firstText(data.store_product_id);
     const sku = normalizeProductSku(data.sku);
     if (remoteId) existingByRemoteId.set(remoteId, { id: doc.id, data });
@@ -3018,6 +3286,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       currentProductDocIds,
       syncedAt,
     );
+    invalidateStoreProductCatalogIndex(currentUid);
 
     const errorMessage = failed
       ? `${failed} products could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
@@ -3047,6 +3316,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       archived,
     };
   } catch (syncError) {
+    invalidateStoreProductCatalogIndex(currentUid);
     const message = syncFailureMessage(syncError, "Salla products sync failed.");
     await writeIntegration(currentUid, {
       status: statusAfterSyncFailure(syncError),
@@ -3125,6 +3395,7 @@ export async function importSallaProductsSnapshotForUser(
     const existingBySku = new Map<string, { id: string; data: Record<string, any> }>();
     for (const doc of existingProductsSnap.docs as Array<{ id: string; data: () => Record<string, any> }>) {
       const data = doc.data() || {};
+      if (productIsRetired(data)) continue;
       const remoteId = firstText(data.store_product_id);
       const sku = normalizeProductSku(data.sku);
       if (remoteId) existingByRemoteId.set(remoteId, { id: doc.id, data });
@@ -3175,6 +3446,7 @@ export async function importSallaProductsSnapshotForUser(
       currentProductDocIds,
       syncedAt,
     );
+    invalidateStoreProductCatalogIndex(currentUid);
 
     const errorMessage = failed
       ? `${failed} products could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
@@ -3204,6 +3476,7 @@ export async function importSallaProductsSnapshotForUser(
       archived,
     };
   } catch (snapshotError) {
+    invalidateStoreProductCatalogIndex(currentUid);
     const message = syncFailureMessage(snapshotError, "Salla product snapshot import failed.");
     await writeIntegration(currentUid, {
       status: statusAfterSyncFailure(snapshotError),
@@ -3817,6 +4090,7 @@ export const __sallaTestables = {
   ensureFreshAccessToken,
   extractMerchantProfile,
   isTransientSallaError,
+  mapSallaOrder,
   normalizeStorefrontUrl,
   mapSallaCustomer,
   filterMetadataDiffers,
@@ -3829,6 +4103,16 @@ export const __sallaTestables = {
   requestSallaJson,
   sameRemoteStamp,
   sallaOrderMetadata,
+  setProductReferenceScanObserver(
+    observer: ((scan: { table: string; phase: ProductReferenceScanPhase }) => void) | null,
+  ) {
+    productReferenceScanObserver = observer;
+  },
+  setProductDeduplicationLifecycleObserver(
+    observer: ((event: ProductDeduplicationLifecycleEvent) => void | Promise<void>) | null,
+  ) {
+    productDeduplicationLifecycleObserver = observer;
+  },
   statusAfterSyncFailure,
   syncFailureResult,
   writeIntegration,
@@ -3836,5 +4120,7 @@ export const __sallaTestables = {
     refreshLocks.clear();
     customerSyncLocks.clear();
     localIntegrationWriteLock = Promise.resolve();
+    productReferenceScanObserver = null;
+    productDeduplicationLifecycleObserver = null;
   },
 };

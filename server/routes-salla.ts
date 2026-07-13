@@ -12,6 +12,7 @@ import {
 import { adminDb } from "./firebaseAdmin";
 import type { AuthedRequest } from "./auth";
 import { getStoreOrderPageForUser } from "./storeOrderQuery";
+import { catalogProductIsVisible } from "../shared/productCatalogState";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -130,10 +131,7 @@ export function registerSallaRoutes(app: Express) {
         .get();
 
       const boundedProductDocs = products.docs.slice(0, 10_000);
-      const productDocs = boundedProductDocs.filter((doc) => {
-        const value = (doc.data() as Record<string, unknown>).catalog_visible;
-        return value !== false && value !== 0 && String(value).toLowerCase() !== "false";
-      });
+      const productDocs = boundedProductDocs.filter((doc) => catalogProductIsVisible(doc.data()));
       const orderDocs = orders.docs.slice(0, 10_000);
       const capped = products.docs.length > boundedProductDocs.length || orders.docs.length > orderDocs.length;
 

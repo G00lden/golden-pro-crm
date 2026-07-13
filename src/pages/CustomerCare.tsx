@@ -1,6 +1,7 @@
 import { Send, RefreshCcw, ClipboardList } from "lucide-react";
 import { useState } from "react";
 import * as api from "../api";
+import { isOutboundSimulation } from "../outboundAction";
 import {
   Badge,
   Button,
@@ -44,8 +45,16 @@ export default function CustomerCarePage({
 
     setSendingId(item.id);
     try {
-      await api.remindInstallation(item.installation_id, "first");
-      notify("تم إرسال التذكير وإخراج العميل من قائمة الإهمال");
+      const result = await api.remindInstallation(item.installation_id, "first");
+      if (isOutboundSimulation(result)) {
+        notify("محاكاة فقط: لم تُرسل رسالة للعميل وبقي في قائمة الرعاية دون تغيير مرحلة التذكير.", false);
+        return;
+      }
+      if (!result.success) {
+        notify(result.error || result.reason || "لم يُرسل التذكير. راجع إعدادات واتساب.", false);
+        return;
+      }
+      notify("تم إرسال التذكير فعلياً وتحديث قائمة الرعاية");
       await Promise.all([queue.refresh(), refreshStats()]);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر إرسال التذكير", false);

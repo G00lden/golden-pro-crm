@@ -4,6 +4,7 @@ import test from "node:test";
 import { normalizeSallaStoreUrl } from "../sallaStoreUrl";
 
 const settingsSource = readFileSync(new URL("./Settings.tsx", import.meta.url), "utf8");
+const storeOrdersSource = readFileSync(new URL("./StoreOrders.tsx", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("../index.css", import.meta.url), "utf8");
 
 test("Salla store action is a semantic and safe external link", () => {
@@ -50,4 +51,39 @@ test("Salla settings expose customer sync progress and include customers in the 
   assert.match(settingsSource, /tone="warn">فرق في عدّ سلة/);
   assert.match(settingsSource, /اكتملت المزامنة وسيُعاد التحقق تلقائيًا/);
   assert.match(settingsSource, /مزامنة العملاء والمنتجات والطلبات/);
+});
+
+test("Easy Mode is presented as a non-interactive integration state", () => {
+  assert.match(settingsSource, /className="note salla-auth-mode-status"/);
+  assert.match(settingsSource, /<span translate="no">Easy Mode<\/span>/);
+  assert.match(settingsSource, /لا يوجد زر ربط مباشر في هذا الوضع/);
+  assert.doesNotMatch(settingsSource, /<Button[^>]*disabled[^>]*>[\s\S]{0,120}?الربط يتم من Webhook التطبيق/);
+});
+
+test("store order selection is controlled and scoped to the visible page", () => {
+  assert.match(storeOrdersSource, /useState<Set<string>>\(\(\) => new Set\(\)\)/);
+  assert.match(storeOrdersSource, /selectPageCheckboxRef\.current\.indeterminate = somePageOrdersSelected/);
+  assert.match(storeOrdersSource, /checked=\{allPageOrdersSelected\}/);
+  assert.match(storeOrdersSource, /onChange=\{\(event\) => togglePageSelection\(event\.target\.checked\)\}/);
+  assert.match(storeOrdersSource, /name="selected_store_order"[\s\S]*?checked=\{selectedOrderIds\.has\(order\.id\)\}/);
+  assert.match(storeOrdersSource, /new Set\(allOrders\.map\(\(order\) => order\.id\)\)/);
+  assert.match(storeOrdersSource, /setSelectedOrderIds\(new Set\(\)\);[\s\S]*?\}, \[orderQueryKey\]\)/);
+});
+
+test("bulk Salla status update requires confirmation and blocks duplicate requests", () => {
+  assert.match(storeOrdersSource, /name="confirm_bulk_salla_status"/);
+  assert.match(storeOrdersSource, /disabled=\{!nextStatus \|\| !acknowledged\}/);
+  assert.match(storeOrdersSource, /if \(submittingRef\.current\) return/);
+  assert.match(storeOrdersSource, /submittingRef\.current = true/);
+  assert.match(storeOrdersSource, /new Map\(orders\.map\(\(order\) => \[order\.id, order\]\)\)/);
+  assert.match(storeOrdersSource, /ordersToUpdate = uniqueOrders\.filter\(\(order\) => !storeOrderAlreadyHasStatus\(order, nextStatus\)\)/);
+  assert.match(storeOrdersSource, /for \(const order of ordersToUpdate\)/);
+  assert.match(storeOrdersSource, /if \(result\.changed === false\) unchangedIds\.push\(order\.id\)/);
+});
+
+test("successful and unchanged orders leave selection while failures remain retryable", () => {
+  assert.match(storeOrdersSource, /const completedIds = new Set\(\[\.\.\.succeededIds, \.\.\.unchangedIds\]\)/);
+  assert.match(storeOrdersSource, /for \(const id of completedIds\) next\.delete\(id\)/);
+  assert.match(storeOrdersSource, /فشلت وبقيت محددة لإعادة المحاولة/);
+  assert.doesNotMatch(storeOrdersSource, /new Set\(\[\.\.\.succeededIds, \.\.\.unchangedIds, \.\.\.failedIds\]\)/);
 });

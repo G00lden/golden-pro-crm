@@ -6,11 +6,19 @@
 # long-lived process with a stable disk.
 #
 #   cp .env.production.example .env.production   # then fill secrets
-#   docker compose up -d --build
-#   docker compose logs -f
+#   docker compose --env-file .env.production up -d --build
+#   docker compose --env-file .env.production logs -f
 services:
   crm:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        VITE_DATA_PROVIDER: ${VITE_DATA_PROVIDER:-sqlite}
+        VITE_DB_PROVIDER: ${VITE_DB_PROVIDER:-sqlite}
+        VITE_LOCAL_AUTH: ${VITE_LOCAL_AUTH:-false}
+        VITE_PUBLIC_CONTACT_PHONE: ${VITE_PUBLIC_CONTACT_PHONE:?Set VITE_PUBLIC_CONTACT_PHONE in .env.production}
     image: golden-pro-crm:latest
     container_name: golden-pro-crm
     restart: unless-stopped
@@ -18,6 +26,7 @@ services:
       - .env.production
     environment:
       NODE_ENV: production
+      BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
       PORT: "8080"
       DB_PATH: /app/.runtime/golden-crm.db
       WA_SESSION_DIR: /app/.wa-session

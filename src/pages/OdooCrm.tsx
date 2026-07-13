@@ -1,7 +1,7 @@
 import { Check, ClipboardList, Plus, RefreshCcw, Search, UserRoundSearch } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import * as api from "../api";
-import { Button, Empty, ErrorBlock, Field, Loading, PageHeader, TextInput } from "../shared";
+import { Button, Empty, ErrorBlock, Field, Loading, PageHeader, TextInput, type Page } from "../shared";
 
 const STAGES: Array<{ id: api.OdooCrmStage; label: string }> = [
   { id: "lead", label: "Lead" },
@@ -20,11 +20,22 @@ function fmt(value?: string | null) {
   return new Date(value.length === 10 ? `${value}T00:00:00` : value).toLocaleDateString("ar-SA");
 }
 
-export default function OdooCrmPage({ notify }: { notify: (message: string, ok?: boolean) => void }) {
+export default function OdooCrmPage({
+  notify,
+  go,
+  canManagePublicLeads,
+}: {
+  notify: (message: string, ok?: boolean) => void;
+  go: (page: Page) => void;
+  canManagePublicLeads: boolean;
+}) {
   const [dashboard, setDashboard] = useState<api.OdooDashboard | null>(null);
   const [pipeline, setPipeline] = useState<Array<{ stage: api.OdooCrmStage; count: number; amount: number; items: api.OdooDeal[] }>>([]);
   const [tasks, setTasks] = useState<api.OdooTask[]>([]);
   const [audit, setAudit] = useState<api.OdooAuditLog[]>([]);
+  const [publicLeads, setPublicLeads] = useState<api.PublicLeadInboxItem[]>([]);
+  const [publicLeadError, setPublicLeadError] = useState("");
+  const [publicLeadBusy, setPublicLeadBusy] = useState("");
   const [search, setSearch] = useState("");
   const [searchItems, setSearchItems] = useState<api.OdooSearchItem[]>([]);
   const [customer360, setCustomer360] = useState<api.Customer360 | null>(null);
@@ -36,23 +47,36 @@ export default function OdooCrmPage({ notify }: { notify: (message: string, ok?:
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
+    setPublicLeadError("");
     try {
-      const [dash, pipe, taskRes, auditRes] = await Promise.all([
+      const publicLeadRequest = canManagePublicLeads
+        ? api.getPublicLeadInbox().then(
+            (value) => ({ value, error: "" }),
+            (err: unknown) => ({
+              value: { data: [] as api.PublicLeadInboxItem[], total: 0 },
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          )
+        : Promise.resolve({ value: { data: [] as api.PublicLeadInboxItem[], total: 0 }, error: "" });
+      const [dash, pipe, taskRes, auditRes, leadRes] = await Promise.all([
         api.getOdooDashboard(),
         api.getOdooPipeline(),
         api.getOdooTasks("open"),
         api.getOdooAudit(),
+        publicLeadRequest,
       ]);
       setDashboard(dash);
       setPipeline(pipe.stages.filter((s) => STAGES.some((stage) => stage.id === s.stage)));
       setTasks(taskRes.data);
       setAudit(auditRes.data);
+      setPublicLeads(leadRes.value.data);
+      setPublicLeadError(leadRes.error);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [canManagePublicLeads]);
 
   useEffect(() => {
     refresh();
@@ -138,8 +162,52 @@ export default function OdooCrmPage({ notify }: { notify: (message: string, ok?:
     }
   };
 
-  const openCustomer = async (item: api.OdooSearchItem) => {
-    if (item.type !== "customer") return;
+  const updatePublicLeadStatus = async (
+    lead: api.PublicLeadInboxItem,
+    status: api.PublicLeadInboxItem["status"],
+  ) => {
+    setPublicLeadBusy(`${lead.id}:status`);
+    try {
+      const result = await api.updatePublicLeadInboxStatus(lead.id, status);
+      setPublicLeads((items) => items.map((item) => item.id === lead.id ? result.lead : item));
+      notify("تم تحديث حالة طلب الموقع");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "تعذر تحديث حالة الطلب", false);
+    } finally {
+      setPublicLeadBusy("");
+    }
+  };
+
+  const retryPublicLead = async (lead: api.PublicLeadInboxItem) => {
+    setPublicLeadBusy(`${lead.id}:retry`);
+    try {
+      const result = await api.retryPublicLeadProjection(lead.id);
+      if (result.lead.projection_status === "projected") {
+        notify("تم إنشاء فرصة CRM من طلب الموقع");
+      } else {
+        notify("بقي الطلب محفوظاً، لكن تعذر إنشاء فرصة CRM وسيظل متاحاً لإعادة المحاولة", false);
+      }
+      await refresh();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "تعذرت إعادة إسقاط الطلب إلى CRM", false);
+    } finally {
+      setPublicLeadBusy("");
+    }
+  };
+
+  const openSearchItem = async (item: api.OdooSearchItem) => {
+    if (item.type !== "customer") {
+      const destination: Record<Exclude<api.OdooSearchItem["type"], "customer">, Page> = {
+        store_order: "storeOrders",
+        quote: "quotes",
+        invoice: "invoices",
+        whatsapp: "messages",
+      };
+      setSearch("");
+      setSearchItems([]);
+      go(destination[item.type]);
+      return;
+    }
     try {
       setCustomer360(await api.getCustomer360(item.id));
     } catch (err) {
@@ -175,7 +243,7 @@ export default function OdooCrmPage({ notify }: { notify: (message: string, ok?:
       {!!searchItems.length && (
         <div className="list">
           {searchItems.map((item) => (
-            <button className="row-card" key={`${item.type}:${item.id}`} type="button" onClick={() => openCustomer(item)} style={{ textAlign: "right" }}>
+            <button className="row-card" key={`${item.type}:${item.id}`} type="button" onClick={() => openSearchItem(item)} style={{ textAlign: "right" }}>
               <div className="row-main">
                 <strong>{item.title || item.id}</strong>
                 <span>{item.type} · {item.subtitle || "-"} · {item.meta || "-"}</span>
@@ -183,6 +251,62 @@ export default function OdooCrmPage({ notify }: { notify: (message: string, ok?:
             </button>
           ))}
         </div>
+      )}
+
+      {canManagePublicLeads && (
+        <section className="panel-section" aria-labelledby="public-leads-title">
+          <div className="section-title">
+            <div>
+              <h2 id="public-leads-title">طلبات الموقع</h2>
+              <p className="muted">كل نموذج مقبول محفوظ هنا، وتظهر حالة تحويله إلى فرصة في مسار المبيعات.</p>
+            </div>
+          </div>
+          {publicLeadError && <div className="inline-error" role="alert">{publicLeadError}</div>}
+          <div className="list">
+            {publicLeads.map((lead) => (
+              <article className="row-card" key={lead.id}>
+                <div className="row-main">
+                  <strong>{lead.name} · {lead.service || "طلب عام"}</strong>
+                  <span>{lead.phone} · {fmt(lead.created_at)}</span>
+                  {lead.message && <span>{lead.message}</span>}
+                  <small>
+                    {lead.projection_status === "projected"
+                      ? "تمت إضافته إلى مسار المبيعات"
+                      : lead.projection_status === "failed"
+                        ? `فشل إنشاء الفرصة بعد ${lead.projection_attempts} محاولة`
+                        : "بانتظار إنشاء فرصة CRM"}
+                  </small>
+                </div>
+                <div className="toolbar" style={{ gap: 8, flexWrap: "wrap" }}>
+                  <label className="sr-only" htmlFor={`public-lead-status-${lead.id}`}>حالة طلب {lead.name}</label>
+                  <select
+                    id={`public-lead-status-${lead.id}`}
+                    className="input"
+                    value={lead.status}
+                    disabled={publicLeadBusy === `${lead.id}:status`}
+                    onChange={(event) => updatePublicLeadStatus(lead, event.target.value as api.PublicLeadInboxItem["status"])}
+                  >
+                    <option value="new">جديد</option>
+                    <option value="contacted">تم التواصل</option>
+                    <option value="qualified">مؤهل</option>
+                    <option value="closed">مغلق</option>
+                    <option value="spam">مزعج</option>
+                  </select>
+                  {lead.projection_status !== "projected" && (
+                    <Button
+                      tone="muted"
+                      loading={publicLeadBusy === `${lead.id}:retry`}
+                      onClick={() => retryPublicLead(lead)}
+                    >
+                      <RefreshCcw size={16} /> إعادة إنشاء الفرصة
+                    </Button>
+                  )}
+                </div>
+              </article>
+            ))}
+            {!publicLeads.length && !publicLeadError && <Empty title="لا توجد طلبات واردة من الموقع بعد" />}
+          </div>
+        </section>
       )}
 
       <section className="panel-section">

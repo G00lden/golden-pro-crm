@@ -21,6 +21,7 @@ process.env.SALLA_FETCH_RETRY_MAX_DELAY_MS = "0";
 const sallaModule = await import("./salla");
 const {
   __sallaTestables,
+  deduplicateProductsForUser,
   getSallaOrderStatusesForUser,
   handleSallaAppWebhook,
   importSallaProductsSnapshotForUser,
@@ -435,4 +436,380 @@ test("a complete product snapshot hides historical Salla rows without deleting r
   assert.notEqual(manual.data()?.catalog_visible, false);
   assert.equal(promoted.data()?.store_product_id, "current-remote");
   assert.ok([true, 1].includes(promoted.data()?.catalog_visible));
+});
+
+test("product deduplication relinks more than one thousand direct and nested references before logical merge", async () => {
+  const uid = "owner-products-large-relink";
+  const canonicalId = "product-canonical-large";
+  const duplicateId = "product-duplicate-large";
+  const referenceCount = 1_005;
+
+  await adminDb.collection("products").doc(canonicalId).set({
+    createdBy: uid,
+    name: "Canonical Salla product",
+    sku: "LARGE-RELINK-SKU",
+    source: "salla",
+    store_product_id: "remote-large-relink",
+    catalog_visible: true,
+  });
+  await adminDb.collection("products").doc(duplicateId).set({
+    createdBy: uid,
+    name: "Legacy duplicate",
+    sku: "large-relink-sku",
+    source: "salla",
+  });
+
+  for (let offset = 0; offset < referenceCount; offset += 100) {
+    const size = Math.min(100, referenceCount - offset);
+    await Promise.all(Array.from({ length: size }, async (_, localIndex) => {
+      const index = offset + localIndex;
+      await adminDb.collection("installations").doc(`installation-large-${index}`).set({
+        createdBy: uid,
+        customer_id: `customer-${index}`,
+        product_id: duplicateId,
+        product_name: "Legacy duplicate",
+        product_sku: "large-relink-sku",
+      });
+      await adminDb.collection("store_orders").doc(`store-large-${index}`).set({
+        createdBy: uid,
+        provider: "salla",
+        order_id: `order-large-${index}`,
+        product_ids: [duplicateId],
+        items: [{ name: "Legacy duplicate", sku: "large-relink-sku", product_id: duplicateId }],
+      });
+    }));
+  }
+
+  const result = await deduplicateProductsForUser(uid);
+  assert.equal(result.deduplicated, 1);
+  assert.equal(result.relinked, referenceCount * 2);
+  const tombstone = await adminDb.collection("products").doc(duplicateId).get();
+  assert.equal(tombstone.exists, true);
+  assert.equal(tombstone.data()?.merged_into, canonicalId);
+  assert.equal(tombstone.data()?.store_status, "merged");
+  assert.ok([false, 0].includes(tombstone.data()?.catalog_visible));
+
+  const remainingDirect = await adminDb
+    .collection("installations")
+    .where("createdBy", "==", uid)
+    .where("product_id", "==", duplicateId)
+    .get();
+  assert.equal(remainingDirect.size, 0);
+
+  const orders = await adminDb
+    .collection("store_orders")
+    .where("createdBy", "==", uid)
+    .limit(referenceCount + 1)
+    .get();
+  assert.equal(orders.size, referenceCount);
+  assert.ok(orders.docs.every((doc) => {
+    const data = doc.data() || {};
+    return data.product_ids?.[0] === canonicalId && data.items?.[0]?.product_id === canonicalId;
+  }));
+});
+
+test("product deduplication scans each reference collection once per phase regardless of duplicate count", async () => {
+  const uid = "owner-products-bulk-relink";
+  const otherUid = "owner-products-bulk-relink-other";
+  const canonicalA = "product-bulk-canonical-a";
+  const canonicalB = "product-bulk-canonical-b";
+  const duplicateA1 = "product-bulk-duplicate-a-1";
+  const duplicateA2 = "product-bulk-duplicate-a-2";
+  const duplicateB = "product-bulk-duplicate-b";
+
+  await Promise.all([
+    adminDb.collection("products").doc(canonicalA).set({
+      createdBy: uid,
+      name: "Canonical A",
+      sku: "BULK-A",
+      source: "salla",
+      store_product_id: "remote-bulk-a",
+    }),
+    adminDb.collection("products").doc(duplicateA1).set({
+      createdBy: uid,
+      name: "Duplicate A1",
+      sku: "bulk-a",
+      source: "manual",
+    }),
+    adminDb.collection("products").doc(duplicateA2).set({
+      createdBy: uid,
+      name: "Duplicate A2",
+      sku: " BULK-A ",
+      source: "manual",
+    }),
+    adminDb.collection("products").doc(canonicalB).set({
+      createdBy: uid,
+      name: "Canonical B",
+      sku: "BULK-B",
+      source: "salla",
+      store_product_id: "remote-bulk-b",
+    }),
+    adminDb.collection("products").doc(duplicateB).set({
+      createdBy: uid,
+      name: "Duplicate B",
+      sku: "bulk-b",
+      source: "manual",
+    }),
+  ]);
+
+  await Promise.all([
+    adminDb.collection("installations").doc("installation-bulk-a-1").set({
+      createdBy: uid,
+      customer_id: "customer-bulk-a-1",
+      product_id: duplicateA1,
+      product_name: "Duplicate A1",
+      product_sku: "bulk-a",
+    }),
+    adminDb.collection("installations").doc("installation-bulk-a-2").set({
+      createdBy: uid,
+      customer_id: "customer-bulk-a-2",
+      product_id: duplicateA2,
+      product_name: "Duplicate A2",
+      product_sku: "bulk-a",
+    }),
+    adminDb.collection("installations").doc("installation-bulk-b").set({
+      createdBy: uid,
+      customer_id: "customer-bulk-b",
+      product_id: duplicateB,
+      product_name: "Duplicate B",
+      product_sku: "bulk-b",
+    }),
+    adminDb.collection("installations").doc("installation-bulk-other-owner").set({
+      createdBy: otherUid,
+      customer_id: "customer-bulk-other",
+      product_id: duplicateA1,
+      product_name: "Must stay untouched",
+      product_sku: "bulk-a",
+    }),
+    adminDb.collection("store_orders").doc("store-order-bulk-mixed").set({
+      createdBy: uid,
+      provider: "salla",
+      order_id: "order-bulk-mixed",
+      product_ids: [duplicateA1, canonicalA, duplicateA2, duplicateB, "unrelated", duplicateB],
+      items: [
+        { product_id: duplicateA1, name: "A1", quantity: 1 },
+        { product_id: canonicalA, name: "A canonical", quantity: 2 },
+        { product_id: duplicateA2, name: "A2", quantity: 3 },
+        { product_id: duplicateB, name: "B", quantity: 4 },
+        { product_id: "unrelated", name: "Unrelated", quantity: 5 },
+      ],
+    }),
+  ]);
+
+  const scans: Array<{ table: string; phase: "relink" | "verify" }> = [];
+  __sallaTestables.setProductReferenceScanObserver((scan) => scans.push(scan));
+  let result;
+  try {
+    result = await deduplicateProductsForUser(uid);
+  } finally {
+    __sallaTestables.setProductReferenceScanObserver(null);
+  }
+
+  assert.equal(result.deduplicated, 3);
+  assert.equal(result.relinked, 6);
+  assert.equal(result.remaining, 2);
+
+  const referenceTables = [
+    "installations",
+    "bookings",
+    "reminders",
+    "technician_notifications",
+    "customer_assets",
+    "service_cycles",
+    "replacement_links",
+    "store_orders",
+    "quotes",
+    "invoices",
+    "marketing_campaigns",
+  ];
+  assert.equal(scans.length, referenceTables.length * 2);
+  for (const phase of ["relink", "verify"] as const) {
+    assert.deepEqual(
+      scans.filter((scan) => scan.phase === phase).map((scan) => scan.table),
+      referenceTables,
+    );
+  }
+
+  const mixedOrder = (await adminDb.collection("store_orders").doc("store-order-bulk-mixed").get()).data() || {};
+  assert.deepEqual(mixedOrder.product_ids, [canonicalA, canonicalB, "unrelated"]);
+  assert.equal(mixedOrder.items.length, 5);
+  assert.deepEqual(
+    mixedOrder.items.map((item: Record<string, unknown>) => item.product_id),
+    [canonicalA, canonicalA, canonicalA, canonicalB, "unrelated"],
+  );
+  assert.deepEqual(
+    mixedOrder.items.map((item: Record<string, unknown>) => item.quantity),
+    [1, 2, 3, 4, 5],
+  );
+
+  const currentOwnerInstallations = await adminDb
+    .collection("installations")
+    .where("createdBy", "==", uid)
+    .get();
+  assert.deepEqual(
+    currentOwnerInstallations.docs.map((doc) => doc.data().product_id).sort(),
+    [canonicalA, canonicalA, canonicalB].sort(),
+  );
+  const otherOwnerInstallation = await adminDb
+    .collection("installations")
+    .doc("installation-bulk-other-owner")
+    .get();
+  assert.equal(otherOwnerInstallation.data()?.product_id, duplicateA1);
+  assert.equal(otherOwnerInstallation.data()?.product_name, "Must stay untouched");
+
+  for (const duplicateId of [duplicateA1, duplicateA2, duplicateB]) {
+    const tombstone = await adminDb.collection("products").doc(duplicateId).get();
+    assert.equal(tombstone.exists, true);
+    assert.equal(tombstone.data()?.merged_into, duplicateId === duplicateB ? canonicalB : canonicalA);
+    assert.equal(tombstone.data()?.store_status, "merged");
+    assert.ok([false, 0].includes(tombstone.data()?.catalog_visible));
+  }
+});
+
+test("product deduplication does not mark a duplicate when the final verification finds a reference", async () => {
+  const uid = "owner-products-verification-barrier";
+  const canonicalId = "product-verification-canonical";
+  const duplicateId = "product-verification-duplicate";
+
+  await adminDb.collection("products").doc(canonicalId).set({
+    createdBy: uid,
+    name: "Verification canonical",
+    sku: "VERIFY-BARRIER",
+    source: "salla",
+    store_product_id: "remote-verify-barrier",
+  });
+  await adminDb.collection("products").doc(duplicateId).set({
+    createdBy: uid,
+    name: "Verification duplicate",
+    sku: "verify-barrier",
+    source: "manual",
+  });
+
+  let injected = false;
+  __sallaTestables.setProductReferenceScanObserver((scan) => {
+    if (injected || scan.phase !== "verify" || scan.table !== "store_orders") return;
+    injected = true;
+    void adminDb.collection("store_orders").doc("store-order-verification-late").set({
+      createdBy: uid,
+      provider: "salla",
+      order_id: "order-verification-late",
+      product_ids: [duplicateId],
+      items: [{ product_id: duplicateId, name: "Late reference" }],
+    });
+  });
+  try {
+    await assert.rejects(
+      deduplicateProductsForUser(uid),
+      /references still exist in store_orders/i,
+    );
+  } finally {
+    __sallaTestables.setProductReferenceScanObserver(null);
+  }
+
+  assert.equal(injected, true);
+  assert.equal((await adminDb.collection("products").doc(canonicalId).get()).exists, true);
+  const duplicate = await adminDb.collection("products").doc(duplicateId).get();
+  assert.equal(duplicate.exists, true);
+  assert.equal(duplicate.data()?.merged_into, null);
+});
+
+test("product deduplication never reactivates or merges a manually deleted identity", async () => {
+  const uid = "owner-products-manual-delete";
+  const activeId = "product-manual-delete-active";
+  const retiredId = "product-manual-delete-retired";
+
+  await adminDb.collection("products").doc(activeId).set({
+    createdBy: uid,
+    name: "Active product",
+    sku: "MANUAL-DELETE-SKU",
+    source: "manual",
+    catalog_visible: true,
+  });
+  await adminDb.collection("products").doc(retiredId).set({
+    createdBy: uid,
+    name: "Retired product",
+    sku: "manual-delete-sku",
+    source: "manual",
+    catalog_visible: false,
+    is_available: false,
+    store_status: "manual_deleted",
+  });
+
+  const result = await deduplicateProductsForUser(uid);
+  assert.equal(result.deduplicated, 0);
+  assert.equal(result.relinked, 0);
+  assert.equal(result.remaining, 1);
+
+  const retired = await adminDb.collection("products").doc(retiredId).get();
+  assert.equal(retired.exists, true);
+  assert.equal(retired.data()?.store_status, "manual_deleted");
+  assert.equal(retired.data()?.merged_into, null);
+});
+
+test("a writer committing after successful verification keeps a resolvable merged product reference", async () => {
+  const uid = "owner-products-post-verify-writer";
+  const canonicalId = "product-post-verify-canonical";
+  const duplicateId = "product-post-verify-duplicate";
+  const lateOrderId = "store-order-post-verify-late";
+
+  await adminDb.collection("products").doc(canonicalId).set({
+    createdBy: uid,
+    name: "Post-verify canonical",
+    sku: "POST-VERIFY",
+    source: "salla",
+    store_product_id: "remote-post-verify",
+    catalog_visible: true,
+  });
+  await adminDb.collection("products").doc(duplicateId).set({
+    createdBy: uid,
+    name: "Post-verify duplicate",
+    sku: "post-verify",
+    source: "manual",
+    catalog_visible: true,
+  });
+
+  let committedAfterVerify = false;
+  __sallaTestables.setProductDeduplicationLifecycleObserver(async (event) => {
+    if (event.phase !== "after_verify_before_merge") return;
+    assert.equal(event.uid, uid);
+    assert.deepEqual(event.duplicateIds, [duplicateId]);
+    await adminDb.collection("store_orders").doc(lateOrderId).set({
+      createdBy: uid,
+      provider: "salla",
+      order_id: "order-post-verify-late",
+      product_ids: [duplicateId],
+      items: [{ product_id: duplicateId, name: "Stale writer line" }],
+    });
+    committedAfterVerify = true;
+  });
+
+  let result;
+  try {
+    result = await deduplicateProductsForUser(uid);
+  } finally {
+    __sallaTestables.setProductDeduplicationLifecycleObserver(null);
+  }
+
+  assert.equal(committedAfterVerify, true);
+  assert.equal(result.deduplicated, 1);
+  const lateOrder = (await adminDb.collection("store_orders").doc(lateOrderId).get()).data() || {};
+  assert.equal(lateOrder.product_ids[0], duplicateId);
+  assert.equal(lateOrder.items[0].product_id, duplicateId);
+
+  // The stale writer's id still resolves and carries an explicit canonical
+  // target, so no manual/API/webhook writer can create a dangling reference in
+  // the post-verification window (including across different server replicas).
+  const tombstone = await adminDb.collection("products").doc(duplicateId).get();
+  assert.equal(tombstone.exists, true);
+  assert.equal(tombstone.data()?.merged_into, canonicalId);
+  assert.equal(tombstone.data()?.store_status, "merged");
+  assert.ok([false, 0].includes(tombstone.data()?.catalog_visible));
+
+  const reconciled = await deduplicateProductsForUser(uid);
+  assert.equal(reconciled.deduplicated, 0);
+  assert.equal(reconciled.relinked, 1);
+  const reconciledOrder = (await adminDb.collection("store_orders").doc(lateOrderId).get()).data() || {};
+  assert.equal(reconciledOrder.product_ids[0], canonicalId);
+  assert.equal(reconciledOrder.items[0].product_id, canonicalId);
+  assert.equal((await adminDb.collection("products").doc(duplicateId).get()).data()?.merged_into, canonicalId);
 });

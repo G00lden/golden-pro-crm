@@ -1,6 +1,7 @@
-import { Plus, Check, Send, Edit3, Trash2, Save } from "lucide-react";
-import { useState, useEffect, useMemo, type FormEvent } from "react";
+import { Plus, Check, Send, Edit3, Trash2, Save, RefreshCcw } from "lucide-react";
+import { useState, useEffect, useMemo, useRef, type FormEvent } from "react";
 import * as api from "../api";
+import { createPerItemActionLock } from "../outboundAction";
 import {
   Button,
   Empty,
@@ -13,7 +14,6 @@ import {
   TextInput,
   Badge,
   statusLabel,
-  phoneLabel,
   today,
   useData,
   type ModalState,
@@ -30,22 +30,35 @@ export default function BookingsPage({
 }) {
   const [date, setDate] = useState(today());
   const bookings = useData(() => api.getBookings({ date }), [date]);
+  const technicianNoticeLock = useRef(createPerItemActionLock()).current;
+  const [sendingTechnicianIds, setSendingTechnicianIds] = useState<Set<string>>(() => new Set());
 
-  const shouldNotifyTechnician = (previous: api.Booking | undefined, next: Omit<api.Booking, "id">) =>
-    next.status === "confirmed" &&
-    (!previous ||
-      previous.status !== "confirmed" ||
-      previous.date !== next.date ||
-      previous.scheduled_time !== next.scheduled_time ||
-      previous.technician_id !== next.technician_id ||
-      previous.installation_id !== next.installation_id);
+  const setTechnicianSending = (bookingId: string, sending: boolean) => {
+    setSendingTechnicianIds((current) => {
+      const next = new Set(current);
+      if (sending) next.add(bookingId);
+      else next.delete(bookingId);
+      return next;
+    });
+  };
 
   const sendTechnicianNotice = async (booking: api.Booking, trigger = "manual") => {
+    if (!technicianNoticeLock.acquire(booking.id)) return;
+    setTechnicianSending(booking.id, true);
     try {
-      await api.notifyTechnicianBooking(booking.id, trigger);
-      notify("تم إرسال الموعد للفني");
+      const result = await api.notifyTechnicianBooking(booking.id, trigger);
+      if (result.simulated) {
+        notify("محاكاة فقط: تم تجهيز إشعار الفني، ولم تُرسل أي رسالة فعلية.", false);
+      } else if (result.dry_run || !result.success) {
+        notify("لم يُرسل إشعار الفني. تحقق من إعدادات واتساب ثم حاول مرة أخرى.", false);
+      } else {
+        notify("تم إرسال الموعد للفني فعلياً");
+      }
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر إرسال الموعد للفني", false);
+    } finally {
+      technicianNoticeLock.release(booking.id);
+      setTechnicianSending(booking.id, false);
     }
   };
 
@@ -69,10 +82,8 @@ export default function BookingsPage({
           selectedDate={date}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
-            let bookingId: string;
             try {
               if (booking) {
-                bookingId = booking.id;
                 // Setting the status to "completed" from the edit form must run
                 // the completion lifecycle (advance the linked installation's
                 // next_maintenance, reset its reminders) — a plain updateBooking
@@ -87,7 +98,7 @@ export default function BookingsPage({
                   await api.updateBooking(booking.id, payload);
                 }
               } else {
-                bookingId = await api.createBooking(payload);
+                const bookingId = await api.createBooking(payload);
                 // Creating a booking already marked completed runs the lifecycle too.
                 if (payload.status === "completed") {
                   await api.completeBooking(bookingId);
@@ -97,17 +108,11 @@ export default function BookingsPage({
               notify(error instanceof Error ? error.message : "تعذر حفظ الحجز", false);
               return;
             }
-            const shouldNotify = shouldNotifyTechnician(booking, payload);
-            if (shouldNotify) {
-              try {
-                await api.notifyTechnicianBooking(bookingId, booking ? "updated" : "created");
-                notify("تم حفظ الحجز وإرسال الموعد للفني");
-              } catch (error) {
-                notify(error instanceof Error ? `تم حفظ الحجز لكن لم يرسل الموعد للفني: ${error.message}` : "تم حفظ الحجز لكن لم يرسل الموعد للفني", false);
-              }
-            } else {
-              notify("تم حفظ الحجز");
-            }
+            notify(
+              payload.status === "confirmed"
+                ? "تم حفظ الحجز دون إرسال. استخدم زر إرسال الموعد للفني عند الرغبة."
+                : "تم حفظ الحجز",
+            );
             setModal(null);
             await Promise.all([bookings.refresh(), refreshStats()]);
           }}
@@ -145,7 +150,14 @@ export default function BookingsPage({
               <div className="row-main">
                 <strong>{booking.customer_name}</strong>
                 <span>{booking.product_name} · {booking.tech_name} · {booking.scheduled_time}</span>
-                <div className="chips"><Badge>{statusLabel(booking.status)}</Badge></div>
+                <div className="chips">
+                  <Badge>{statusLabel(booking.status)}</Badge>
+                  {sendingTechnicianIds.has(booking.id) && (
+                    <span role="status" aria-live="polite">
+                      <Badge tone="warn">جاري التحقق من الإرسال…</Badge>
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="row-actions">
                 {booking.status === "confirmed" && (
@@ -153,8 +165,15 @@ export default function BookingsPage({
                     <IconButton title="إكمال الحجز" tone="success" onClick={() => complete(booking)}>
                       <Check size={15} />
                     </IconButton>
-                    <IconButton title="إرسال الموعد للفني" tone="success" onClick={() => sendTechnicianNotice(booking)}>
-                      <Send size={15} />
+                    <IconButton
+                      title={sendingTechnicianIds.has(booking.id) ? "جاري التحقق من الإرسال" : "إرسال الموعد للفني"}
+                      tone="success"
+                      disabled={sendingTechnicianIds.has(booking.id)}
+                      onClick={() => sendTechnicianNotice(booking)}
+                    >
+                      {sendingTechnicianIds.has(booking.id)
+                        ? <RefreshCcw size={15} className="spin" aria-hidden="true" />
+                        : <Send size={15} aria-hidden="true" />}
                     </IconButton>
                   </>
                 )}

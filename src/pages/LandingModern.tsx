@@ -1,10 +1,12 @@
-import {useEffect, useMemo, useState, type FormEvent} from "react";
+import {useEffect, useState, type FormEvent} from "react";
 import {
   Droplets, Snowflake, Wrench, Shield,
   Phone, MessageCircle, Send, CheckCircle2,
   Star, Award, HeadphonesIcon,
 } from "lucide-react";
 import {captureUtm, trackEvent} from "../track";
+import {PublicContactLink} from "../components/PublicContactLink";
+import {submitPublicLead} from "../publicLead";
 
 /* ────────────────────────────────
  * BreeXe Pro — Landing Page v2
@@ -12,8 +14,6 @@ import {captureUtm, trackEvent} from "../track";
  * Dark mode: مريح للعين، درجات زرقاء داكنة مع لمسات ذهبية
  * ──────────────────────────────── */
 
-const WA_NUMBER = "966500000000"; // ← استبدله برقم واتساب الأعمال الحقيقي
-const CALL_HREF = `tel:+966500000000`;
 const WA_TEXT = "السلام عليكم، أبغى أستفسر عن خدمات BreeXe Pro";
 
 const services = [
@@ -50,14 +50,9 @@ const reviews = [
   },
 ];
 
-/* ─── Helpers ─── */
-function waUrl(text = WA_TEXT): string {
-  return `https://wa.me/${WA_NUMBER}?text=${encodeURIComponent(text)}`;
-}
-
 /* ─── Component ─── */
 export function LandingModern() {
-  const [form, setForm] = useState({name: "", phone: "", service: "", message: ""});
+  const [form, setForm] = useState({name: "", phone: "", service: "", message: "", website: ""});
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -70,9 +65,6 @@ export function LandingModern() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const waHref = useMemo(() => waUrl(), []);
-  const callHref = CALL_HREF;
-
   const onWa = (src: string) => trackEvent({name: "wa_click", meta: {source: src}});
   const onCall = (src: string) => trackEvent({name: "call_click", meta: {source: src}});
 
@@ -82,21 +74,16 @@ export function LandingModern() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const r = await fetch("/api/leads/public", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(form),
+      await submitPublicLead({
+        ...form,
+        source: "landing-v2",
+        utm: captureUtm(),
       });
-      if (r.ok || r.status === 404) {
-        setSubmitted(true);
-        trackEvent({name: "lead_submit", meta: {service: form.service || "unspecified"}});
-        setForm({name: "", phone: "", service: "", message: ""});
-      } else {
-        const text = await r.text();
-        throw new Error(text || `HTTP ${r.status}`);
-      }
-    } catch {
-      setSubmitError("عذراً، تعذر إرسال طلبك الآن. تواصل عبر واتساب أو الاتصال المباشر.");
+      setSubmitted(true);
+      trackEvent({name: "lead_submit", meta: {service: form.service || "unspecified"}});
+      setForm({name: "", phone: "", service: "", message: "", website: ""});
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "عذراً، تعذر إرسال طلبك الآن. حاول مرة أخرى.");
     } finally {
       setSubmitting(false);
     }
@@ -117,12 +104,11 @@ export function LandingModern() {
             <a href="#reviews">آراء العملاء</a>
             <a href="#contact">تواصل</a>
           </nav>
-          <a className="lm-btn lm-btn-sm lm-btn-gold"
-             href={waHref} target="_blank" rel="noopener noreferrer"
-             onClick={() => onWa("header")}>
+          <PublicContactLink channel="whatsapp" whatsappText={WA_TEXT}
+             className="lm-btn lm-btn-sm lm-btn-gold" onClick={() => onWa("header")}>
             <MessageCircle size={16} aria-hidden="true" />
             <span>واتساب</span>
-          </a>
+          </PublicContactLink>
         </div>
       </header>
 
@@ -141,17 +127,16 @@ export function LandingModern() {
             من اختيار المنتج المناسب إلى التركيب والصيانة الدورية، بفريق فني معتمد.
           </p>
           <div className="lm-hero-actions">
-            <a className="lm-btn lm-btn-primary lm-btn-lg"
-               href={waHref} target="_blank" rel="noopener noreferrer"
-               onClick={() => onWa("hero")}>
+            <PublicContactLink channel="whatsapp" whatsappText={WA_TEXT}
+               className="lm-btn lm-btn-primary lm-btn-lg" onClick={() => onWa("hero")}>
               <MessageCircle size={20} aria-hidden="true" />
               <span>تواصل عبر واتساب</span>
-            </a>
-            <a className="lm-btn lm-btn-outline lm-btn-lg"
-               href={callHref} onClick={() => onCall("hero")}>
+            </PublicContactLink>
+            <PublicContactLink channel="call" className="lm-btn lm-btn-outline lm-btn-lg"
+               onClick={() => onCall("hero")}>
               <Phone size={20} aria-hidden="true" />
               <span>اتصل بنا الآن</span>
-            </a>
+            </PublicContactLink>
           </div>
           <div className="lm-hero-trust">
             <span><CheckCircle2 size={14} /> ضمان على التركيب</span>
@@ -183,11 +168,10 @@ export function LandingModern() {
               <div className="lm-card-icon"><s.icon size={28} aria-hidden="true" /></div>
               <h3>{s.title}</h3>
               <p>{s.desc}</p>
-              <a className="lm-card-cta"
-                 href={waHref} target="_blank" rel="noopener noreferrer"
-                 onClick={() => onWa(`service:${s.title}`)}>
+              <PublicContactLink channel="whatsapp" whatsappText={WA_TEXT}
+                 className="lm-card-cta" onClick={() => onWa(`service:${s.title}`)}>
                 استفسر الآن ←
-              </a>
+              </PublicContactLink>
             </article>
           ))}
         </div>
@@ -249,15 +233,28 @@ export function LandingModern() {
             <CheckCircle2 size={40} className="lm-success-icon" />
             <h3>شكراً لتواصلك معنا</h3>
             <p>سنرد عليك في أقرب وقت. لو حاب تستعجل، تواصل عبر واتساب مباشرة.</p>
-            <a className="lm-btn lm-btn-primary"
-               href={waHref} target="_blank" rel="noopener noreferrer"
-               onClick={() => onWa("post-submit")}>
+            <PublicContactLink channel="whatsapp" whatsappText={WA_TEXT}
+               className="lm-btn lm-btn-primary" onClick={() => onWa("post-submit")}>
               <MessageCircle size={18} aria-hidden="true" />
               <span>تابع عبر واتساب</span>
-            </a>
+            </PublicContactLink>
           </div>
         ) : (
           <form className="lm-form" onSubmit={onSubmit}>
+            <label
+              style={{position: "absolute", insetInlineStart: "-10000px", width: 1, height: 1, overflow: "hidden"}}
+            >
+              <span>Website</span>
+              <input
+                type="text"
+                name="website"
+                tabIndex={-1}
+                autoComplete="off"
+                aria-label="اترك هذا الحقل فارغاً"
+                value={form.website}
+                onChange={(e) => setForm({...form, website: e.target.value})}
+              />
+            </label>
             <label>
               <span>الاسم</span>
               <input type="text" required value={form.name}
@@ -307,9 +304,9 @@ export function LandingModern() {
           </div>
           <div className="lm-footer-col">
             <h4>تواصل</h4>
-            <a href={waHref} target="_blank" rel="noopener noreferrer"
-               onClick={() => onWa("footer")}>واتساب</a>
-            <a href={callHref} onClick={() => onCall("footer")}>اتصال مباشر</a>
+            <PublicContactLink channel="whatsapp" whatsappText={WA_TEXT}
+               onClick={() => onWa("footer")}>واتساب</PublicContactLink>
+            <PublicContactLink channel="call" onClick={() => onCall("footer")}>اتصال مباشر</PublicContactLink>
           </div>
           <div className="lm-footer-col">
             <h4>روابط</h4>

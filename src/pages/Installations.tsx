@@ -1,6 +1,7 @@
-import { Plus, Play, Save, Send, Check, Edit3, Trash2 } from "lucide-react";
-import { useState, useEffect, useMemo, type FormEvent } from "react";
+import { Plus, Play, Save } from "lucide-react";
+import { useState, useEffect, useMemo, useRef, type FormEvent } from "react";
 import * as api from "../api";
+import { createPerItemActionLock } from "../outboundAction";
 import {
   Button,
   Empty,
@@ -30,6 +31,19 @@ export default function InstallationsPage({
   setModal: (modal: ModalState) => void;
 }) {
   const installations = useData(api.getInstallations);
+  const reminderLock = useRef(createPerItemActionLock()).current;
+  const runDueLock = useRef(false);
+  const [remindingIds, setRemindingIds] = useState<Set<string>>(() => new Set());
+  const [runningDue, setRunningDue] = useState(false);
+
+  const setReminderPending = (installationId: string, pending: boolean) => {
+    setRemindingIds((current) => {
+      const next = new Set(current);
+      if (pending) next.add(installationId);
+      else next.delete(installationId);
+      return next;
+    });
+  };
 
   const openForm = (installation?: api.Installation) => {
     setModal({
@@ -66,20 +80,36 @@ export default function InstallationsPage({
   };
 
   const remind = async (installation: api.Installation) => {
+    if (!reminderLock.acquire(installation.id)) return;
+    setReminderPending(installation.id, true);
     try {
-      await api.remindInstallation(installation.id, installation.next_remind_type || "first");
-      notify("تم إرسال التذكير");
-      await Promise.all([installations.refresh(), refreshStats()]);
+      const result = await api.remindInstallation(installation.id, installation.next_remind_type || "first");
+      if (result.simulated) {
+        notify("محاكاة فقط: تم تجهيز التذكير، ولم تُرسل أي رسالة للعميل ولم تتغير مرحلة الإرسال.", false);
+      } else if (result.dry_run || !result.success) {
+        notify("لم يُرسل التذكير. تحقق من إعدادات واتساب ثم حاول مرة أخرى.", false);
+      } else {
+        notify("تم إرسال التذكير فعلياً");
+        await Promise.all([installations.refresh(), refreshStats()]);
+      }
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر إرسال التذكير", false);
+    } finally {
+      reminderLock.release(installation.id);
+      setReminderPending(installation.id, false);
     }
   };
 
   const runDue = async () => {
+    if (runDueLock.current) return;
+    runDueLock.current = true;
+    setRunningDue(true);
     try {
       const result = await api.runDueReminders();
       if (result.blocked) {
         notify(result.error || "التذكيرات متوقفة. راجع تشخيص واتساب والجدولة.", false);
+      } else if (result.simulated) {
+        notify(`محاكاة فقط: تم فحص ${result.checked} تذكير مستحق، ولم تُرسل أي رسالة فعلية أو تتغير مرحلة الإرسال.`, false);
       } else if (result.sent > 0) {
         notify(`تم إرسال ${result.sent} من ${result.checked} تذكير مستحق`);
       } else if (result.failed > 0) {
@@ -92,6 +122,9 @@ export default function InstallationsPage({
       await Promise.all([installations.refresh(), refreshStats()]);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر تشغيل التذكيرات", false);
+    } finally {
+      runDueLock.current = false;
+      setRunningDue(false);
     }
   };
 
@@ -112,23 +145,39 @@ export default function InstallationsPage({
         title="الصيانة"
         actions={
           <>
-            <Button tone="muted" onClick={runDue}><Play size={16} /> تشغيل المستحق</Button>
+            <Button tone="muted" loading={runningDue} disabled={runningDue} onClick={runDue}>
+              <Play size={16} aria-hidden="true" /> تشغيل المستحق
+            </Button>
             <Button onClick={() => openForm()}><Plus size={16} /> إضافة صيانة</Button>
           </>
         }
       />
       {installations.loading ? <Loading /> : installations.error ? <ErrorBlock message={installations.error} retry={installations.refresh} /> : (
         <div className="list">
-          {(installations.data || []).map((installation) => (
-            <InstallationCard
-              key={installation.id}
-              installation={installation}
-              onRemind={() => remind(installation)}
-              onComplete={() => complete(installation)}
-              onEdit={() => openForm(installation)}
-              onDelete={() => remove(installation)}
-            />
-          ))}
+          {(installations.data || []).map((installation) => {
+            const reminderPending = remindingIds.has(installation.id);
+            return (
+              <fieldset
+                key={installation.id}
+                disabled={reminderPending}
+                aria-busy={reminderPending}
+                style={{ border: 0, padding: 0, margin: 0, minInlineSize: 0 }}
+              >
+                <InstallationCard
+                  installation={installation}
+                  onRemind={() => remind(installation)}
+                  onComplete={() => complete(installation)}
+                  onEdit={() => openForm(installation)}
+                  onDelete={() => remove(installation)}
+                />
+                {reminderPending && (
+                  <p className="note" role="status" aria-live="polite">
+                    جاري التحقق من وضع الإرسال لهذا التذكير…
+                  </p>
+                )}
+              </fieldset>
+            );
+          })}
           {!installations.data?.length && <Empty title="لا توجد عمليات صيانة بعد" action={<Button onClick={() => openForm()}><Plus size={16} /> إضافة أول صيانة</Button>} />}
         </div>
       )}

@@ -4,6 +4,7 @@ import path from "path";
 import type { Request } from "express";
 import { adminDb } from "./firebaseAdmin";
 import { addCalendarMonths } from "../shared/date";
+import { catalogProductIsVisible, productIsRetired } from "../shared/productCatalogState";
 import { publishStoreOrderChange } from "./storeOrderRealtime";
 import { compareAndSetDocument } from "./atomicDocumentUpdate";
 import { firstSallaDate } from "./sallaDate";
@@ -45,6 +46,7 @@ export type StoreWebhookItem = {
   name: string;
   sku: string;
   remoteItemId?: string | null;
+  remoteProductId?: string | null;
   quantity: number;
   maintenanceMonths: number;
   orderType: StoreItemType;
@@ -76,6 +78,7 @@ type ImportedOrderItem = {
   name: string;
   sku: string;
   remote_item_id?: string | null;
+  remote_product_id?: string | null;
   quantity: number;
   unit_price?: number | null;
   total_price?: number | null;
@@ -513,6 +516,13 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
       name: truncate(name, 80),
       sku: truncate(sku, 80),
       remoteItemId: truncate(firstText(item.id, item.order_item_id, item.item_id, item.uuid), 120) || null,
+      remoteProductId: truncate(firstText(
+        item.product_id,
+        item.productId,
+        product.id,
+        product.product_id,
+        product.uuid,
+      ), 120) || null,
       quantity,
       unitPrice: unitPrice ?? null,
       totalPrice: totalPrice ?? null,
@@ -530,6 +540,7 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
     name: "طلب متجر",
     sku: fallbackSku,
     remoteItemId: null,
+    remoteProductId: null,
     quantity: 1,
     unitPrice: null,
     totalPrice: null,
@@ -746,52 +757,182 @@ function productVariants(value: unknown): Array<Record<string, any>> {
   }
 }
 
-function visibleCatalogProduct(data: Record<string, any>) {
-  const value = data.catalog_visible;
-  return value !== false && value !== 0 && String(value).toLowerCase() !== "false";
+type IndexedProductDocument = {
+  id: string;
+  data: () => Record<string, any>;
+  ref: {
+    set: (data: Record<string, unknown>, options?: { merge?: boolean }) => Promise<unknown>;
+  };
+};
+
+export type StoreProductCatalogIndex = {
+  uid: string;
+  byRemoteId: Map<string, IndexedProductDocument[]>;
+  visibleExactBySku: Map<string, IndexedProductDocument[]>;
+  visibleVariantBySku: Map<string, IndexedProductDocument[]>;
+  fallbackExactBySku: Map<string, IndexedProductDocument[]>;
+};
+
+const PRODUCT_CATALOG_INDEX_LIMIT = 10_000;
+const PRODUCT_CATALOG_INDEX_TTL_MS = 60_000;
+const productCatalogIndexCache = new Map<
+  string,
+  { expiresAt: number; promise: Promise<StoreProductCatalogIndex> }
+>();
+let productCatalogIndexLoadCount = 0;
+
+function pushCatalogBucket(
+  buckets: Map<string, IndexedProductDocument[]>,
+  key: string,
+  doc: IndexedProductDocument,
+) {
+  if (!key) return;
+  const current = buckets.get(key) || [];
+  if (!current.some((item) => item.id === doc.id)) buckets.set(key, [...current, doc]);
 }
 
-async function findProductMatch(uid: string, sku: string) {
-  const exact = await adminDb
-    .collection("products")
-    .where("createdBy", "==", uid)
-    .where("sku", "==", sku)
-    .limit(20)
-    .get();
-  const authoritativeExact = exact.docs.find((doc) => Boolean(doc.data()?.store_product_id));
-  if (authoritativeExact) return { doc: authoritativeExact, matchedVariant: false };
+function indexCatalogDocument(
+  index: StoreProductCatalogIndex,
+  doc: IndexedProductDocument,
+  providedData?: Record<string, any>,
+) {
+  const data = providedData || doc.data() || {};
+  const remoteId = String(data.store_product_id || "").trim();
+  const sku = catalogSkuKey(data.sku);
+  const visible = catalogProductIsVisible(data);
 
-  const requestedSku = catalogSkuKey(sku);
-  if (requestedSku) {
-    const catalog = await adminDb
-      .collection("products")
-      .where("createdBy", "==", uid)
-      .limit(10_000)
-      .get();
-    const variantParents = catalog.docs.filter((doc) => {
-      const data = doc.data() || {};
-      if (!data.store_product_id || !visibleCatalogProduct(data)) return false;
-      return productVariants(data.variants).some((variant) =>
-        catalogSkuKey(variant.sku || variant.code) === requestedSku);
-    });
-    if (variantParents.length === 1) return { doc: variantParents[0], matchedVariant: true };
+  // Retired identities remain readable only for historical references. They
+  // must never be selected for a new order projection, even as a hidden SKU
+  // fallback without a remote id.
+  if (productIsRetired(data)) return;
+
+  // The remote id is authoritative even for an archived row. Historical Salla
+  // orders must keep pointing at their original product identity when a newer
+  // product later reuses the same SKU.
+  if (remoteId) pushCatalogBucket(index.byRemoteId, remoteId, doc);
+
+  // Only visible products participate in SKU/variant matching. Archived rows
+  // remain addressable exclusively by their exact remote id.
+  if (visible) {
+    pushCatalogBucket(index.visibleExactBySku, sku, doc);
+    for (const variant of productVariants(data.variants)) {
+      pushCatalogBucket(
+        index.visibleVariantBySku,
+        catalogSkuKey(variant.sku || variant.code),
+        doc,
+      );
+    }
+    return;
   }
 
-  return exact.docs[0] ? { doc: exact.docs[0], matchedVariant: false } : null;
+  // Reuse manual/order-history rows without a Salla id so repeated historical
+  // orders do not create one hidden product per item. Archived remote rows are
+  // intentionally excluded from this fallback bucket.
+  if (!remoteId) pushCatalogBucket(index.fallbackExactBySku, sku, doc);
 }
 
-async function findProduct(uid: string, sku: string) {
-  const match = await findProductMatch(uid, sku);
+async function loadStoreProductCatalogIndex(uid: string) {
+  productCatalogIndexLoadCount += 1;
+  const catalog = await adminDb
+    .collection("products")
+    .where("createdBy", "==", uid)
+    .limit(PRODUCT_CATALOG_INDEX_LIMIT)
+    .get();
+  const index: StoreProductCatalogIndex = {
+    uid,
+    byRemoteId: new Map(),
+    visibleExactBySku: new Map(),
+    visibleVariantBySku: new Map(),
+    fallbackExactBySku: new Map(),
+  };
+  for (const doc of catalog.docs as IndexedProductDocument[]) indexCatalogDocument(index, doc);
+  return index;
+}
+
+export function invalidateStoreProductCatalogIndex(uid: string) {
+  productCatalogIndexCache.delete(uid);
+}
+
+export async function getStoreProductCatalogIndex(uid: string) {
+  const now = Date.now();
+  const cached = productCatalogIndexCache.get(uid);
+  if (cached && cached.expiresAt > now) return cached.promise;
+
+  const promise = loadStoreProductCatalogIndex(uid);
+  productCatalogIndexCache.set(uid, { expiresAt: now + PRODUCT_CATALOG_INDEX_TTL_MS, promise });
+  try {
+    return await promise;
+  } catch (error) {
+    if (productCatalogIndexCache.get(uid)?.promise === promise) productCatalogIndexCache.delete(uid);
+    throw error;
+  }
+}
+
+function oneUnambiguousProduct(candidates: IndexedProductDocument[] | undefined) {
+  return candidates?.length === 1 ? candidates[0] : null;
+}
+
+function firstStableProduct(candidates: IndexedProductDocument[] | undefined) {
+  return candidates?.length
+    ? [...candidates].sort((left, right) => left.id.localeCompare(right.id))[0]
+    : null;
+}
+
+function preferredRemoteProduct(candidates: IndexedProductDocument[] | undefined) {
+  if (!candidates?.length) return null;
+  const visible = candidates.filter((candidate) => catalogProductIsVisible(candidate.data() || {}));
+  return firstStableProduct(visible.length ? visible : candidates);
+}
+
+function findProductMatch(
+  item: Pick<StoreWebhookItem, "sku" | "remoteProductId">,
+  index: StoreProductCatalogIndex,
+) {
+  const remoteId = String(item.remoteProductId || "").trim();
+  if (remoteId) {
+    // Multiple rows with the same remote id are the same Salla identity and
+    // will be collapsed by catalog cleanup. Prefer the visible canonical row,
+    // then pick deterministically if only archived copies remain.
+    const remote = preferredRemoteProduct(index.byRemoteId.get(remoteId));
+    if (remote) return { doc: remote, matchedVariant: false };
+
+    // Never fall through to an SKU owned by a different remote identity. SKU
+    // reuse is valid in Salla; when this exact identity is not yet known the
+    // caller creates a dedicated historical row instead.
+    return null;
+  }
+
+  const requestedSku = catalogSkuKey(item.sku);
+  const exact = oneUnambiguousProduct(index.visibleExactBySku.get(requestedSku));
+  if (exact) return { doc: exact, matchedVariant: false };
+
+  const variant = oneUnambiguousProduct(index.visibleVariantBySku.get(requestedSku));
+  if (variant) return { doc: variant, matchedVariant: true };
+
+  const fallback = firstStableProduct(index.fallbackExactBySku.get(requestedSku));
+  return fallback ? { doc: fallback, matchedVariant: false } : null;
+}
+
+async function findProduct(
+  item: Pick<StoreWebhookItem, "sku" | "remoteProductId">,
+  index: StoreProductCatalogIndex,
+) {
+  const match = findProductMatch(item, index);
   return match?.doc || null;
 }
 
-async function findInstallationByPhoneAndSku(uid: string, phone: string, sku: string) {
-  const requestedKey = skuMatchKey(sku);
+async function findInstallationByPhoneAndSku(
+  uid: string,
+  phone: string,
+  item: Pick<StoreWebhookItem, "sku" | "remoteProductId">,
+  productCatalogIndex: StoreProductCatalogIndex,
+) {
+  const requestedKey = skuMatchKey(item.sku);
   const bySku = await adminDb
     .collection("installations")
     .where("createdBy", "==", uid)
     .where("customer_phone", "==", phone)
-    .where("product_sku", "==", sku)
+    .where("product_sku", "==", item.sku)
     .where("status", "==", "active")
     .limit(1)
     .get();
@@ -810,7 +951,7 @@ async function findInstallationByPhoneAndSku(uid: string, phone: string, sku: st
   });
   if (normalizedMatch) return normalizedMatch;
 
-  const product = await findProduct(uid, sku);
+  const product = await findProduct(item, productCatalogIndex);
   if (!product) return null;
 
   const byProduct = await adminDb
@@ -857,8 +998,13 @@ async function upsertCustomer(uid: string, order: StoreWebhookOrder, now: string
   return ref.id;
 }
 
-async function upsertProduct(uid: string, item: StoreWebhookItem, now: string) {
-  const match = await findProductMatch(uid, item.sku);
+async function upsertProduct(
+  uid: string,
+  item: StoreWebhookItem,
+  now: string,
+  productCatalogIndex: StoreProductCatalogIndex,
+) {
+  const match = findProductMatch(item, productCatalogIndex);
   if (match) {
     const data = match.doc.data();
     if (match.matchedVariant || data.store_product_id) {
@@ -887,13 +1033,14 @@ async function upsertProduct(uid: string, item: StoreWebhookItem, now: string) {
   }
 
   const ref = adminDb.collection("products").doc();
-  await ref.set({
+  const data = {
     name: item.name,
     interval_months: item.maintenanceMonths,
     category: "متجر",
     sku: item.sku,
     remind_text: "",
     source: "salla",
+    store_product_id: item.remoteProductId || null,
     catalog_visible: false,
     store_status: "historical",
     is_available: false,
@@ -901,7 +1048,13 @@ async function upsertProduct(uid: string, item: StoreWebhookItem, now: string) {
     createdBy: uid,
     createdAt: now,
     updatedAt: now,
-  });
+  };
+  await ref.set(data);
+  indexCatalogDocument(productCatalogIndex, {
+    id: ref.id,
+    data: () => data,
+    ref,
+  }, data);
   return ref.id;
 }
 
@@ -978,6 +1131,7 @@ function hydrateImportedOrderItem(item: any): ImportedOrderItem {
     name: String(item?.name || "Store item"),
     sku: String(item?.sku || ""),
     remote_item_id: item?.remote_item_id ? String(item.remote_item_id) : null,
+    remote_product_id: item?.remote_product_id ? String(item.remote_product_id) : null,
     quantity: Math.max(1, Number(item?.quantity || 1)),
     unit_price: optionalNumberValue(item?.unit_price) ?? null,
     total_price: optionalNumberValue(item?.total_price) ?? null,
@@ -999,6 +1153,7 @@ function importedItemBase(item: StoreWebhookItem) {
     name: item.name,
     sku: item.sku,
     remote_item_id: item.remoteItemId || null,
+    remote_product_id: item.remoteProductId || null,
     quantity: item.quantity,
     unit_price: item.unitPrice ?? null,
     total_price: item.totalPrice ?? (item.unitPrice !== undefined && item.unitPrice !== null ? item.unitPrice * item.quantity : null),
@@ -1111,8 +1266,13 @@ function uniqueValues(values: unknown[]) {
   return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
 }
 
-async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<ImportedOrderResult> {
+async function importStoreOrder(
+  uid: string,
+  order: StoreWebhookOrder,
+  providedProductCatalogIndex?: StoreProductCatalogIndex,
+): Promise<ImportedOrderResult> {
   const now = new Date().toISOString();
+  const productCatalogIndex = providedProductCatalogIndex || await getStoreProductCatalogIndex(uid);
   const customerId = await upsertCustomer(uid, order, now);
   const productIds: string[] = [];
   const installationIds: string[] = [];
@@ -1120,7 +1280,7 @@ async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<
   const itemJourneys: ImportedOrderItem[] = [];
 
   for (const [index, item] of order.items.entries()) {
-    const productId = await upsertProduct(uid, item, now);
+    const productId = await upsertProduct(uid, item, now, productCatalogIndex);
     productIds.push(productId);
 
     if (item.orderType === "sale_only") {
@@ -1209,7 +1369,12 @@ async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<
     }
 
     if (item.orderType === "maintenance_existing") {
-      const existingInstallation = await findInstallationByPhoneAndSku(uid, order.customerPhone, item.sku);
+      const existingInstallation = await findInstallationByPhoneAndSku(
+        uid,
+        order.customerPhone,
+        item,
+        productCatalogIndex,
+      );
       if (!existingInstallation) {
         itemJourneys.push({
           ...importedItemBase(item),
@@ -1420,6 +1585,7 @@ async function projectStoreOrder(
   order: StoreWebhookOrder,
   extras: Record<string, unknown> = {},
   writeAttempt = 0,
+  providedProductCatalogIndex?: StoreProductCatalogIndex,
 ) {
   const now = new Date().toISOString();
   const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
@@ -1435,19 +1601,20 @@ async function projectStoreOrder(
     };
   }
 
+  const productCatalogIndex = providedProductCatalogIndex || await getStoreProductCatalogIndex(uid);
   const customerId = order.customerPhone ? await upsertCustomer(uid, order, now) : "";
   const productIds: string[] = [];
   const projectedItems: ImportedOrderItem[] = [];
 
   for (const item of order.items) {
-    const productId = await upsertProduct(uid, item, now);
+    const productId = await upsertProduct(uid, item, now, productCatalogIndex);
     productIds.push(productId);
 
     // A historical order may safely point at an installation that already
     // exists. This path never creates installations, bookings, reminder state,
     // webhook event records, or notifications.
     const existingInstallation = item.orderType === "maintenance_existing" && order.customerPhone
-      ? await findInstallationByPhoneAndSku(uid, order.customerPhone, item.sku)
+      ? await findInstallationByPhoneAndSku(uid, order.customerPhone, item, productCatalogIndex)
       : null;
     projectedItems.push(projectedItemState(item, productId, existingInstallation?.id || null));
   }
@@ -1534,7 +1701,9 @@ async function projectStoreOrder(
           stale: true,
         };
       }
-      if (writeAttempt < 2) return projectStoreOrder(uid, order, extras, writeAttempt + 1);
+      if (writeAttempt < 2) {
+        return projectStoreOrder(uid, order, extras, writeAttempt + 1, productCatalogIndex);
+      }
       throw new Error(`Store order ${orderKey} changed concurrently; retry the authoritative projection.`);
     }
   } else {
@@ -1542,7 +1711,7 @@ async function projectStoreOrder(
       await orderRef.create(orderPatch);
     } catch (error) {
       if (isAlreadyExistsError(error) && writeAttempt < 2) {
-        return projectStoreOrder(uid, order, extras, writeAttempt + 1);
+        return projectStoreOrder(uid, order, extras, writeAttempt + 1, productCatalogIndex);
       }
       throw error;
     }
@@ -1567,6 +1736,7 @@ export async function importStoreOrderForUser(
   uid: string,
   order: StoreWebhookOrder,
   extras: Record<string, unknown> = {},
+  options: { productCatalogIndex?: StoreProductCatalogIndex } = {},
 ): Promise<ImportedOrderResult> {
   const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
   return withStoreOrderProjectionLock(orderKey, async () => {
@@ -1576,7 +1746,7 @@ export async function importStoreOrderForUser(
       return importedResultFromExisting(existingData);
     }
     const existed = existingSnapshot.exists;
-    const imported = await importStoreOrder(uid, order);
+    const imported = await importStoreOrder(uid, order, options.productCatalogIndex);
 
     if (!localStoreFallbackEnabled()) {
       await adminDb.collection("store_orders").doc(orderKey).update({
@@ -1601,11 +1771,11 @@ export async function projectStoreOrderForUser(
   uid: string,
   order: StoreWebhookOrder,
   extras: Record<string, unknown> = {},
-  options: { suppressRealtime?: boolean } = {},
+  options: { suppressRealtime?: boolean; productCatalogIndex?: StoreProductCatalogIndex } = {},
 ): Promise<ImportedOrderResult> {
   const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
   return withStoreOrderProjectionLock(orderKey, async () => {
-    const projected = await projectStoreOrder(uid, order, extras);
+    const projected = await projectStoreOrder(uid, order, extras, 0, options.productCatalogIndex);
 
     if (!options.suppressRealtime && !projected.stale) {
       publishStoreOrderChange(uid, {
@@ -2619,3 +2789,15 @@ export async function processStoreWebhook(req: RawBodyRequest) {
     throw error;
   }
 }
+
+/** Internal seams used to prove catalog matching stays one-load-per batch. */
+export const __storeWebhookTestables = {
+  findProductMatch,
+  resetProductCatalogIndexCache() {
+    productCatalogIndexCache.clear();
+    productCatalogIndexLoadCount = 0;
+  },
+  productCatalogIndexLoadCount() {
+    return productCatalogIndexLoadCount;
+  },
+};

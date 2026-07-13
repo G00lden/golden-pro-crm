@@ -12,7 +12,7 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import { useDeferredValue, useMemo, useState, type FormEvent } from "react";
+import { useDeferredValue, useEffect, useMemo, useState, type FormEvent } from "react";
 import * as api from "../api";
 import {
   Badge,
@@ -130,8 +130,10 @@ export default function ProductsPage({
   const deferredSearch = useDeferredValue(search);
   const [category, setCategory] = useState("all");
   const [status, setStatus] = useState<ProductStatusFilter>("all");
-  const [source, setSource] = useState("salla");
+  const [source, setSource] = useState("all");
   const [sort, setSort] = useState<ProductSort>("store");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
   const [syncing, setSyncing] = useState(false);
   const [cleaning, setCleaning] = useState(false);
 
@@ -184,6 +186,17 @@ export default function ProductsPage({
       return leftStore - rightStore || left.name.localeCompare(right.name, "ar");
     });
   }, [allProducts, category, deferredSearch, sort, source, status]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [category, deferredSearch, pageSize, sort, source, status]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pageProducts = useMemo(
+    () => filteredProducts.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredProducts, pageSize, safePage],
+  );
 
   const refreshAll = async () => {
     await Promise.all([products.refresh(), salla.refresh(), refreshStats()]);
@@ -357,7 +370,7 @@ export default function ProductsPage({
         {products.loading ? <Loading /> : products.error ? <ErrorBlock message={products.error} retry={products.refresh} /> : (
           <div className="product-table-wrap">
             <div className="product-mobile-list">
-              {filteredProducts.map((product) => {
+              {pageProducts.map((product) => {
                 const state = statusMeta(product);
                 const storeManaged = product.source === "salla" || Boolean(product.store_product_id);
                 return (
@@ -411,7 +424,7 @@ export default function ProductsPage({
                 </tr>
               </thead>
               <tbody>
-                {filteredProducts.map((product) => {
+                {pageProducts.map((product) => {
                   const state = statusMeta(product);
                   const storeManaged = product.source === "salla" || Boolean(product.store_product_id);
                   return (
@@ -461,6 +474,29 @@ export default function ProductsPage({
                 })}
               </tbody>
             </table>
+            {!!filteredProducts.length && (
+              <nav className="pagination" aria-label="التنقل بين صفحات المنتجات">
+                <span>
+                  صفحة {safePage} من {totalPages} · عرض {(safePage - 1) * pageSize + 1}-
+                  {Math.min(safePage * pageSize, filteredProducts.length)} من {filteredProducts.length}
+                </span>
+                <SelectInput
+                  aria-label="عدد المنتجات في الصفحة"
+                  value={String(pageSize)}
+                  onChange={(event) => setPageSize(Number(event.target.value))}
+                >
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </SelectInput>
+                <Button tone="muted" disabled={safePage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+                  السابق
+                </Button>
+                <Button tone="muted" disabled={safePage >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>
+                  التالي
+                </Button>
+              </nav>
+            )}
             {!filteredProducts.length && (
               <Empty
                 title={allProducts.length ? "لا توجد منتجات مطابقة للبحث أو الفلاتر" : "لا توجد منتجات بعد — شغّل مزامنة سلة لسحب الكتالوج"}

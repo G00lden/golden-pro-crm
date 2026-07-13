@@ -35,6 +35,8 @@ import { logError, logEvent, redactValue } from "./logger";
 import { communicationJobStore } from "./communicationJobs";
 import { communicationPreferenceStore } from "./communicationPreferences";
 import { communicationCampaignStore } from "./communicationCampaigns";
+import { hasAppCapability } from "../shared/accessControl";
+import { visibleWhatsAppStatus } from "./whatsappStatusVisibility";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -64,7 +66,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
     res.status(401).json({ error: "Authentication required." });
     return;
   }
-  if (user.role === "admin") {
+  if (hasAppCapability(user.role, "whatsapp.manage")) {
     next();
     return;
   }
@@ -84,7 +86,7 @@ function requireCampaignManager(req: Request, res: Response, next: NextFunction)
     res.status(401).json({ error: "Authentication required." });
     return;
   }
-  if (user.role === "admin" || user.role === "manager" || allow.includes(user.uid)) {
+  if (hasAppCapability(user.role, "campaigns.manage") || allow.includes(user.uid)) {
     next();
     return;
   }
@@ -242,10 +244,14 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
 
   app.get(
     "/api/whatsapp/status",
-    requireAdmin,
+    requireCampaignManager,
     asyncRoute(async (req, res) => {
       const refresh = String(req.query.refresh || "").toLowerCase() === "true";
-      res.json(refresh ? await whatsappService.verifyConnection(true) : whatsappService.getStatus());
+      const status = refresh ? await whatsappService.verifyConnection(true) : whatsappService.getStatus();
+      const user = (req as AuthedRequest).user;
+      const canManageWhatsApp = hasAppCapability(user?.role, "whatsapp.manage")
+        || Boolean(user?.uid && adminUids().includes(user.uid));
+      res.json(visibleWhatsAppStatus(status, canManageWhatsApp));
     }),
   );
 
@@ -282,7 +288,10 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
 
       try {
         const body = message || "رسالة اختبار من نظام Breexe Pro CRM";
-        const result = await whatsappService.sendText(phone, body);
+        const result = await whatsappService.sendText(phone, body, {
+          confirmationCode: req.body?.outboundCode,
+        });
+        const dryRun = (result as { dryRun?: boolean })?.dryRun === true;
         recordWhatsAppMessage({
           type: "sent",
           provider: whatsappService.getStatus().provider,
@@ -290,11 +299,11 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
           to_phone: phone,
           message: body,
           message_id: (result as { messageId?: string | null })?.messageId || null,
-          status: (result as { dryRun?: boolean })?.dryRun ? "dry_run" : "sent",
+          status: dryRun ? "dry_run" : "sent",
           owner_uid: userReq.user.uid,
           metadata: metadata && typeof metadata === "object" ? metadata : { kind: "manual" },
         });
-        res.json({ success: true, result });
+        res.json({ success: true, dry_run: dryRun, result });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         if (msg.includes("credentials are missing") || msg.includes("is not connected")) {
@@ -348,7 +357,8 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
           owner_uid: userReq.user.uid,
           outboundCode: body.outboundCode,
         });
-        res.json({ success: true, result });
+        const dryRun = (result as { dryRun?: boolean })?.dryRun === true;
+        res.json({ success: true, dry_run: dryRun, result });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         if (msg.includes("credentials are missing") || msg.includes("is not connected")) {

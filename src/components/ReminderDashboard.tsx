@@ -1,6 +1,7 @@
 import { AlertTriangle, CalendarDays, CheckCircle2, RefreshCcw, Send } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api";
+import { createPerItemActionLock, isOutboundSimulation } from "../outboundAction";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -20,7 +21,19 @@ export function ReminderDashboard({
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [sendingIds, setSendingIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState("");
+  const runLock = useRef(false);
+  const sendLock = useRef(createPerItemActionLock()).current;
+
+  const setSending = (id: string, value: boolean) => {
+    setSendingIds((current) => {
+      const next = new Set(current);
+      if (value) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -46,30 +59,55 @@ export function ReminderDashboard({
   }, [refresh]);
 
   const runReminders = async () => {
+    if (runLock.current) return;
+    runLock.current = true;
     setRunning(true);
     try {
       const result = await api.runDueReminders();
-      if (result.error) {
-        notify(result.error, false);
+      if (result.blocked || result.error) {
+        notify(result.error || "التذكيرات متوقفة. راجع حالة واتساب.", false);
+      } else if (isOutboundSimulation(result)) {
+        notify(`محاكاة فقط: فُحص ${result.checked} تذكير مستحق، ولم تُرسل أي رسالة فعلية أو تتغير عدادات التذكير.`, false);
+      } else if (result.sent > 0) {
+        notify(`تم إرسال ${result.sent} تذكير فعلياً من أصل ${result.checked} (فشل ${result.failed})`);
+        await refresh();
+        if (refreshStats) await refreshStats();
+      } else if (result.failed > 0) {
+        notify(`لم يُرسل أي تذكير؛ فشلت ${result.failed} محاولة.`, false);
+      } else if (result.checked > 0) {
+        notify(`لم يُرسل أي تذكير؛ تم تخطي ${result.skipped} حسب قواعد التكرار.`, false);
       } else {
-        notify(`أُرسل ${result.sent} تذكير من أصل ${result.checked} (فشل ${result.failed})`);
+        notify("لا توجد تذكيرات مستحقة الآن");
       }
-      await refresh();
-      if (refreshStats) await refreshStats();
     } catch (err) {
       notify(err instanceof Error ? err.message : "تعذر تشغيل التذكيرات", false);
     } finally {
+      runLock.current = false;
       setRunning(false);
     }
   };
 
   const sendSingle = async (item: api.MaintenanceUpcomingItem) => {
+    if (!sendLock.acquire(item.id)) return;
+    setSending(item.id, true);
     try {
-      await api.remindInstallation(item.id, item.next_remind_type || "first");
-      notify(`تم إرسال تذكير لـ ${item.customer_name}`);
+      const result = await api.remindInstallation(item.id, item.next_remind_type || "first");
+      if (isOutboundSimulation(result)) {
+        notify(`محاكاة فقط: لم تُرسل رسالة إلى ${item.customer_name} ولم تتغير مرحلة التذكير.`, false);
+        return;
+      }
+      if (!result.success) {
+        notify(result.error || result.reason || "لم يُرسل التذكير.", false);
+        return;
+      }
+      notify(`تم إرسال تذكير فعلي لـ ${item.customer_name}`);
       await refresh();
+      if (refreshStats) await refreshStats();
     } catch (err) {
       notify(err instanceof Error ? err.message : "تعذر الإرسال", false);
+    } finally {
+      sendLock.release(item.id);
+      setSending(item.id, false);
     }
   };
 
@@ -123,6 +161,7 @@ export function ReminderDashboard({
           emptyText="لا توجد صيانة قادمة قريباً."
           onAction={sendSingle}
           actionLabel="إرسال"
+          sendingIds={sendingIds}
           showDaysUntil
         />
         <UpcomingPanel
@@ -131,6 +170,7 @@ export function ReminderDashboard({
           emptyText="لا توجد صيانة متأخرة."
           onAction={sendSingle}
           actionLabel="تذكير"
+          sendingIds={sendingIds}
           danger
         />
       </article>
@@ -189,6 +229,7 @@ function UpcomingPanel({
   emptyText,
   onAction,
   actionLabel,
+  sendingIds,
   showDaysUntil,
   danger,
 }: {
@@ -197,6 +238,7 @@ function UpcomingPanel({
   emptyText: string;
   onAction: (item: api.MaintenanceUpcomingItem) => Promise<void>;
   actionLabel: string;
+  sendingIds: Set<string>;
   showDaysUntil?: boolean;
   danger?: boolean;
 }) {
@@ -228,8 +270,18 @@ function UpcomingPanel({
                   {danger && item.days_overdue !== undefined ? ` · متأخر ${item.days_overdue} يوم` : null}
                 </div>
               </div>
-              <button className="btn muted" type="button" onClick={() => onAction(item)} style={{ fontSize: 12, padding: "4px 8px" }}>
-                <Send size={12} /> {actionLabel}
+              <button
+                className="btn muted"
+                type="button"
+                onClick={() => onAction(item)}
+                disabled={sendingIds.has(item.id)}
+                aria-busy={sendingIds.has(item.id)}
+                style={{ fontSize: 12, padding: "4px 8px" }}
+              >
+                {sendingIds.has(item.id)
+                  ? <RefreshCcw size={12} className="spin" aria-hidden="true" />
+                  : <Send size={12} aria-hidden="true" />}
+                {sendingIds.has(item.id) ? "جاري التحقق…" : actionLabel}
               </button>
             </li>
           ))}

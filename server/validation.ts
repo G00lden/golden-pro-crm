@@ -63,6 +63,7 @@ export const sendTestSchema = z.object({
   phone: z.string().min(1, 'Phone number is required').max(32),
   message: z.string().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  outboundCode: z.string().max(160).optional(),
 });
 
 export const whatsappTemplateSendSchema = z.object({
@@ -148,6 +149,37 @@ export const sallaCallbackQuerySchema = z.object({
 export const publicInvoiceShareQuerySchema = z.object({
   token: z.string().min(32).max(256),
 }).passthrough();
+
+const publicLeadUtmSchema = z.object({
+  utm_source: z.string().trim().max(160).optional(),
+  utm_medium: z.string().trim().max(160).optional(),
+  utm_campaign: z.string().trim().max(240).optional(),
+  utm_content: z.string().trim().max(240).optional(),
+  utm_term: z.string().trim().max(240).optional(),
+  gclid: z.string().trim().max(512).optional(),
+  fbclid: z.string().trim().max(512).optional(),
+  ttclid: z.string().trim().max(512).optional(),
+  landing_url: z.string().trim().max(2048).optional(),
+  referrer: z.string().trim().max(2048).optional(),
+  ts: z.string().datetime({ offset: true }).optional(),
+}).strict();
+
+export const publicLeadSchema = z.object({
+  name: z.string().trim().min(2, 'Name must contain at least 2 characters').max(120),
+  phone: z.string().trim().min(7).max(32).refine((value) => {
+    if (!/^[+0-9 ()-]+$/.test(value)) return false;
+    const digits = value.replace(/\D/g, '');
+    return digits.length >= 8 && digits.length <= 15;
+  }, 'Phone number is invalid'),
+  service: z.string().trim().max(120).optional().default(''),
+  message: z.string().trim().max(2000).optional().default(''),
+  source: z.enum(['landing', 'landing-v2']).optional().default('landing'),
+  utm: publicLeadUtmSchema.optional().default({}),
+  // Honeypot. Real clients leave this blank; filled submissions are discarded.
+  website: z.string().trim().max(200).optional().default(''),
+}).strict();
+
+export type PublicLeadInput = z.infer<typeof publicLeadSchema>;
 
 // Telephony / IVR schemas
 

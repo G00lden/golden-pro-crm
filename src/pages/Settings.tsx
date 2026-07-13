@@ -1,4 +1,4 @@
-import { ExternalLink, RefreshCcw, Save, Plus, LogOut, Smartphone, X } from "lucide-react";
+import { ExternalLink, RefreshCcw, Save, Plus, LogOut, Smartphone } from "lucide-react";
 import { useState, useEffect, type FormEvent } from "react";
 import * as api from "../api";
 import {
@@ -9,14 +9,23 @@ import {
   Field,
   Loading,
   PageHeader,
-  TextArea,
   TextInput,
   fmtDate,
   useData,
 } from "../shared";
 import { normalizeSallaStoreUrl } from "../sallaStoreUrl";
 
-export default function SettingsPage({ notify }: { notify: (message: string, ok?: boolean) => void }) {
+type SettingsPageProps = {
+  notify: (message: string, ok?: boolean) => void;
+  canPrepareOperations?: boolean;
+  canSeedDemoData?: boolean;
+};
+
+export default function SettingsPage({
+  notify,
+  canPrepareOperations = false,
+  canSeedDemoData = false,
+}: SettingsPageProps) {
   const settings = useData(api.getSettings);
   const salla = useData(api.getSallaIntegrationStatus);
   const webhook = useData(api.getStoreWebhookDiagnostics);
@@ -27,6 +36,7 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
   const [preparing, setPreparing] = useState(false);
   const [prepResult, setPrepResult] = useState<api.DailyPreparationResult | null>(null);
   const [values, setValues] = useState<api.Settings>({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24 });
+  const showDemoDataAction = canSeedDemoData && !import.meta.env.PROD;
   const webhookUrl =
     typeof window !== "undefined"
       ? `${window.location.origin}${webhook.data?.endpoint || "/api/store/webhook"}`
@@ -71,6 +81,7 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
   };
 
   const addDemoData = async () => {
+    if (!window.confirm("ستُضاف سجلات تجريبية جديدة إلى حسابك المحلي. هل تريد المتابعة؟")) return;
     setSeeding(true);
     try {
       const result = await api.seedDemoData(10);
@@ -135,46 +146,52 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
     <>
       <PageHeader
         title="الإعدادات"
-        actions={<Button loading={preparing} onClick={prepareDaily}><RefreshCcw size={16} /> تهيئة تشغيلية</Button>}
+        actions={canPrepareOperations
+          ? <Button loading={preparing} onClick={prepareDaily}><RefreshCcw size={16} /> تهيئة تشغيلية</Button>
+          : undefined}
       />
       {settings.loading ? <Loading /> : (
         <section className="panel">
-          <form className="form" onSubmit={save}>
+          <form className="form" aria-busy={saving} onSubmit={save}>
             <div className="form-grid">
-              <Field label="عدد الفنيين الافتراضي"><TextInput type="number" min={1} value={values.techs} onChange={(e) => setValues({ ...values, techs: Number(e.target.value) })} /></Field>
-              <Field label="زيارات لكل فني"><TextInput type="number" min={1} value={values.jobs_per_tech} onChange={(e) => setValues({ ...values, jobs_per_tech: Number(e.target.value) })} /></Field>
+              <Field label="عدد الفنيين الافتراضي"><TextInput type="number" inputMode="numeric" name="default_technicians" autoComplete="off" min={1} value={values.techs} onChange={(e) => setValues({ ...values, techs: Number(e.target.value) })} /></Field>
+              <Field label="زيارات لكل فني"><TextInput type="number" inputMode="numeric" name="jobs_per_technician" autoComplete="off" min={1} value={values.jobs_per_tech} onChange={(e) => setValues({ ...values, jobs_per_tech: Number(e.target.value) })} /></Field>
             </div>
             <div className="form-grid">
-              <Field label="نسبة الاستجابة"><TextInput type="number" min={0} max={100} value={values.response_rate} onChange={(e) => setValues({ ...values, response_rate: Number(e.target.value) })} /></Field>
-              <Field label="حد الرسائل اليومي"><TextInput type="number" min={1} value={values.maxDaily} onChange={(e) => setValues({ ...values, maxDaily: Number(e.target.value) })} /></Field>
+              <Field label="نسبة الاستجابة"><TextInput type="number" inputMode="numeric" name="response_rate" autoComplete="off" min={0} max={100} value={values.response_rate} onChange={(e) => setValues({ ...values, response_rate: Number(e.target.value) })} /></Field>
+              <Field label="حد الرسائل اليومي"><TextInput type="number" inputMode="numeric" name="daily_message_limit" autoComplete="off" min={1} value={values.maxDaily} onChange={(e) => setValues({ ...values, maxDaily: Number(e.target.value) })} /></Field>
             </div>
             <fieldset className="form-fieldset">
               <legend>بيانات الفاتورة الضريبية (ZATCA)</legend>
               <div className="form-grid">
                 <Field label="اسم البائع (الجهة المصدرة)">
-                  <TextInput value={values.seller_name || ""} onChange={(e) => setValues({ ...values, seller_name: e.target.value })} placeholder="Breexe Pro Co." />
+                  <TextInput name="seller_name" autoComplete="organization" value={values.seller_name || ""} onChange={(e) => setValues({ ...values, seller_name: e.target.value })} placeholder="مثال: Breexe Pro Co.…" />
                 </Field>
                 <Field label="الرقم الضريبي (VAT)">
-                  <TextInput value={values.seller_vat_number || ""} onChange={(e) => setValues({ ...values, seller_vat_number: e.target.value.replace(/\D/g, '').slice(0, 15) })} placeholder="15 رقم" />
+                  <TextInput name="seller_vat_number" autoComplete="off" inputMode="numeric" value={values.seller_vat_number || ""} onChange={(e) => setValues({ ...values, seller_vat_number: e.target.value.replace(/\D/g, '').slice(0, 15) })} placeholder="مثال: 15 رقمًا…" />
                 </Field>
               </div>
               <div className="form-grid">
                 <Field label="عنوان البائع">
-                  <TextInput value={values.seller_address || ""} onChange={(e) => setValues({ ...values, seller_address: e.target.value })} placeholder="شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض" />
+                  <TextInput name="seller_address" autoComplete="street-address" value={values.seller_address || ""} onChange={(e) => setValues({ ...values, seller_address: e.target.value })} placeholder="مثال: شركة بريكس برو - الرياض…" />
                 </Field>
               </div>
             </fieldset>
             <div className="form-actions">
               <Button type="submit" loading={saving}><Save size={16} /> حفظ</Button>
-              <Button tone="success" loading={preparing} onClick={prepareDaily}><RefreshCcw size={16} /> تهيئة للاستخدام اليومي</Button>
-              <Button tone="muted" loading={seeding} onClick={addDemoData}><Plus size={16} /> إضافة 10 بيانات تجربة</Button>
+              {canPrepareOperations && (
+                <Button tone="success" loading={preparing} onClick={prepareDaily}><RefreshCcw size={16} /> تهيئة للاستخدام اليومي</Button>
+              )}
+              {showDemoDataAction && (
+                <Button tone="muted" loading={seeding} onClick={addDemoData}><Plus size={16} /> إضافة 10 بيانات تجربة</Button>
+              )}
               <Button tone="danger" onClick={async () => { await api.logout(); }}><LogOut size={16} /> تسجيل الخروج</Button>
             </div>
           </form>
         </section>
       )}
       {prepResult && (
-        <section className="panel ops-prep-panel">
+        <section className="panel ops-prep-panel" role="status" aria-live="polite">
           <div className="panel-head">
             <h2>نتيجة التهيئة التشغيلية</h2>
             <Badge tone={prepResult.checks.every((check) => check.ok) ? "success" : "warn"}>
@@ -355,14 +372,17 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
               {salla.data?.connect_supported ? (
                 <Button loading={connectingSalla} disabled={!salla.data?.configured} onClick={startSallaConnect}><Smartphone size={16} /> بدء ربط سلة</Button>
               ) : (
-                <Button tone="muted" disabled><Smartphone size={16} /> الربط يتم من Webhook التطبيق</Button>
+                <div className="note salla-auth-mode-status">
+                  <strong><span translate="no">Easy Mode</span>:</strong>{" "}
+                  التفويض يتم تلقائيًا عبر Webhook التطبيق؛ لا يوجد زر ربط مباشر في هذا الوضع.
+                </div>
               )}
               <Button tone="muted" loading={syncingSalla} disabled={!salla.data?.linked} onClick={runSallaSync}><RefreshCcw size={16} /> مزامنة العملاء والمنتجات والطلبات</Button>
               <Button tone="muted" onClick={salla.refresh}><RefreshCcw size={16} /> تحديث الحالة</Button>
             </div>
-            {salla.data?.last_sync_error && <p className="note danger">{salla.data.last_sync_error}</p>}
-            {salla.data?.last_product_sync_error && <p className="note danger">{salla.data.last_product_sync_error}</p>}
-            {salla.data?.last_customer_sync_error && <p className="note danger">{salla.data.last_customer_sync_error}</p>}
+            {salla.data?.last_sync_error && <p className="note danger" role="alert">{salla.data.last_sync_error}</p>}
+            {salla.data?.last_product_sync_error && <p className="note danger" role="alert">{salla.data.last_product_sync_error}</p>}
+            {salla.data?.last_customer_sync_error && <p className="note danger" role="alert">{salla.data.last_customer_sync_error}</p>}
             {customerSyncHasWarning && customerSyncAdvertisedCount !== null && customerSyncCountGap !== null && (
               <p className="note" role="status">
                 <Badge tone="warn">فرق في عدّ سلة</Badge>{" "}
@@ -384,7 +404,7 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
         {webhook.loading ? <Loading /> : webhook.error ? <ErrorBlock message={webhook.error} retry={webhook.refresh} /> : (
           <div className="form">
             <Field label="رابط استقبال الطلبات">
-              <TextInput value={webhookUrl} readOnly />
+              <TextInput name="store_webhook_url" autoComplete="off" dir="ltr" value={webhookUrl} readOnly />
             </Field>
             <div className="cards-grid">
               <article className="mini-card">

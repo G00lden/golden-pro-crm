@@ -130,6 +130,7 @@ class SqliteDocSnapshot {
       ["actor_uid", "actorUid"],
       ["completed_at", "completedAt"],
       ["lease_token", "leaseToken"],
+      ["remind_type", "reminder_type"],
       ["remote_status_id", "remoteStatusId"],
       ["remote_status_name", "remoteStatusName"],
       ["remote_status_slug", "remoteStatusSlug"],
@@ -186,6 +187,9 @@ const fieldToColumn: Record<string, string> = {
   lastRemindAttemptAt: "last_remind_attempt_at",
   remindCount: "remind_count",
   nextRemindType: "next_remind_type",
+  // reminderEngine uses the Firestore name while the established SQLite
+  // schema and maintenance lifecycle use remind_type.
+  reminder_type: "remind_type",
   intervalMonths: "interval_months",
   maxDaily: "max_daily",
   remindText: "remind_text",

@@ -175,7 +175,12 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
 
       let notification: unknown = null;
       if (req.body?.sendNow && result.booking_id) {
-        notification = await notifyTechnicianForBooking(result.booking_id, userReq.user.uid, "created");
+        notification = await notifyTechnicianForBooking(
+          result.booking_id,
+          userReq.user.uid,
+          "created",
+          req.body?.outboundCode,
+        );
       }
 
       res.json({ ...result, notification });

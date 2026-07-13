@@ -9,10 +9,15 @@ import {
   managedUserListQuerySchema,
   managedUserUpdateSchema,
 } from "./userValidation";
+import {
+  APP_ROLES,
+  type AppRole,
+} from "../shared/accessControl";
+import { requireCapability } from "./capabilityGuard";
 
-export type UserRole = "admin" | "manager" | "sales" | "technician" | "user";
+export type UserRole = AppRole;
 
-const ROLES: ReadonlyArray<UserRole> = ["admin", "manager", "sales", "technician", "user"];
+const ROLES: ReadonlyArray<UserRole> = APP_ROLES;
 
 export type ManagedUser = {
   id: string;
@@ -316,7 +321,7 @@ export function registerUserAdminRoutes(app: Express) {
     });
   });
 
-  app.get("/api/admin/users", requireRole(["admin", "manager"]), validateQuery(managedUserListQuerySchema), (req, res) => {
+  app.get("/api/admin/users", requireCapability("users.manage"), validateQuery(managedUserListQuerySchema), (req, res) => {
     const search = typeof req.query.search === "string" ? req.query.search : undefined;
     const role = typeof req.query.role === "string" ? req.query.role : undefined;
     const activeQ = typeof req.query.active === "string" ? req.query.active : undefined;
@@ -326,7 +331,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.json({ users: users.map(publicUser) });
   });
 
-  app.post("/api/admin/users", requireRole(["admin"]), validate(managedUserCreateSchema), (req, res) => {
+  app.post("/api/admin/users", requireCapability("users.manage"), validate(managedUserCreateSchema), (req, res) => {
     const body = (req.body || {}) as {
       name?: string;
       email?: string;
@@ -367,7 +372,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.status(201).json({ user: getUserById(id) });
   });
 
-  app.put("/api/admin/users/:id", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), validate(managedUserUpdateSchema), (req, res) => {
+  app.put("/api/admin/users/:id", requireCapability("users.manage"), validateParams(managedUserIdParamsSchema), validate(managedUserUpdateSchema), (req, res) => {
     const id = req.params.id;
     const target = getUserById(id);
     if (!target) {
@@ -407,7 +412,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.json({ user: updated });
   });
 
-  app.post("/api/admin/users/:id/deactivate", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), (req, res) => {
+  app.post("/api/admin/users/:id/deactivate", requireCapability("users.manage"), validateParams(managedUserIdParamsSchema), (req, res) => {
     const id = req.params.id;
     const target = getUserById(id);
     if (!target) {
@@ -427,7 +432,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.json({ user: updated });
   });
 
-  app.post("/api/admin/users/:id/activate", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), (req, res) => {
+  app.post("/api/admin/users/:id/activate", requireCapability("users.manage"), validateParams(managedUserIdParamsSchema), (req, res) => {
     const id = req.params.id;
     if (!getUserById(id)) {
       res.status(404).json({ error: "المستخدم غير موجود." });
@@ -437,7 +442,7 @@ export function registerUserAdminRoutes(app: Express) {
     res.json({ user: updated });
   });
 
-  app.delete("/api/admin/users/:id", requireRole(["admin"]), validateParams(managedUserIdParamsSchema), (req, res) => {
+  app.delete("/api/admin/users/:id", requireCapability("users.manage"), validateParams(managedUserIdParamsSchema), (req, res) => {
     const id = req.params.id;
     const target = getUserById(id);
     if (!target) {

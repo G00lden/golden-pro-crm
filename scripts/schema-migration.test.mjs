@@ -29,7 +29,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10304/);
+    assert.match(result.stdout, /"userVersion":10307/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -51,7 +51,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10304/);
+    assert.match(backups[0], /pre-schema-10307/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -104,6 +104,20 @@ test("the Supabase migration mirrors the Salla order synchronization schema", ()
     "lease_token",
     "salla_order_commands_desired_hash_uidx",
     "enable row level security",
+  ]) {
+    assert.match(migration, new RegExp(required));
+  }
+});
+
+test("the Supabase migration preserves invoice additional fees", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260713030000_invoice_additional_fee.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "alter table public.invoices",
+    "additional_fee numeric",
+    "additional_fee >= 0",
   ]) {
     assert.match(migration, new RegExp(required));
   }

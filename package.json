@@ -1,7 +1,7 @@
 {
   "name": "golden-pro-crm",
   "private": true,
-  "version": "1.3.5",
+  "version": "1.3.7",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-server.mjs --dev",
@@ -13,6 +13,7 @@
     "test:version": "node --test scripts/version-policy.test.mjs",
     "test:auth-policy": "tsx --test server/localAuthPolicy.test.ts",
     "test:server-mode": "node --test scripts/server-mode.test.mjs",
+    "test:qa-isolation": "node --test scripts/qa-isolation.test.mjs",
     "test:financial": "tsx --test shared/financial.test.ts",
     "test:schema": "node --test scripts/schema-migration.test.mjs",
     "test:date": "tsx --test shared/date.test.ts",
@@ -40,7 +41,7 @@
     "deploy:firestore": "firebase deploy --only firestore",
     "deploy:hosting": "firebase deploy --only hosting",
     "deploy:firebase": "firebase deploy --only hosting,firestore",
-    "deploy:cloudrun": "gcloud run deploy golden-pro-crm --source . --region me-central1 --allow-unauthenticated",
+    "deploy:cloudrun": "node scripts/cloudrun-unsupported.mjs",
     "cloudflare:dns": "node scripts/cloudflare-dns.mjs",
     "ops:start-local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-crm-local-stack.ps1",
     "ops:register-startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register-crm-local-stack-task.ps1 -StartNow",

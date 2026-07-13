@@ -72,15 +72,28 @@ for (const required of [
 ]) {
   if (!quoteColumns.has(required)) throw new Error(`quotes.${required} is missing`);
 }
-for (const required of ["discount_mode", "discount_value", "vat_percent", "vat_amount", "total_without_vat", "total_with_vat", "invoice_type"]) {
+for (const required of ["discount_mode", "discount_value", "vat_percent", "vat_amount", "additional_fee", "total_without_vat", "total_with_vat", "invoice_type"]) {
   if (!columns("invoices").has(required)) throw new Error(`invoices.${required} is missing`);
 }
 for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
   if (!columns("settings").has(required)) throw new Error(`settings.${required} is missing`);
 }
+for (const required of ["merged_into", "merged_at"]) {
+  if (!columns("products").has(required)) throw new Error(`products.${required} is missing`);
+}
+for (const required of [
+  "product_id",
+  "remind_type",
+  "trigger",
+  "error",
+  "whatsapp_jid",
+  "whatsapp_message_id",
+]) {
+  if (!columns("reminders").has(required)) throw new Error(`reminders.${required} is missing`);
+}
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10304) throw new Error(`Expected schema 10304, got ${userVersion}`);
+if (userVersion !== 10307) throw new Error(`Expected schema 10307, got ${userVersion}`);
 
 for (const required of [
   "remote_status_id",
@@ -124,6 +137,22 @@ for (const required of [
 
 for (const required of ["idx_store_orders_owner_created", "idx_store_orders_owner_status_created"]) {
   if (!indexes("store_orders").has(required)) throw new Error(`${required} is missing`);
+}
+for (const required of [
+  "provider",
+  "order_id",
+  "order_number",
+  "status",
+  "auth_mode",
+  "received_at",
+  "raw_payload",
+  "processed_at",
+  "imported",
+]) {
+  if (!columns("store_webhook_events").has(required)) throw new Error(`store_webhook_events.${required} is missing`);
+}
+if (!indexes("store_webhook_events").has("idx_store_webhook_events_owner_received")) {
+  throw new Error("idx_store_webhook_events_owner_received is missing");
 }
 for (const required of ["idx_customers_owner_source_created", "idx_customers_owner_city_name"]) {
   if (!indexes("customers").has(required)) throw new Error(`${required} is missing`);
@@ -241,9 +270,34 @@ const orderSyncMigration = db.prepare("SELECT release FROM schema_migrations WHE
 if (orderSyncMigration?.release !== "1.3.3") throw new Error("Salla order-sync migration ledger was not updated.");
 const filterMetadataMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10304").get() as { release?: string };
 if (filterMetadataMigration?.release !== "1.3.4") throw new Error("Salla filter-metadata migration ledger was not updated.");
+const qaWebhookMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10305").get() as { release?: string };
+if (qaWebhookMigration?.release !== "1.3.5") throw new Error("Store webhook event migration ledger was not updated.");
+const invoiceFeeMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10306").get() as { release?: string };
+if (invoiceFeeMigration?.release !== "1.3.6") throw new Error("Invoice additional-fee migration ledger was not updated.");
+const integrationSafetyMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10307").get() as { release?: string };
+if (integrationSafetyMigration?.release !== "1.3.7") throw new Error("Integration safety migration ledger was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();
+const reminderRef = await adapter.collection("reminders").add({
+  createdBy: "owner",
+  installation_id: "installation-1",
+  customer_id: "customer-1",
+  customer_phone: "0500000000",
+  product_id: "product-1",
+  product_name: "Filter",
+  reminder_type: "first",
+  trigger: "schema-test",
+  status: "dry_run",
+  message: "simulation",
+  error: "dry-run",
+  whatsapp_jid: "966500000000@s.whatsapp.net",
+  whatsapp_message_id: null,
+});
+const reminderData = (await reminderRef.get()).data() as Record<string, unknown>;
+if (reminderData.reminder_type !== "first" || reminderData.product_id !== "product-1") {
+  throw new Error("Reminder delivery fields did not round-trip through SQLite.");
+}
 const inboxRef = await adapter.collection("salla_order_inbox").add({
   createdBy: "owner",
   merchantId: "merchant-1",

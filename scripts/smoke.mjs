@@ -1,17 +1,76 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getLocalTestToken } from "./local-test-auth.mjs";
 
 const root = new URL("../", import.meta.url);
 const rootPath = fileURLToPath(root);
-const baseUrl = process.env.APP_URL || "http://localhost:3000";
+const suppliedBaseUrl = String(process.env.APP_URL || "").trim();
+let baseUrl = suppliedBaseUrl;
 const smokeUid = process.env.SMOKE_TEST_UID || "smoke-test-owner";
 const results = [];
 let spawnedServer;
+let standaloneDirectory;
+let serverOutput = "";
 let localAuthHeaders = {};
+
+const sensitiveInheritedKeys = [
+  "ENV_FILE",
+  "NODE_OPTIONS",
+  "DOTENV_CONFIG_PATH",
+  "DOTENV_CONFIG_OVERRIDE",
+  "DOTENV_CONFIG_DOTENV_KEY",
+  "DOTENV_KEY",
+  "CRM_BEARER_TOKEN",
+  "SALLA_CLIENT_ID",
+  "SALLA_CLIENT_SECRET",
+  "SALLA_STATE_SECRET",
+  "SALLA_ACCESS_TOKEN",
+  "SALLA_REFRESH_TOKEN",
+  "SALLA_APP_WEBHOOK_SECRET",
+  "SALLA_REDIRECT_URI",
+  "STORE_WEBHOOK_SECRET",
+  "STORE_WEBHOOK_OWNER_UID",
+  "WHATSAPP_CLOUD_API_TOKEN",
+  "WHATSAPP_ACCESS_TOKEN",
+  "WHATSAPP_CLOUD_PHONE_NUMBER_ID",
+  "WHATSAPP_PHONE_NUMBER_ID",
+  "WHATSAPP_APP_SECRET",
+  "WHATSAPP_WEBHOOK_VERIFY_TOKEN",
+  "WHATSAPP_WEBHOOK_SECRET",
+  "WHATSAPP_CLOUD_TEMPLATE_NAME",
+  "WHATSAPP_TEMPLATE_NAME",
+  "TAP_SECRET_KEY",
+  "TAP_WEBHOOK_SECRET",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SUPABASE_ANON_KEY",
+  "FIREBASE_SERVICE_ACCOUNT_JSON",
+  "FIREBASE_SERVICE_ACCOUNT_PATH",
+  "FIREBASE_PROJECT_ID",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "VITE_FIREBASE_API_KEY",
+  "VITE_FIREBASE_AUTH_DOMAIN",
+  "VITE_FIREBASE_PROJECT_ID",
+  "VITE_FIREBASE_STORAGE_BUCKET",
+  "VITE_FIREBASE_MESSAGING_SENDER_ID",
+  "VITE_FIREBASE_APP_ID",
+  "INVOICE_SHARE_SECRET",
+  "JWT_SECRET",
+  "SESSION_SECRET",
+  "TELEPHONY_WEBHOOK_SECRET",
+  "UNIFONIC_APP_SID",
+  "UNIFONIC_API_KEY",
+  "GATEWAY_TOKEN",
+  "OUTBOUND_CONFIRM_CODE",
+  "OUTBOUND_TEST_PHONE_ALLOWLIST",
+];
 
 function pathUrl(path) {
   return new URL(path, root);
@@ -46,36 +105,81 @@ async function serverIsHealthy() {
   }
 }
 
-async function ensureServer() {
-  if (await serverIsHealthy()) return;
-
-  const command = process.platform === "win32" ? "cmd.exe" : "npm";
-  const args = process.platform === "win32" ? ["/d", "/s", "/c", "npm run dev"] : ["run", "dev"];
-  spawnedServer = spawn(command, args, {
-    cwd: rootPath,
-    env: {
-      ...process.env,
-      PORT: new URL(baseUrl).port || "3000",
-      NODE_ENV: "test",
-      DATA_PROVIDER: process.env.DATA_PROVIDER || "sqlite",
-      DB_PROVIDER: process.env.DB_PROVIDER || "sqlite",
-      ALLOW_LOCAL_AUTH: "true",
-      LOCAL_AUTH_TOKEN: process.env.LOCAL_AUTH_TOKEN || "smoke-test-only-secret-with-at-least-32-characters",
-      LOCAL_AUTH_SHARED_UID: smokeUid,
-      DISABLE_OUTBOUND: "true",
-      DISABLE_HMR: "true",
-    },
-    shell: false,
-    stdio: "ignore",
-    windowsHide: true,
+async function reserveLoopbackPort() {
+  const listener = net.createServer();
+  await new Promise((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolve);
   });
+  const address = listener.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+  if (!port) throw new Error("Could not reserve a loopback port for the isolated smoke server.");
+  return port;
+}
 
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    await delay(1000);
+async function ensureServer() {
+  if (suppliedBaseUrl) {
     if (await serverIsHealthy()) return;
+    throw new Error(`The explicitly supplied smoke server is not healthy at ${suppliedBaseUrl}.`);
   }
 
-  throw new Error(`Dev server did not become healthy at ${baseUrl}.`);
+  standaloneDirectory = mkdtempSync(path.join(os.tmpdir(), "breexe-smoke-"));
+  const port = await reserveLoopbackPort();
+  baseUrl = `http://127.0.0.1:${port}`;
+  const isolatedEnv = { ...process.env };
+  for (const key of sensitiveInheritedKeys) delete isolatedEnv[key];
+
+  spawnedServer = spawn(process.execPath, ["--import=tsx", "server.ts"], {
+    cwd: rootPath,
+    env: {
+      ...isolatedEnv,
+      ENV_FILE: path.join(standaloneDirectory, "intentionally-missing.env"),
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      APP_URL: baseUrl,
+      PUBLIC_APP_URL: baseUrl,
+      PUBLIC_BASE_URL: baseUrl,
+      APP_BASE_URL: baseUrl,
+      NODE_ENV: "test",
+      ENABLE_VITE_DEV_SERVER: "true",
+      DATA_PROVIDER: "sqlite",
+      DB_PROVIDER: "sqlite",
+      DB_PATH: path.join(standaloneDirectory, "smoke.db"),
+      SALLA_INTEGRATION_STORE_PATH: path.join(standaloneDirectory, "salla-integrations.json"),
+      WA_SESSION_DIR: path.join(standaloneDirectory, "wa-session"),
+      ALLOW_LOCAL_AUTH: "true",
+      LOCAL_AUTH_TOKEN: "smoke-test-only-secret-with-at-least-32-characters",
+      LOCAL_AUTH_SHARED_UID: smokeUid,
+      PUBLIC_LEADS_OWNER_UID: smokeUid,
+      OUTBOUND_MODE: "dry_run",
+      OFFICIAL_LAUNCH_APPROVED: "false",
+      DISABLE_OUTBOUND: "true",
+      DISABLE_HMR: "true",
+      DISABLE_VITE_ENV_FILES: "true",
+      ENABLE_DAILY_CRON: "false",
+      SALLA_SYNC_CRON_ENABLED: "false",
+      COMMUNICATION_WORKER_ENABLED: "false",
+      WHATSAPP_PROVIDER: "cloud_api",
+      SALLA_AUTH_MODE: "easy",
+      SALLA_APP_OWNER_UID: smokeUid,
+    },
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  spawnedServer.stdout.on("data", (chunk) => { serverOutput += chunk.toString(); });
+  spawnedServer.stderr.on("data", (chunk) => { serverOutput += chunk.toString(); });
+
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    await delay(250);
+    if (await serverIsHealthy()) return;
+    if (spawnedServer.exitCode !== null) {
+      throw new Error(`Isolated smoke server exited early.\n${serverOutput}`);
+    }
+  }
+
+  throw new Error(`Isolated smoke server did not become healthy at ${baseUrl}.\n${serverOutput}`);
 }
 
 async function check(name, fn) {
@@ -130,6 +234,28 @@ try {
     assert.equal(whatsapp.status, 401);
     assert.equal(reminders.status, 401);
     assert.equal(storeDiagnostics.status, 401);
+  });
+
+  await check("public lead intake remains outside auth with bot-safe handling", async () => {
+    const invalid = await timedFetch("/api/leads/public", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "x", phone: "123" }),
+    });
+    assert.equal(invalid.status, 400, "public lead validation must run before the Firebase auth guard");
+
+    const honeypot = await timedFetch("/api/leads/public", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "QA Lead",
+        phone: "+966551234567",
+        source: "landing",
+        website: "https://bot.example",
+      }),
+    });
+    assert.equal(honeypot.status, 202);
+    assert.deepEqual(await honeypot.json(), { success: true });
   });
 
   await check("local demo data covers full workflow", async () => {
@@ -233,8 +359,9 @@ try {
       "buildTechnicianBookingMessage",
     ], "technician notification API");
     assertIncludes(app, [
-      "shouldNotifyTechnician",
+      "createPerItemActionLock",
       "sendTechnicianNotice",
+      "تم حفظ الحجز دون إرسال",
       "إرسال الموعد للفني",
     ], "technician notification UI");
   });
@@ -408,7 +535,7 @@ try {
     const api = await readText("src/api.ts");
     const app = await readText("src/App.tsx");
     const page = await readText("src/pages/OdooCrm.tsx");
-    const roles = await readText("server/userManagement.ts");
+    const roles = await readText("shared/accessControl.ts");
 
     assertIncludes(server, ["registerOdooCrmRoutes"], "odoo route registration");
     assertIncludes(db, ["crm_deals", "crm_tasks", "crm_notes", "audit_logs"], "odoo sqlite schema");
@@ -578,5 +705,16 @@ try {
     console.log(`Smoke checks passed (${results.length}/${results.length}).`);
   }
 } finally {
-  if (spawnedServer) spawnedServer.kill();
+  if (spawnedServer) {
+    if (process.platform === "win32" && spawnedServer.pid) {
+      const result = spawnSync("taskkill.exe", ["/PID", String(spawnedServer.pid), "/T", "/F"], { stdio: "ignore" });
+      if (result.status !== 0 && spawnedServer.exitCode === null) spawnedServer.kill();
+    } else if (spawnedServer.exitCode === null) {
+      spawnedServer.kill("SIGTERM");
+    }
+    if (spawnedServer.exitCode === null) {
+      await Promise.race([new Promise((resolve) => spawnedServer.once("exit", resolve)), delay(3000)]);
+    }
+  }
+  if (standaloneDirectory) rmSync(standaloneDirectory, { recursive: true, force: true });
 }

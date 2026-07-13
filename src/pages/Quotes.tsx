@@ -501,8 +501,10 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
     }
     setSendingQuoteId(quote.id);
     try {
-      await api.sendQuoteWhatsApp(quote, quoteShareText(quote));
-      notify("تم إرسال عرض السعر عبر واتساب");
+      const response = await api.sendQuoteWhatsApp(quote, quoteShareText(quote));
+      const dryRun = Boolean((response as { dry_run?: boolean; result?: { dryRun?: boolean } }).dry_run
+        || (response as { result?: { dryRun?: boolean } }).result?.dryRun);
+      notify(dryRun ? "تمت محاكاة إرسال عرض السعر فقط؛ لم تُرسل رسالة للعميل" : "تم إرسال عرض السعر عبر واتساب");
     } catch (err) {
       notify(err instanceof Error ? err.message : "تعذر إرسال عرض السعر واتساب", false);
     } finally {
@@ -631,6 +633,18 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                 <button className="icon-btn" type="button" title="نسخ العرض" onClick={() => copyQuote(quote)}>
                   <Copy size={15} />
                 </button>
+                {quote.customer_phone && (
+                  <button
+                    className="icon-btn"
+                    type="button"
+                    title="إرسال عرض السعر عبر واتساب"
+                    aria-label="إرسال عرض السعر عبر واتساب"
+                    disabled={sendingQuoteId === quote.id}
+                    onClick={() => sendQuoteWhatsApp(quote)}
+                  >
+                    <MessageCircle size={15} />
+                  </button>
+                )}
                 <button className="icon-btn" type="button" title="تعديل" onClick={() => setEditing(quote)}>
                   <Edit3 size={15} />
                 </button>

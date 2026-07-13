@@ -74,6 +74,8 @@ type ReminderRunMode = "manual" | "scheduled" | "automatic";
 type ReminderResult = {
   success: boolean;
   skipped?: boolean;
+  dry_run?: boolean;
+  simulated?: boolean;
   installation_id?: string;
   reminder_id?: string;
   remind_count?: number;
@@ -86,6 +88,7 @@ type ReminderRunOptions = {
   uid?: string;
   mode?: ReminderRunMode;
   limit?: number;
+  outboundCode?: string;
 };
 
 type SchedulerState = {
@@ -325,6 +328,7 @@ export async function sendReminderForInstallation(
   uid: string,
   requestedType?: string,
   trigger: ReminderRunMode = "manual",
+  outboundCode?: string,
 ) {
   const whatsapp = whatsappService.getStatus();
   const blocker = hasGlobalBlocker(whatsapp);
@@ -354,7 +358,9 @@ export async function sendReminderForInstallation(
 
   let whatsAppResult: Awaited<ReturnType<typeof whatsappService.sendText>>;
   try {
-    whatsAppResult = await whatsappService.sendText(inst.customer_phone, message);
+    whatsAppResult = await whatsappService.sendText(inst.customer_phone, message, {
+      confirmationCode: outboundCode,
+    });
   } catch (error) {
     await recordFailedReminderAttempt(installationId, uid, inst, message, reminderType, error, trigger);
     throw httpError(502, error instanceof Error ? error.message : "تعذر إرسال واتساب.");
@@ -383,6 +389,8 @@ export async function sendReminderForInstallation(
     return {
       success: false,
       skipped: true,
+      dry_run: true,
+      simulated: true,
       reminder_id: reminderRef.id,
       installation_id: installationId,
       remind_count: Number(inst.remind_count || 0),
@@ -657,7 +665,13 @@ export async function runDueReminders(options: ReminderRunOptions = {}) {
       }
 
       try {
-        const sendResult = await sendReminderForInstallation(doc.id, inst.createdBy, effectiveStage, mode);
+        const sendResult = await sendReminderForInstallation(
+          doc.id,
+          inst.createdBy,
+          effectiveStage,
+          mode,
+          options.outboundCode,
+        );
         // Escalate only on a genuine send. Escalating after a dry-run/skipped
         // result re-appended an escalation_required history row on every run
         // (in dry-run mode the cycle never advances, so it repeated daily).
@@ -672,12 +686,15 @@ export async function runDueReminders(options: ReminderRunOptions = {}) {
       }
     }
 
+    const simulated = results.some((item) => item.dry_run === true || item.simulated === true);
     const runResult = {
       success: true,
       checked: snap.size,
       sent: results.filter((item) => item.success).length,
       failed: results.filter((item) => !item.success && !item.skipped).length,
       skipped: results.filter((item) => item.skipped).length,
+      dry_run: simulated,
+      simulated,
       blocked: false,
       whatsapp,
       results,

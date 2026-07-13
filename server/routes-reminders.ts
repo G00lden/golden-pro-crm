@@ -37,6 +37,7 @@ export function registerReminderRoutes(app: Express) {
         userReq.user.uid,
         req.body?.type,
         "manual",
+        req.body?.outboundCode,
       );
       res.json(result);
     }),
@@ -46,7 +47,11 @@ export function registerReminderRoutes(app: Express) {
     "/api/reminders/run-due",
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      res.json(await runDueReminders({ uid: userReq.user.uid, mode: req.body?.mode || "manual" }));
+      res.json(await runDueReminders({
+        uid: userReq.user.uid,
+        mode: req.body?.mode || "manual",
+        outboundCode: req.body?.outboundCode,
+      }));
     }),
   );
 }

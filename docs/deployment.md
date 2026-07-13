@@ -25,10 +25,10 @@ cp .env.production.example .env.production
 #    توليد سر: openssl rand -hex 24
 
 # 2) شغّل (يبني الصورة + يقلع)
-docker compose up -d --build
+docker compose --env-file .env.production up -d --build
 
 # 3) تابع السجل واطلب الـ QR من اللوحة لربط واتساب
-docker compose logs -f
+docker compose --env-file .env.production logs -f
 ```
 - البيانات وجلسة واتساب محفوظة على volumes (`crm-data`, `crm-wa`) وتبقى عبر إعادة التشغيل/النشر.
 - المنفذ: `3000:8080` (المضيف:الحاوية). ضع **reverse proxy + HTTPS** أمامها (انظر أدناه).

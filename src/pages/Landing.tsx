@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   Droplets,
   Snowflake,
@@ -12,6 +12,8 @@ import {
   Send,
 } from "lucide-react";
 import { captureUtm, trackEvent } from "../track";
+import { PublicContactLink } from "../components/PublicContactLink";
+import { submitPublicLead } from "../publicLead";
 
 /**
  * BreeXe Pro — public landing page.
@@ -23,8 +25,6 @@ import { captureUtm, trackEvent } from "../track";
  *   - Every CTA fires a tracked event via src/track.ts.
  */
 
-const WA_NUMBER = "966500000000"; // TODO: replace with real BreeXe WhatsApp Business number
-const CALL_NUMBER = "+966500000000"; // TODO: replace with real call number
 const WA_DEEPLINK_TEXT = "السلام عليكم، أبي أستفسر عن خدمات BreeXe Pro.";
 
 const services = [
@@ -43,12 +43,8 @@ const trustNumbers = [
   { value: "24/7", label: "دعم فني" },
 ];
 
-function waUrl(text = WA_DEEPLINK_TEXT): string {
-  return `https://wa.me/${WA_NUMBER}?text=${encodeURIComponent(text)}`;
-}
-
 export function LandingPage() {
-  const [form, setForm] = useState({ name: "", phone: "", service: "", message: "" });
+  const [form, setForm] = useState({ name: "", phone: "", service: "", message: "", website: "" });
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -72,34 +68,22 @@ export function LandingPage() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      // POST the lead — server route lives under the public surface so it
-      // doesn't require auth. Endpoint to be implemented in step 3.
-      const r = await fetch("/api/leads/public", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+      await submitPublicLead({
+        ...form,
+        source: "landing",
+        utm: captureUtm(),
       });
-      // We accept either a real success or a 404 (endpoint not built yet) —
-      // in both cases we still record the conversion locally so the marketer
-      // sees something is happening.
-      if (r.ok || r.status === 404) {
-        setSubmitted(true);
-        trackEvent({ name: "lead_submit", meta: { service: form.service || "unspecified" } });
-        setForm({ name: "", phone: "", service: "", message: "" });
-      } else {
-        const text = await r.text();
-        throw new Error(text || `HTTP ${r.status}`);
-      }
+      setSubmitted(true);
+      trackEvent({ name: "lead_submit", meta: { service: form.service || "unspecified" } });
+      setForm({ name: "", phone: "", service: "", message: "", website: "" });
     } catch (err) {
-      setSubmitError("عذراً، تعذر إرسال طلبك الآن. جرّب التواصل عبر واتساب أو الاتصال المباشر.");
+      setSubmitError(err instanceof Error ? err.message : "عذراً، تعذر إرسال طلبك الآن. حاول مرة أخرى.");
       // eslint-disable-next-line no-console
       console.error("[landing] lead submit failed", err);
     } finally {
       setSubmitting(false);
     }
   };
-
-  const waHref = useMemo(() => waUrl(), []);
 
   return (
     <div className="landing-page" dir="rtl" lang="ar">
@@ -113,16 +97,15 @@ export function LandingPage() {
           <a href="#about">عن BreeXe</a>
           <a href="#contact">تواصل</a>
         </nav>
-        <a
+        <PublicContactLink
+          channel="whatsapp"
+          whatsappText={WA_DEEPLINK_TEXT}
           className="lp-cta-mini"
-          href={waHref}
-          target="_blank"
-          rel="noopener noreferrer"
           onClick={() => onWaClick("header")}
         >
           <MessageCircle size={16} aria-hidden="true" />
           <span>واتساب</span>
-        </a>
+        </PublicContactLink>
       </header>
 
       {/* === Hero === */}
@@ -136,24 +119,23 @@ export function LandingPage() {
             وضمان على كل عملية.
           </p>
           <div className="lp-cta-row">
-            <a
+            <PublicContactLink
+              channel="whatsapp"
+              whatsappText={WA_DEEPLINK_TEXT}
               className="lp-btn primary"
-              href={waHref}
-              target="_blank"
-              rel="noopener noreferrer"
               onClick={() => onWaClick("hero")}
             >
               <MessageCircle size={18} aria-hidden="true" />
               <span>تواصل عبر واتساب</span>
-            </a>
-            <a
+            </PublicContactLink>
+            <PublicContactLink
+              channel="call"
               className="lp-btn ghost"
-              href={`tel:${CALL_NUMBER}`}
               onClick={() => onCallClick("hero")}
             >
               <Phone size={18} aria-hidden="true" />
               <span>اتصل بنا الآن</span>
-            </a>
+            </PublicContactLink>
           </div>
           <div className="lp-hero-trust">
             <CheckCircle2 size={14} /><span>ضمان على التركيب</span>
@@ -236,19 +218,32 @@ export function LandingPage() {
             <CheckCircle2 size={28} aria-hidden="true" />
             <h3>شكراً لتواصلك معنا</h3>
             <p>سنرد عليك في أقرب وقت. لو حاب تستعجل، تواصل عبر واتساب مباشرة.</p>
-            <a
+            <PublicContactLink
+              channel="whatsapp"
+              whatsappText={WA_DEEPLINK_TEXT}
               className="lp-btn primary"
-              href={waHref}
-              target="_blank"
-              rel="noopener noreferrer"
               onClick={() => onWaClick("post-submit")}
             >
               <MessageCircle size={18} aria-hidden="true" />
               <span>تابع عبر واتساب</span>
-            </a>
+            </PublicContactLink>
           </div>
         ) : (
           <form className="lp-form" onSubmit={onSubmit}>
+            <label
+              style={{ position: "absolute", insetInlineStart: "-10000px", width: 1, height: 1, overflow: "hidden" }}
+            >
+              <span>Website</span>
+              <input
+                type="text"
+                name="website"
+                tabIndex={-1}
+                autoComplete="off"
+                aria-label="اترك هذا الحقل فارغاً"
+                value={form.website}
+                onChange={(e) => setForm({ ...form, website: e.target.value })}
+              />
+            </label>
             <label>
               <span>الاسم</span>
               <input
@@ -309,24 +304,23 @@ export function LandingPage() {
 
       {/* === Sticky mobile CTA === */}
       <div className="lp-sticky-cta" aria-hidden="false">
-        <a
+        <PublicContactLink
+          channel="whatsapp"
+          whatsappText={WA_DEEPLINK_TEXT}
           className="lp-sticky-btn primary"
-          href={waHref}
-          target="_blank"
-          rel="noopener noreferrer"
           onClick={() => onWaClick("sticky")}
         >
           <MessageCircle size={18} aria-hidden="true" />
           <span>واتساب</span>
-        </a>
-        <a
+        </PublicContactLink>
+        <PublicContactLink
+          channel="call"
           className="lp-sticky-btn ghost"
-          href={`tel:${CALL_NUMBER}`}
           onClick={() => onCallClick("sticky")}
         >
           <Phone size={18} aria-hidden="true" />
           <span>اتصل</span>
-        </a>
+        </PublicContactLink>
       </div>
 
       {/* === Footer === */}
@@ -340,11 +334,11 @@ export function LandingPage() {
             <h4>تواصل</h4>
             <ul>
               <li>
-                <a href={waHref} target="_blank" rel="noopener noreferrer" onClick={() => onWaClick("footer")}>
+                <PublicContactLink channel="whatsapp" whatsappText={WA_DEEPLINK_TEXT} onClick={() => onWaClick("footer")}>
                   واتساب
-                </a>
+                </PublicContactLink>
               </li>
-              <li><a href={`tel:${CALL_NUMBER}`} onClick={() => onCallClick("footer")}>اتصال مباشر</a></li>
+              <li><PublicContactLink channel="call" onClick={() => onCallClick("footer")}>اتصال مباشر</PublicContactLink></li>
             </ul>
           </div>
           <div>

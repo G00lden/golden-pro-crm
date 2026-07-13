@@ -106,7 +106,12 @@ export function registerMaintenanceRoutes(app: Express) {
     "/api/bookings/:id/notify-technician",
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      res.json(await notifyTechnicianForBooking(req.params.id, userReq.user.uid, req.body?.trigger || "manual"));
+      res.json(await notifyTechnicianForBooking(
+        req.params.id,
+        userReq.user.uid,
+        req.body?.trigger || "manual",
+        req.body?.outboundCode,
+      ));
     }),
   );
 

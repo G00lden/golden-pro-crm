@@ -7,6 +7,7 @@ import { registerLocalDevAuthRoute, requireFirebaseUser } from "./server/auth";
 import { registerCrmApiRoutes } from "./server/crmApi";
 import { registerUserAdminRoutes } from "./server/userManagement";
 import { adminDb } from "./server/firebaseAdmin";
+import db from "./server/db";
 import { runWithOutboundCode } from "./server/outboundSafety";
 import { todayInTimeZone } from "./server/reminderEngine";
 import { runDueReminders } from "./server/reminderEngine";
@@ -33,6 +34,13 @@ import {
   registerGatewayWebhookRoutes,
 } from "./server/routes-gateway";
 import { registerPaymentRoutes, registerPaymentWebhookRoute } from "./server/routes-payment";
+import {
+  publicLeadRateLimitOptions,
+  registerPublicLeadRoutes,
+  resolvePublicLeadOwnerUid,
+} from "./server/routes-public-leads";
+import { registerPublicLeadInboxRoutes } from "./server/routes-public-lead-inbox";
+import { registerTrackingRoutes, trackingEventRateLimitOptions } from "./server/routes-tracking";
 import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
 import { startCommunicationWorker } from "./server/communicationWorker";
 import { whatsappService } from "./server/whatsapp";
@@ -41,6 +49,9 @@ import { getReminderSchedulerState } from "./server/reminderEngine";
 import { outboundSafetyStatus } from "./server/outboundSafety";
 import { logError, logEvent } from "./server/logger";
 import { getLocalAuthPolicy } from "./server/localAuthPolicy";
+import { requireNonProductionDemoData } from "./server/demoDataGuard";
+import { requireCapability } from "./server/capabilityGuard";
+import { requestClientIp } from "./server/clientIp";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
@@ -62,22 +73,13 @@ function loggablePath(req: Request) {
   return q >= 0 ? url.slice(0, q) : url;
 }
 
-// Forwarded IP headers are only trustworthy when a proxy we control sets them.
-// Behind the Cloudflare Tunnel (the default deployment) cf-connecting-ip is the
-// real client IP, so this defaults to on. Set TRUST_PROXY_HEADERS=false when the
-// origin is reachable directly (no fronting proxy) — otherwise a caller can spoof
-// these headers to dodge the rate limit or forge a per-IP identity.
-const TRUST_PROXY_HEADERS = process.env.TRUST_PROXY_HEADERS !== "false";
+// This is deliberately opt-in. The bundled Caddy config overwrites one private
+// header with its validated `{client_ip}` value. Public CF/XFF/X-Real-IP headers
+// are never read here because a direct-origin caller can forge them.
+const TRUST_PROXY_HEADERS = process.env.TRUST_PROXY_HEADERS === "true";
 
 function clientIp(req: Request) {
-  if (TRUST_PROXY_HEADERS) {
-    const forwarded =
-      req.get("cf-connecting-ip") ||
-      req.get("x-real-ip") ||
-      req.get("x-forwarded-for")?.split(",")[0];
-    if (forwarded) return String(forwarded).trim();
-  }
-  return String(req.socket.remoteAddress || "unknown").trim();
+  return requestClientIp(req, TRUST_PROXY_HEADERS);
 }
 
 function createRateLimiter(options: { windowMs: number; max: number; name: string }) {
@@ -197,6 +199,8 @@ async function startServer() {
     max: Number(process.env.WEBHOOK_RATE_LIMIT_MAX || 120),
     name: "webhook",
   });
+  const publicLeadRateLimit = createRateLimiter(publicLeadRateLimitOptions());
+  const trackingEventRateLimit = createRateLimiter(trackingEventRateLimitOptions());
 
   app.disable("x-powered-by");
   app.use(securityHeaders);
@@ -268,6 +272,15 @@ async function startServer() {
   registerHealthRoutes(app);
   registerLocalDevAuthRoute(app);
 
+  // Landing-page submissions are intentionally public and have a stricter,
+  // dedicated limiter. Register this before the global /api Firebase guard;
+  // storage still assigns the configured CRM owner partition server-side.
+  registerPublicLeadRoutes(app, { database: db, rateLimit: publicLeadRateLimit });
+
+  // Landing analytics is public by necessity, but accepts only a privacy-safe
+  // field allowlist and is a documented no-op until a consent-aware adapter is added.
+  registerTrackingRoutes(app, { rateLimit: trackingEventRateLimit });
+
   registerStoreRoutes(app, { webhookRateLimit });
 
   // WhatsApp webhook callbacks + admin endpoints
@@ -337,12 +350,21 @@ async function startServer() {
   // Authenticated routes (require Firebase user)
   app.use("/api", apiRateLimit, requireFirebaseUser);
 
+  // Mutating setup actions use the same role matrix as the UI. Demo fixtures
+  // are never accepted in production, including for administrators.
+  app.use("/api/demo-data", requireCapability("demo.seed"), requireNonProductionDemoData);
+  app.use("/api/operations/prepare-daily", requireCapability("operations.prepare"));
+
   registerUserAdminRoutes(app);
   registerCrmApiRoutes(app);
   registerWhatsAppRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
   registerTelephonyRoutes(app, { webhookRateLimit, telephonyOwnerUid: __whatsappOwnerUid });
   registerGatewayRoutes(app, { webhookRateLimit, gatewayOwnerUid: __whatsappOwnerUid });
   registerOdooCrmRoutes(app);
+  registerPublicLeadInboxRoutes(app, {
+    database: db,
+    ownerUid: () => resolvePublicLeadOwnerUid(),
+  });
 
   registerSallaRoutes(app);
 
@@ -527,7 +549,13 @@ async function startServer() {
   if (developmentServer) {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: ["localhost", "127.0.0.1"] },
+      ...(process.env.DISABLE_VITE_ENV_FILES === "true" ? { envFile: false as const } : {}),
+      server: {
+        middlewareMode: true,
+        allowedHosts: ["localhost", "127.0.0.1"],
+        hmr: process.env.DISABLE_HMR !== "true",
+        ...(process.env.DISABLE_HMR === "true" ? { ws: false as const } : {}),
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);

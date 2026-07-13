@@ -83,7 +83,12 @@ export function buildTechnicianBookingMessage(booking: Booking, technician: Tech
   ].filter(Boolean).join("\n");
 }
 
-export async function notifyTechnicianForBooking(bookingId: string, uid: string, trigger?: string) {
+export async function notifyTechnicianForBooking(
+  bookingId: string,
+  uid: string,
+  trigger?: string,
+  outboundCode?: string,
+) {
   const bookingRef = adminDb.collection("bookings").doc(bookingId);
   const bookingSnap = await bookingRef.get();
   if (!bookingSnap.exists) throw httpError(404, "الحجز غير موجود.");
@@ -105,7 +110,9 @@ export async function notifyTechnicianForBooking(bookingId: string, uid: string,
   const now = new Date().toISOString();
 
   try {
-    const result = await whatsappService.sendText(technician.phone, message);
+    const result = await whatsappService.sendText(technician.phone, message, {
+      confirmationCode: outboundCode,
+    });
     const provider = "provider" in result ? result.provider : whatsappService.getStatus().provider;
     const dryRun = isDryRunSendResult(result);
     await adminDb.collection("technician_notifications").add({
@@ -188,6 +195,7 @@ export async function sendTechnicianPreAlerts() {
     .all(todayStr, tomorrowStr) as Array<Record<string, unknown>>;
 
   const dispatched: Array<{ booking_id: string; technician_id: string; due_at: string }> = [];
+  let simulated = 0;
 
   for (const row of rows) {
     const date = String(row.date || "");
@@ -198,7 +206,16 @@ export async function sendTechnicianPreAlerts() {
     if (due.getTime() > upperBound.getTime()) continue; // outside the window
 
     try {
-      await notifyTechnicianForBooking(String(row.id), String(row.owner_uid || row.createdBy || "local-dev-owner"), "pre_alert");
+      const result = await notifyTechnicianForBooking(
+        String(row.id),
+        String(row.owner_uid || row.createdBy || "local-dev-owner"),
+        "pre_alert",
+      );
+      if (result.dry_run) {
+        simulated += 1;
+        continue;
+      }
+      if (!result.success) continue;
       dbMod.prepare("UPDATE bookings SET technician_reminded_at = ?, updated_at = ? WHERE id = ?").run(
         new Date().toISOString(),
         new Date().toISOString(),
@@ -213,5 +230,5 @@ export async function sendTechnicianPreAlerts() {
     }
   }
 
-  return { checked: rows.length, dispatched: dispatched.length, items: dispatched };
+  return { checked: rows.length, dispatched: dispatched.length, simulated, items: dispatched };
 }

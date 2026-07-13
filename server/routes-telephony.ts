@@ -44,6 +44,7 @@ import {
   telephonyCallsQuerySchema,
 } from "./validation";
 import { logError } from "./logger";
+import { requireNonProductionDemoData } from "./demoDataGuard";
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -272,6 +273,9 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
   app.post(
     "/api/telephony/test-missed",
     requireAdmin,
+    // This QA action records a synthetic call and invokes the same job pipeline
+    // as a real missed call. Never let it enqueue production communications.
+    requireNonProductionDemoData,
     validate(telephonyTestMissedSchema),
     asyncRoute(async (req, res) => {
       const ownerUid = owner();

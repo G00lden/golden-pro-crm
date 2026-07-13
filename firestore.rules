@@ -45,6 +45,11 @@ service cloud.firestore {
           && request.resource.data[field] <= max);
     }
 
+    function optionalBoolean(field) {
+      return !(field in request.resource.data)
+        || request.resource.data[field] is bool;
+    }
+
     function isoDate(field) {
       return request.resource.data[field] is string
         && request.resource.data[field].matches("^\\d{4}-\\d{2}-\\d{2}$");
@@ -78,7 +83,11 @@ service cloud.firestore {
     }
 
     function isProduct() {
-      return hasOnly(['name', 'interval_months', 'category', 'sku', 'remind_text', 'source', 'product_type', 'createdAt', 'updatedAt', 'createdBy'])
+      return hasOnly([
+          'name', 'interval_months', 'category', 'sku', 'remind_text',
+          'source', 'product_type', 'catalog_visible', 'is_available',
+          'store_status', 'createdAt', 'updatedAt', 'createdBy'
+        ])
         && nonEmptyString('name', 80)
         && request.resource.data.interval_months is number
         && request.resource.data.interval_months >= 1
@@ -88,6 +97,9 @@ service cloud.firestore {
         && optionalString('remind_text', 800)
         && optionalString('source', 20)
         && optionalString('product_type', 40)
+        && optionalBoolean('catalog_visible')
+        && optionalBoolean('is_available')
+        && optionalString('store_status', 40)
         && optionalIsoDateTime('createdAt')
         && optionalIsoDateTime('updatedAt')
         && ownsIncoming();
@@ -195,7 +207,10 @@ service cloud.firestore {
       allow read: if ownsExisting();
       allow create: if signedIn() && isProduct();
       allow update: if ownsExisting() && keepsOwner() && isProduct();
-      allow delete: if ownsExisting();
+      // Product identities are permanent. Manual deletion is an owner-scoped
+      // update to catalog_visible/is_available/store_status, while merged
+      // identities remain tombstones for stale references.
+      allow delete: if false;
     }
 
     match /installations/{id} {

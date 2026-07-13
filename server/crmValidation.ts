@@ -195,6 +195,7 @@ const invoiceShape = {
   discount_mode: z.enum(["fixed", "percent"]).optional(),
   discount_value: money.optional(),
   vat_percent: z.coerce.number().finite().min(0).max(100).optional(),
+  additional_fee: money.optional(),
   currency: z.string().trim().min(3).max(8).optional(),
   items: z.array(invoiceItemSchema).min(1).max(200),
   notes: longText.optional(),

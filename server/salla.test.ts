@@ -27,7 +27,11 @@ const {
   syncSallaOrdersForUser,
 } = sallaModule;
 const { adminDb } = await import("./firebaseAdmin");
-const { getStoreOrderDocId, projectStoreOrderForUser } = await import("./storeWebhook");
+const {
+  __storeWebhookTestables,
+  getStoreOrderDocId,
+  projectStoreOrderForUser,
+} = await import("./storeWebhook");
 const { subscribeStoreOrderChanges } = await import("./storeOrderRealtime");
 const originalFetch = globalThis.fetch;
 const baselineSallaEnv = Object.fromEntries([
@@ -65,6 +69,7 @@ beforeEach(async () => {
   }
   globalThis.fetch = originalFetch;
   salla.resetLocks();
+  __storeWebhookTestables.resetProductCatalogIndexCache();
   await rm(storePath, { force: true });
 });
 
@@ -223,6 +228,160 @@ test("rejects early empty, capped, and duplicate order snapshots as incomplete",
     })),
     /duplicate remote order 30/i,
   );
+});
+
+test("Salla order mapping preserves the remote product id separately from the line id", () => {
+  const mapped = salla.mapSallaOrder({
+    id: "remote-order-product-id",
+    reference_id: "REF-PRODUCT-ID",
+    created_at: "2026-07-13T00:00:00.000Z",
+    customer: { name: "Catalog Customer", mobile: "0500000101" },
+    items: [{
+      id: "line-101",
+      sku: "SALE-REMOTE-ID",
+      quantity: 1,
+      product: { id: "product-901", name: "Remote product" },
+    }],
+  });
+
+  assert.ok(mapped);
+  assert.equal(mapped.items[0].remoteItemId, "line-101");
+  assert.equal(mapped.items[0].remoteProductId, "product-901");
+});
+
+test("catalog matching ignores archived exact rows and loads one index for many order items", async () => {
+  const uid = "owner-catalog-index";
+  await adminDb.collection("products").doc("product-archived").set({
+    createdBy: uid,
+    name: "Archived exact product",
+    sku: "REUSED-VARIANT",
+    source: "salla",
+    store_product_id: "remote-archived",
+    catalog_visible: false,
+    store_status: "archived",
+  });
+  await adminDb.collection("products").doc("product-current").set({
+    createdBy: uid,
+    name: "Current product",
+    sku: "CURRENT-PARENT",
+    source: "salla",
+    store_product_id: "remote-current",
+    catalog_visible: true,
+    variants: [{ id: "variant-current", sku: "REUSED-VARIANT" }],
+  });
+
+  const items = Array.from({ length: 24 }, (_, index) => ({
+    name: `Variant item ${index + 1}`,
+    sku: "REUSED-VARIANT",
+    remoteItemId: `line-index-${index + 1}`,
+    // Half the rows prove remote id wins first; the other half prove an
+    // archived exact SKU cannot beat the one visible variant parent.
+    remoteProductId: index % 2 === 0 ? "remote-current" : null,
+    quantity: 1,
+    maintenanceMonths: 3,
+    orderType: "sale_only" as const,
+    tags: [],
+  }));
+
+  const result = await projectStoreOrderForUser(uid, {
+    provider: "salla",
+    eventType: "salla.api.sync",
+    eventId: "catalog-index-event",
+    orderId: "catalog-index-order",
+    orderNumber: "CATALOG-INDEX-1",
+    status: "new",
+    customerName: "Catalog Customer",
+    customerPhone: "966500000102",
+    customerCity: "Riyadh",
+    orderDate: "2026-07-13",
+    items,
+  });
+
+  assert.equal(result.items.length, items.length);
+  assert.ok(result.items.every((item) => item.product_id === "product-current"));
+  assert.equal(result.items[0].remote_product_id, "remote-current");
+  assert.equal(__storeWebhookTestables.productCatalogIndexLoadCount(), 1);
+  assert.equal((await adminDb.collection("products").doc("product-archived").get()).exists, true);
+});
+
+test("a remote product id reuses its archived identity and never falls through to a newer product with the same SKU", async () => {
+  const uid = "owner-catalog-reused-sku";
+  const archivedId = "product-reused-sku-archived";
+  const currentId = "product-reused-sku-current";
+
+  await adminDb.collection("products").doc(archivedId).set({
+    createdBy: uid,
+    name: "Original archived product",
+    sku: "REUSED-EXACT-SKU",
+    source: "salla",
+    store_product_id: "remote-old",
+    catalog_visible: false,
+    store_status: "archived",
+  });
+  await adminDb.collection("products").doc(currentId).set({
+    createdBy: uid,
+    name: "New product reusing the SKU",
+    sku: "REUSED-EXACT-SKU",
+    source: "salla",
+    store_product_id: "remote-new",
+    catalog_visible: true,
+    store_status: "sale",
+  });
+
+  const result = await projectStoreOrderForUser(uid, {
+    provider: "salla",
+    eventType: "salla.api.sync",
+    eventId: "reused-sku-event",
+    orderId: "reused-sku-order",
+    orderNumber: "REUSED-SKU-1",
+    status: "new",
+    customerName: "Reused SKU Customer",
+    customerPhone: "966500000103",
+    customerCity: "Riyadh",
+    orderDate: "2026-07-13",
+    items: [
+      {
+        name: "Original historical line",
+        sku: "REUSED-EXACT-SKU",
+        remoteProductId: "remote-old",
+        quantity: 1,
+        maintenanceMonths: 3,
+        orderType: "sale_only",
+        tags: [],
+      },
+      {
+        name: "Unknown historical identity",
+        sku: "REUSED-EXACT-SKU",
+        remoteProductId: "remote-missing",
+        quantity: 1,
+        maintenanceMonths: 3,
+        orderType: "sale_only",
+        tags: [],
+      },
+      {
+        name: "SKU-only current line",
+        sku: "REUSED-EXACT-SKU",
+        remoteProductId: null,
+        quantity: 1,
+        maintenanceMonths: 3,
+        orderType: "sale_only",
+        tags: [],
+      },
+    ],
+  });
+
+  assert.equal(result.items[0].product_id, archivedId);
+  assert.equal(result.items[2].product_id, currentId);
+  assert.notEqual(result.items[1].product_id, archivedId);
+  assert.notEqual(result.items[1].product_id, currentId);
+
+  const dedicatedHistorical = await adminDb.collection("products").doc(String(result.items[1].product_id)).get();
+  assert.equal(dedicatedHistorical.exists, true);
+  assert.equal(dedicatedHistorical.data()?.store_product_id, "remote-missing");
+  assert.ok([false, 0].includes(dedicatedHistorical.data()?.catalog_visible));
+  assert.equal(dedicatedHistorical.data()?.store_status, "historical");
+  assert.ok([false, 0].includes((await adminDb.collection("products").doc(archivedId).get()).data()?.catalog_visible));
+  assert.ok([true, 1].includes((await adminDb.collection("products").doc(currentId).get()).data()?.catalog_visible));
 });
 
 test("historical projection preserves local workflow state and creates no operational records", async () => {

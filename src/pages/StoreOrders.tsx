@@ -176,11 +176,13 @@ export default function StoreOrdersPage({
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState("");
+  const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(() => new Set());
   const seenOrderIdsRef = useRef<Set<string>>(new Set());
   const realtimeCreatedIdsRef = useRef<Set<string>>(new Set());
   const refreshRequestSequenceRef = useRef(0);
   const bootstrappedRef = useRef(false);
   const firstFilterControlRef = useRef<HTMLSelectElement | null>(null);
+  const selectPageCheckboxRef = useRef<HTMLInputElement | null>(null);
   const filter = urlFilters.tab;
   const page = Number(urlFilters.page) || 1;
   const pageSize = Number(urlFilters.page_size) || 50;
@@ -411,7 +413,7 @@ export default function StoreOrdersPage({
   }, [autoRefresh, refreshOrders]);
 
   const pageData = orders.data;
-  const allOrders = pageData?.data || [];
+  const allOrders = useMemo(() => pageData?.data || [], [pageData?.data]);
   const facets = pageData?.facets;
   const activeSallaStatuses = useMemo(
     () => (sallaStatuses.data || []).filter((status) => status.is_active !== false && status.slug),
@@ -439,6 +441,12 @@ export default function StoreOrdersPage({
   }, [activeSallaStatuses, facets?.statuses]);
   const numberFormatter = useMemo(() => new Intl.NumberFormat("ar-SA"), []);
   const formatCount = useCallback((value: number) => numberFormatter.format(value), [numberFormatter]);
+  const selectedOrders = useMemo(
+    () => allOrders.filter((order) => selectedOrderIds.has(order.id)),
+    [allOrders, selectedOrderIds],
+  );
+  const allPageOrdersSelected = allOrders.length > 0 && selectedOrders.length === allOrders.length;
+  const somePageOrdersSelected = selectedOrders.length > 0 && !allPageOrdersSelected;
   const activeOrderFilterCount = useMemo(() => (
     (Object.keys(STORE_ORDER_URL_DEFAULTS) as Array<keyof StoreOrderUrlFilters>)
       .filter((key) => !["q", "tab", "page"].includes(key))
@@ -448,6 +456,24 @@ export default function StoreOrdersPage({
   useEffect(() => {
     if (activeOrderFilterCount > 0) setShowFilters(true);
   }, [activeOrderFilterCount]);
+
+  useEffect(() => {
+    setSelectedOrderIds(new Set());
+  }, [orderQueryKey]);
+
+  useEffect(() => {
+    const visibleIds = new Set(allOrders.map((order) => order.id));
+    setSelectedOrderIds((current) => {
+      const next = new Set([...current].filter((id) => visibleIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [allOrders]);
+
+  useEffect(() => {
+    if (selectPageCheckboxRef.current) {
+      selectPageCheckboxRef.current.indeterminate = somePageOrdersSelected;
+    }
+  }, [somePageOrdersSelected]);
 
   useEffect(() => {
     if (!pageData?.page || pageData.page === page) return;
@@ -562,6 +588,70 @@ export default function StoreOrdersPage({
     });
   };
 
+  const toggleOrderSelection = (orderId: string, checked: boolean) => {
+    setSelectedOrderIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(orderId);
+      else next.delete(orderId);
+      return next;
+    });
+  };
+
+  const togglePageSelection = (checked: boolean) => {
+    setSelectedOrderIds(checked ? new Set(allOrders.map((order) => order.id)) : new Set());
+  };
+
+  const openBulkSallaStatusForm = () => {
+    if (!selectedOrders.length) {
+      notify("حدد طلبًا واحدًا على الأقل قبل تنفيذ الإجراء الجماعي.", false);
+      return;
+    }
+    if (sallaStatuses.loading) {
+      notify("جاري تحميل حالات الطلب من سلة…");
+      return;
+    }
+    if (sallaStatuses.error) {
+      notify("تعذر تحميل حالات سلة. أعد المحاولة قبل تحديث الطلبات المحددة.", false);
+      void sallaStatuses.refresh();
+      return;
+    }
+    if (!activeSallaStatuses.length) {
+      notify("لم ترجع سلة أي حالات نشطة يمكن تطبيقها على الطلبات المحددة.", false);
+      return;
+    }
+
+    const orderSnapshot = [...selectedOrders];
+    setModal({
+      title: `تحديث حالة ${formatCount(orderSnapshot.length)} طلب في سلة`,
+      wide: true,
+      content: (
+        <BulkStoreOrderStatusForm
+          orders={orderSnapshot}
+          statuses={activeSallaStatuses}
+          onCancel={() => setModal(null)}
+          onError={(message) => notify(message, false)}
+          onCompleted={async ({ succeededIds, unchangedIds, failedIds, statusName }) => {
+            const completedIds = new Set([...succeededIds, ...unchangedIds]);
+            setSelectedOrderIds((current) => {
+              const next = new Set(current);
+              for (const id of completedIds) next.delete(id);
+              return next;
+            });
+
+            const details = [
+              succeededIds.length ? `${formatCount(succeededIds.length)} تم تحديثها` : "",
+              unchangedIds.length ? `${formatCount(unchangedIds.length)} كانت بالحالة نفسها ولم تُرسل مجددًا` : "",
+              failedIds.length ? `${formatCount(failedIds.length)} فشلت وبقيت محددة لإعادة المحاولة` : "",
+            ].filter(Boolean).join("، ");
+            notify(`نتيجة تحديث الحالة إلى «${statusName}»: ${details}.`, failedIds.length === 0);
+            setModal(null);
+            await Promise.all([orders.refresh(), refreshStats()]);
+          }}
+        />
+      ),
+    });
+  };
+
   return (
     <>
       <PageHeader
@@ -625,7 +715,7 @@ export default function StoreOrdersPage({
             <Filter size={14} /> فلاتر متقدمة{activeOrderFilterCount ? ` (${formatCount(activeOrderFilterCount)})` : ""}
           </button>
           <label className="toggle-control">
-            <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
+            <input type="checkbox" name="store_order_auto_refresh" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
             <span>تحقق احتياطي كل 60 ثانية</span>
           </label>
           <span className="sync-meta" aria-live="polite">{lastUpdated ? `آخر تحديث: ${fmtDate(lastUpdated)}` : "بانتظار أول تحديث"}</span>
@@ -807,22 +897,55 @@ export default function StoreOrdersPage({
           ))}
         </div>
 
+        {selectedOrders.length > 0 && (
+          <div className="form-actions store-bulk-actions" role="region" aria-label="إجراءات الطلبات المحددة">
+            <span className="sync-meta" aria-live="polite">
+              تم تحديد {formatCount(selectedOrders.length)} من {formatCount(allOrders.length)} طلب في هذه الصفحة
+            </span>
+            <Button
+              tone="muted"
+              disabled={orders.loading || sallaStatuses.loading}
+              onClick={openBulkSallaStatusForm}
+            >
+              <RefreshCcw size={16} aria-hidden="true" /> تحديث حالة سلة للمحدد
+            </Button>
+            <Button tone="muted" onClick={() => setSelectedOrderIds(new Set())}>إلغاء التحديد</Button>
+          </div>
+        )}
+
         {orders.loading ? <Loading /> : orders.error ? <ErrorBlock message={orders.error} retry={() => refreshOrders()} /> : (
-          <div className="orders-table-wrap">
+          <div
+            className="orders-table-wrap"
+            role="region"
+            aria-label="جدول طلبات المتجر؛ يمكن تمريره أفقيًا على الشاشات الصغيرة"
+            tabIndex={0}
+          >
             <table className="orders-table">
               <thead>
                 <tr>
-                  <th aria-label="تحديد"></th>
-                  <th>رقم الطلب</th>
-                  <th>تاريخ الطلب</th>
-                  <th>العميل</th>
-                  <th>المدينة</th>
-                  <th>المنتجات</th>
-                  <th>القيمة</th>
-                  <th>حالة سلة</th>
-                  <th>نوع الرحلة</th>
-                  <th>الموعد</th>
-                  <th>إجراء</th>
+                  <th scope="col">
+                    <label className="toggle-control">
+                      <input
+                        ref={selectPageCheckboxRef}
+                        type="checkbox"
+                        name="select_store_orders_page"
+                        checked={allPageOrdersSelected}
+                        disabled={!allOrders.length}
+                        onChange={(event) => togglePageSelection(event.target.checked)}
+                      />
+                      <span>تحديد الصفحة</span>
+                    </label>
+                  </th>
+                  <th scope="col">رقم الطلب</th>
+                  <th scope="col">تاريخ الطلب</th>
+                  <th scope="col">العميل</th>
+                  <th scope="col">المدينة</th>
+                  <th scope="col">المنتجات</th>
+                  <th scope="col">القيمة</th>
+                  <th scope="col">حالة سلة</th>
+                  <th scope="col">نوع الرحلة</th>
+                  <th scope="col">الموعد</th>
+                  <th scope="col">إجراء</th>
                 </tr>
               </thead>
               <tbody>
@@ -832,7 +955,18 @@ export default function StoreOrdersPage({
                   const total = orderTotal(order);
                   return (
                     <tr key={order.id} className={needsReview ? "row-needs-review" : ""}>
-                      <td><input type="checkbox" aria-label={`تحديد الطلب ${order.order_number || order.order_id}`} /></td>
+                      <td>
+                        <label className="toggle-control">
+                          <input
+                            type="checkbox"
+                            name="selected_store_order"
+                            value={order.id}
+                            checked={selectedOrderIds.has(order.id)}
+                            onChange={(event) => toggleOrderSelection(order.id, event.target.checked)}
+                          />
+                          <span className="sr-only">تحديد الطلب {order.order_number || order.order_id}</span>
+                        </label>
+                      </td>
                       <td>
                         <div className="order-id-cell">
                           <strong>{order.order_number || order.order_id}</strong>
@@ -1549,6 +1683,194 @@ function StoreOrderEditForm({
   );
 }
 
+type BulkStoreOrderStatusResult = {
+  succeededIds: string[];
+  unchangedIds: string[];
+  failedIds: string[];
+  statusName: string;
+};
+
+function normalizeRemoteStatus(value: unknown) {
+  return String(value || "").trim().toLocaleLowerCase("en");
+}
+
+function storeOrderAlreadyHasStatus(order: api.StoreOrder, status: api.SallaOrderStatus) {
+  const targetId = String(status.id || "").trim();
+  if (targetId && String(order.remote_status_id || "").trim() === targetId) return true;
+  const targetSlug = normalizeRemoteStatus(status.slug);
+  if (!targetSlug) return false;
+  return [order.remote_status_slug, order.status, order.external_status]
+    .some((value) => normalizeRemoteStatus(value) === targetSlug);
+}
+
+function BulkStoreOrderStatusForm({
+  orders,
+  statuses,
+  onCompleted,
+  onError,
+  onCancel,
+}: {
+  orders: api.StoreOrder[];
+  statuses: api.SallaOrderStatus[];
+  onCompleted: (result: BulkStoreOrderStatusResult) => Promise<void>;
+  onError: (message: string) => void;
+  onCancel: () => void;
+}) {
+  const uniqueOrders = useMemo(
+    () => [...new Map(orders.map((order) => [order.id, order])).values()],
+    [orders],
+  );
+  const [nextStatusKey, setNextStatusKey] = useState("");
+  const [restoreItems, setRestoreItems] = useState(true);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submittingRef = useRef(false);
+  const numberFormatter = useMemo(() => new Intl.NumberFormat("ar-SA"), []);
+  const nextStatus = statuses.find((status) => String(status.id) === nextStatusKey);
+  const unchangedOrders = useMemo(
+    () => nextStatus ? uniqueOrders.filter((order) => storeOrderAlreadyHasStatus(order, nextStatus)) : [],
+    [nextStatus, uniqueOrders],
+  );
+  const updateCount = uniqueOrders.length - unchangedOrders.length;
+  const isRestoreTransition = /restor/i.test(nextStatus?.slug || "");
+  const isCustomStatus = Boolean(nextStatus && (
+    String(nextStatus.type || "").toLowerCase() === "custom" ||
+    nextStatus.original ||
+    nextStatus.parent
+  ));
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (submittingRef.current) return;
+    setError("");
+    if (!nextStatus) {
+      setError("اختر الحالة الجديدة من قائمة الحالات القادمة من سلة.");
+      return;
+    }
+    if (!acknowledged) {
+      setError("أكد فهم أثر التحديث الجماعي قبل الإرسال إلى سلة.");
+      return;
+    }
+    if (isCustomStatus && (!Number.isSafeInteger(Number(nextStatus.id)) || Number(nextStatus.id) <= 0)) {
+      setError("معرّف الحالة المخصصة القادم من سلة غير صالح.");
+      return;
+    }
+
+    submittingRef.current = true;
+    setSaving(true);
+    try {
+      const unchangedIds = unchangedOrders.map((order) => order.id);
+      const succeededIds: string[] = [];
+      const failedIds: string[] = [];
+      const ordersToUpdate = uniqueOrders.filter((order) => !storeOrderAlreadyHasStatus(order, nextStatus));
+      const restorePayload = isRestoreTransition ? { restore_items: restoreItems } : {};
+      const payload = isCustomStatus
+        ? { status_id: Number(nextStatus.id), ...restorePayload } as const
+        : { slug: nextStatus.slug, ...restorePayload } as const;
+
+      for (const order of ordersToUpdate) {
+        try {
+          const result = await api.updateSallaOrderStatus(order.id, payload);
+          if (result.changed === false) unchangedIds.push(order.id);
+          else succeededIds.push(order.id);
+        } catch {
+          failedIds.push(order.id);
+        }
+      }
+
+      await onCompleted({
+        succeededIds,
+        unchangedIds: [...new Set(unchangedIds)],
+        failedIds,
+        statusName: nextStatus.name,
+      });
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "تعذر إكمال تحديث حالات الطلبات في سلة.";
+      setError(`${message} لم تُرسل الطلبات الفاشلة مجددًا تلقائيًا؛ راجعها ثم أعد المحاولة.`);
+      onError(message);
+    } finally {
+      submittingRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="form" aria-busy={saving} onSubmit={submit}>
+      <div className="cards-grid">
+        <article className="mini-card">
+          <strong>الطلبات المحددة</strong>
+          <span>{numberFormatter.format(uniqueOrders.length)}</span>
+          <p>التحديد محصور بالطلبات الظاهرة في الصفحة التي فتحت منها الإجراء.</p>
+        </article>
+        <article className="mini-card">
+          <strong>طلبات ستُرسل إلى سلة</strong>
+          <span>{numberFormatter.format(updateCount)}</span>
+          <p>{unchangedOrders.length ? `${numberFormatter.format(unchangedOrders.length)} بالحالة المختارة مسبقًا ولن تُرسل مرة أخرى.` : "لا توجد طلبات مكررة في الحالة المختارة."}</p>
+        </article>
+      </div>
+
+      <Field label="الحالة الجديدة في سلة">
+        <SelectInput
+          name="bulk_salla_order_status"
+          value={nextStatusKey}
+          disabled={saving}
+          onChange={(event) => {
+            setNextStatusKey(event.target.value);
+            setAcknowledged(false);
+            setError("");
+          }}
+        >
+          <option value="">اختر الحالة…</option>
+          {statuses.map((status) => (
+            <option key={String(status.id)} value={String(status.id)}>{status.name}</option>
+          ))}
+        </SelectInput>
+      </Field>
+
+      {isRestoreTransition && (
+        <label className="field checkbox-field">
+          <span>إعادة أصناف الطلبات إلى المخزون عند الاستعادة</span>
+          <input
+            type="checkbox"
+            name="bulk_salla_restore_items"
+            checked={restoreItems}
+            disabled={saving}
+            onChange={(event) => {
+              setRestoreItems(event.target.checked);
+              setAcknowledged(false);
+            }}
+          />
+        </label>
+      )}
+
+      <div className="inline-error" role="note">
+        سيُرسل التغيير بالتتابع إلى سلة لتقليل الضغط، وقد يشغّل رسائل العميل أو إجراءات الدفع والشحن. الطلب المطابق للحالة لن يُرسل مرة أخرى، وأي طلب يفشل سيبقى محددًا لإعادة المحاولة يدويًا.
+      </div>
+
+      <label className="field checkbox-field">
+        <span>راجعت الطلبات وأؤكد تطبيق الحالة المختارة عليها في سلة وبرنامج إدارة العملاء</span>
+        <input
+          type="checkbox"
+          name="confirm_bulk_salla_status"
+          checked={acknowledged}
+          disabled={!nextStatus || saving}
+          onChange={(event) => setAcknowledged(event.target.checked)}
+        />
+      </label>
+
+      {error && <p className="inline-error" role="alert" aria-live="polite">{error}</p>}
+
+      <div className="form-actions">
+        <Button type="submit" loading={saving} disabled={!nextStatus || !acknowledged}>
+          <Save size={16} aria-hidden="true" /> تحديث {numberFormatter.format(updateCount)} طلب في سلة
+        </Button>
+        <Button tone="muted" disabled={saving} onClick={onCancel}>إلغاء</Button>
+      </div>
+    </form>
+  );
+}
+
 function StoreOrderStatusForm({
   order,
   statuses,
@@ -1687,6 +2009,7 @@ function StoreOrderStatusForm({
         <span>أفهم أن التغيير سيظهر في سلة وبرنامج إدارة العملاء</span>
         <input
           type="checkbox"
+          name="confirm_salla_status"
           checked={acknowledged}
           disabled={!nextStatus || unchanged || saving}
           onChange={(event) => setAcknowledged(event.target.checked)}
@@ -1787,7 +2110,17 @@ function StoreOrderWorkflowForm({
         scheduledTime,
         sendNow,
       });
-      await onSaved(sendNow && result.notification ? "تم تحويل الطلب إلى الفني وإرسال الموعد له" : "تم تحويل الطلب إلى الفني وحفظ الحجز");
+      const notificationSimulated = Boolean(result.notification?.dry_run || result.notification?.simulated);
+      const notificationSent = Boolean(result.notification?.success && !notificationSimulated);
+      await onSaved(
+        !sendNow
+          ? "تم تحويل الطلب إلى الفني وحفظ الحجز دون إرسال"
+          : notificationSimulated
+            ? "تم تحويل الطلب إلى الفني وحفظ الحجز. محاكاة فقط: لم تُرسل رسالة فعلية للفني."
+            : notificationSent
+              ? "تم تحويل الطلب إلى الفني وإرسال الموعد له فعليًا"
+              : "تم تحويل الطلب إلى الفني وحفظ الحجز، لكن لم تُرسل رسالة للفني.",
+      );
     } catch (error) {
       onError(error instanceof Error ? error.message : "تعذر تحويل الطلب إلى الفني");
     } finally {
