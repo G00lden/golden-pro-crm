@@ -13,7 +13,7 @@ Unifonic يستدعي  POST /webhooks/telephony/ivr      ← لا يوجد digit
         │  buildGreeting() يبني القائمة من ivr_departments ويسجّل call_logs
         ▼
 العميل يضغط رقماً → Unifonic يستدعي /ivr مرة أخرى   ← digits=N
-        │  handleDigit() → القسم → أول موظف نشط → تعليمة dial (تحويل)
+        │  handleDigit() → القسم → موظف نشط بالتناوب → تعليمة dial (تحويل)
         ▼
 Unifonic يحوّل المكالمة لجوال الموظف، وعند الانتهاء يستدعي
    POST /webhooks/telephony/status
@@ -29,6 +29,8 @@ Unifonic يحوّل المكالمة لجوال الموظف، وعند الان
 - **التعرّف على العميل:** عند تسجيل أي مكالمة، يُطابَق رقم المتصل مع جدول `customers`؛
   فإن كان عميلاً مسجّلاً يظهر اسمه في سجل المكالمات بدل الرقم المجرّد.
 - **توزيع بالتناوب:** عند تعدّد موظفي القسم تُوزَّع المكالمات بالعدل بينهم (`rr_counter`).
+- **احترام الإيقاف:** عند إيقاف النظام من اللوحة يسمع المتصل رسالة اعتذار قصيرة ولا تُسجَّل محاولة تحويل جديدة.
+- **منع التحويل الخاطئ:** القسم الذي لا يحتوي موظفاً نشطاً لا يحوّل إلى موظف متوقف؛ يُعامل كمسار غير متاح وتُفعّل متابعة المكالمة الفائتة.
 - **منع التكرار:** لا يُعاد إرسال رد تلقائي لنفس المتصل خلال `GATEWAY_REPLY_COOLDOWN_MIN`.
 - **تأكيد الموظف:** حين يرد الموظف بكلمة «تم/استلمت/done» تُعلَّم مكالمته `handled` في السجل.
 - **معالجة يدوية:** يستطيع المشرف وضع أي مكالمة فائتة كمُعالَجة من اللوحة
@@ -59,6 +61,7 @@ Unifonic يحوّل المكالمة لجوال الموظف، وعند الان
 
 **admin (تتطلب دور admin/manager):**
 - `GET|PUT /api/telephony/config`
+- `GET /api/telephony/readiness` — فحص جاهزية آمن لا يعرض الأسرار: التفعيل، الرقم، HTTPS العام، سر Webhook، الأقسام، والمختصون النشطون.
 - `GET|POST /api/telephony/departments` ، `PUT|DELETE /api/telephony/departments/:id`
 - `GET /api/telephony/calls?missed=true`
 - `POST /api/telephony/test-missed` — محاكاة مكالمة فائتة (اختبار الواتساب بدون مكالمة حقيقية).
@@ -83,10 +86,12 @@ UNIFONIC_VOICE_BASE_URL=
 
 ## خطوات الربط مع Unifonic (يدوية)
 
-1. شراء الرقم الأساسي من Unifonic.
-2. ضبط **IVR Endpoint** = `https://<server>/webhooks/telephony/ivr`.
-3. ضبط **Status Callback** = `https://<server>/webhooks/telephony/status`.
-4. وضع نفس `TELEPHONY_WEBHOOK_SECRET` في الطرفين (يُرسل في ترويسة `x-telephony-webhook-secret` أو `?secret=`).
+1. افتح «نظام المكالمات» وأكمل بطاقة **جاهزية الرد الآلي والتحويل** حتى تصبح «جاهز للربط».
+2. شراء الرقم الأساسي من Unifonic.
+3. ضبط **IVR Endpoint** بالعنوان الظاهر في اللوحة.
+4. ضبط **Status Callback** بالعنوان الظاهر في اللوحة.
+5. وضع نفس `TELEPHONY_WEBHOOK_SECRET` في الطرفين (يُرسل في ترويسة `x-telephony-webhook-secret` أو `?secret=`).
+6. إجراء مكالمة حقيقية: سماع الترحيب، اختيار كل قسم، التأكد من وصول التحويل، ثم اختبار عدم الرد.
 
 ## عقد Unifonic (مؤكَّد من التوثيق العام)
 
@@ -134,4 +139,10 @@ curl -X POST :3000/webhooks/telephony/ivr -d '{"callSid":"c1","from":"9665..","t
 curl -X POST :3000/webhooks/telephony/ivr -d '{"callSid":"c1","from":"9665..","digits":"1"}'
 # 4) عدم الرد → واتساب للعميل والموظف
 curl -X POST :3000/webhooks/telephony/status -d '{"callSid":"c1","status":"noanswer"}'
+```
+
+اختبارات المنطق المعزولة تستخدم قاعدة بيانات مؤقتة ولا ترسل رسائل حقيقية:
+
+```bash
+npm run test:telephony
 ```

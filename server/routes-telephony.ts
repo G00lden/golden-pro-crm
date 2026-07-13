@@ -21,8 +21,10 @@ import {
   createDepartment,
   deleteDepartment,
   getTelephonyConfig,
+  getTelephonyReadiness,
   handleCallStatus,
   handleDigit,
+  isDialablePhone,
   listCalls,
   listDepartments,
   markCallHandled,
@@ -191,6 +193,10 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
     res.json({ config: getTelephonyConfig(owner()) });
   });
 
+  app.get("/api/telephony/readiness", requireAdmin, (_req, res) => {
+    res.json({ readiness: getTelephonyReadiness(owner()) });
+  });
+
   app.put(
     "/api/telephony/config",
     requireAdmin,
@@ -264,14 +270,14 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
     asyncRoute(async (req, res) => {
       const ownerUid = owner();
       const body = req.body as { from_phone: string; digit?: string; department_id?: string };
-      const departments = listDepartments(ownerUid);
+      const departments = listDepartments(ownerUid).filter((department) => department.active);
       const department = body.department_id
         ? departments.find((d) => d.id === body.department_id)
         : body.digit
           ? departments.find((d) => d.digit === body.digit)
           : departments[0];
       if (!department) throw httpError(400, "لا يوجد قسم مطابق. أنشئ قسماً أولاً.");
-      const agent = department.agents.find((a) => a.active && a.phone) || department.agents[0];
+      const agent = department.agents.find((candidate) => candidate.active && isDialablePhone(candidate.phone)) || null;
 
       const callSid = `test_${crypto.randomUUID().slice(0, 12)}`;
       recordCall({

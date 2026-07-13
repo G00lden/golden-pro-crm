@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
+  CheckCircle2,
   PhoneCall,
   PhoneMissed,
   Plus,
@@ -57,6 +59,7 @@ const emptyDraft = (): DraftDept => ({
 export function CallSystemPage({ notify }: { notify: Notifier }) {
   const [loading, setLoading] = useState(true);
   const [config, setConfig] = useState<api.TelephonyConfig | null>(null);
+  const [readiness, setReadiness] = useState<api.TelephonyReadiness | null>(null);
   const [departments, setDepartments] = useState<api.TelephonyDepartment[]>([]);
   const [calls, setCalls] = useState<api.CallLogRow[]>([]);
   const [gateway, setGateway] = useState<api.GatewayStatus | null>(null);
@@ -70,13 +73,15 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, depts, log, gw] = await Promise.all([
+      const [cfg, ready, depts, log, gw] = await Promise.all([
         api.getTelephonyConfig(),
+        api.getTelephonyReadiness(),
         api.getTelephonyDepartments(),
         api.getCallLogs({ limit: 100 }),
         api.getGatewayStatus().catch(() => null),
       ]);
       setConfig(cfg);
+      setReadiness(ready);
       setDepartments(depts);
       setCalls(log);
       setGateway(gw);
@@ -105,6 +110,8 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         enabled: config.enabled,
       });
       setConfig(saved);
+      const ready = await api.getTelephonyReadiness().catch(() => null);
+      if (ready) setReadiness(ready);
       notify("تم حفظ إعدادات المكالمات", true);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر الحفظ", false);
@@ -218,6 +225,68 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         </div>
         <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} /> تحديث</button>
       </header>
+
+      {readiness && (
+        <div
+          className="card"
+          style={{
+            padding: 16,
+            display: "grid",
+            gap: 12,
+            border: `1px solid ${readiness.ready ? "rgba(15,191,108,0.45)" : "rgba(245,158,11,0.45)"}`,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div>
+              <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                {readiness.ready ? <CheckCircle2 size={19} color="#0fbf6c" /> : <AlertTriangle size={19} color="#f59e0b" />}
+                جاهزية الرد الآلي والتحويل
+              </h3>
+              <p style={{ margin: "4px 0 0", opacity: 0.75, fontSize: 13 }}>
+                {readiness.ready
+                  ? "إعدادات الخادم مكتملة. اربط العناوين أدناه بالرقم الصوتي ثم نفّذ مكالمة تجريبية."
+                  : "أكمل البنود الناقصة قبل نشر الرقم؛ التفعيل وحده لا يعني أن المكالمات ستصل للمختصين."}
+              </p>
+            </div>
+            <span
+              role="status"
+              style={{
+                fontSize: 12,
+                padding: "4px 11px",
+                borderRadius: 999,
+                background: readiness.ready ? "rgba(15,191,108,0.15)" : "rgba(245,158,11,0.15)",
+                color: readiness.ready ? "#0fbf6c" : "#f59e0b",
+              }}
+            >
+              {readiness.ready ? "جاهز للربط" : "غير جاهز"}
+            </span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(230px,1fr))", gap: 8 }}>
+            {readiness.checks.map((check) => (
+              <div
+                key={check.id}
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 8,
+                  padding: 10,
+                  borderRadius: 10,
+                  background: check.ready ? "rgba(15,191,108,0.08)" : "rgba(245,158,11,0.08)",
+                }}
+              >
+                {check.ready
+                  ? <CheckCircle2 size={17} color="#0fbf6c" style={{ flex: "0 0 auto", marginTop: 2 }} />
+                  : <AlertTriangle size={17} color="#f59e0b" style={{ flex: "0 0 auto", marginTop: 2 }} />}
+                <span>
+                  <strong style={{ display: "block", fontSize: 13 }}>{check.label}</strong>
+                  <span style={{ display: "block", marginTop: 2, opacity: 0.72, fontSize: 12, lineHeight: 1.6 }}>{check.detail}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Self-hosted gateway (no external provider, no WhatsApp QR) */}
       <div className="card" style={{ padding: 16, display: "grid", gap: 10, border: "1px solid rgba(96,165,250,0.35)" }}>
@@ -397,8 +466,8 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         <h3 style={{ marginTop: 0 }}>ربط Unifonic</h3>
         <p style={{ opacity: 0.85, margin: "0 0 6px" }}>في لوحة Unifonic، اضبط العناوين التالية لرقمك الأساسي:</p>
         <div style={{ display: "grid", gap: 4 }}>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>IVR Endpoint: {baseUrl}/webhooks/telephony/ivr</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>Status Callback: {baseUrl}/webhooks/telephony/status</code>
+          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>IVR Endpoint: {readiness?.ivr_webhook_url || `${baseUrl}/webhooks/telephony/ivr`}</code>
+          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>Status Callback: {readiness?.status_webhook_url || `${baseUrl}/webhooks/telephony/status`}</code>
         </div>
         <p style={{ opacity: 0.7, marginBottom: 0 }}>
           أرسل السر المشترك في الترويسة <code>x-telephony-webhook-secret</code> (نفس قيمة <code>TELEPHONY_WEBHOOK_SECRET</code>).

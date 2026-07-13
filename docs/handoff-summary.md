@@ -356,3 +356,13 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Added manual wholesale campaigns, explicit customer type, Odoo CSV preview/import plus optional JSON-RPC customer sync.
 - Salla policy-enabled device orders stage assets for technician activation; compatible consumables auto-link to one device or enter a staff selection queue.
 - Added SQLite schema/adapters, Supabase migration/RLS, Firestore indexes/rules, unit tests, docs, and responsive React UI under **الأجهزة والتذكيرات**.
+
+# آخر تحديث: 2026-07-13 — جاهزية الرد الآلي والتوجيه [Codex]
+
+- أضيف `GET /api/telephony/readiness` وبطاقة جاهزية داخل «نظام المكالمات»؛ تفحص التفعيل، الرقم الأساسي، رابط HTTPS العام، سر Webhook، الأقسام، ووجود مختص نشط في كل قسم من دون كشف أي سر.
+- صار زر إيقاف النظام فعلياً: المكالمة تسمع رسالة اعتذار قصيرة ولا تدخل القائمة أو تُسجّل محاولة تحويل جديدة.
+- أُلغي السلوك الذي كان قد يعيد موظفاً غير نشط عند خلو القسم من موظفين نشطين، كما صارت محاكاة المكالمة الفائتة تتجاهل الأقسام والموظفين المتوقفين.
+- أضيف `npm run test:telephony` بخمس حالات على قاعدة بيانات مؤقتة: الإيقاف، الموظف غير النشط، رقم موظف غير صالح، الجاهزية المكتملة، ورفض رابط شبكة محلية.
+- التحقق: `npm run test:telephony` (5/5)، و`npm run test:smoke` (15/15)، وفحص TypeScript، وVite production build نجحت، مع فحص الواجهة الفعلية عبر `agent-browser`. يبقى الربط التجاري محتاجاً رقم Unifonic فعلياً، رابط HTTPS عاماً، وأرقام المختصين الصحيحة من المالك.
+
+---

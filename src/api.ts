@@ -3486,6 +3486,27 @@ export type TelephonyConfig = {
   enabled: boolean;
 };
 
+export type TelephonyReadinessCheck = {
+  id: "system_enabled" | "main_number" | "public_url" | "webhook_secret" | "departments" | "agents";
+  label: string;
+  ready: boolean;
+  blocking: boolean;
+  detail: string;
+};
+
+export type TelephonyReadiness = {
+  ready: boolean;
+  provider: string;
+  enabled: boolean;
+  active_departments: number;
+  reachable_agents: number;
+  uncovered_departments: string[];
+  webhook_base_url: string;
+  ivr_webhook_url: string;
+  status_webhook_url: string;
+  checks: TelephonyReadinessCheck[];
+};
+
 export type CallLogRow = {
   id: string;
   from_phone: string | null;
@@ -3506,6 +3527,9 @@ export type CallLogRow = {
 
 export const getTelephonyConfig = () =>
   apiFetch<{ config: TelephonyConfig }>("/api/telephony/config").then((r) => r.config);
+
+export const getTelephonyReadiness = () =>
+  apiFetch<{ readiness: TelephonyReadiness }>("/api/telephony/readiness").then((r) => r.readiness);
 
 export const updateTelephonyConfig = (patch: Partial<TelephonyConfig>) =>
   apiFetch<{ config: TelephonyConfig }>("/api/telephony/config", {

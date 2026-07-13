@@ -43,6 +43,11 @@ function normalizeDialNumber(phone: string): string {
   return digits;
 }
 
+export function isDialablePhone(phone: string): boolean {
+  const digits = normalizeDialNumber(phone);
+  return digits.length >= 10 && digits.length <= 15;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 export type TelephonyConfig = {
   owner_uid: string;
@@ -52,6 +57,27 @@ export type TelephonyConfig = {
   menu_prompt: string;
   ring_timeout_sec: number;
   enabled: boolean;
+};
+
+export type TelephonyReadinessCheck = {
+  id: "system_enabled" | "main_number" | "public_url" | "webhook_secret" | "departments" | "agents";
+  label: string;
+  ready: boolean;
+  blocking: boolean;
+  detail: string;
+};
+
+export type TelephonyReadiness = {
+  ready: boolean;
+  provider: string;
+  enabled: boolean;
+  active_departments: number;
+  reachable_agents: number;
+  uncovered_departments: string[];
+  webhook_base_url: string;
+  ivr_webhook_url: string;
+  status_webhook_url: string;
+  checks: TelephonyReadinessCheck[];
 };
 
 export type IvrAgent = {
@@ -162,6 +188,107 @@ export function listDepartments(ownerUid: string): IvrDepartment[] {
     .prepare("SELECT * FROM ivr_departments WHERE owner_uid = ? ORDER BY sort_order ASC, digit ASC")
     .all(ownerUid) as Array<Record<string, unknown>>;
   return rows.map(rowToDepartment);
+}
+
+function publicHttpsUrl(raw: string): boolean {
+  if (!raw) return false;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const privateIpv4 =
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^169\.254\./.test(host);
+    const privateIpv6 = host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");
+    return url.protocol === "https:" && host !== "localhost" && !host.endsWith(".local") && !privateIpv4 && !privateIpv6;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Operational readiness for a real inbound IVR call. This deliberately checks
+ * only facts the CRM can verify without exposing secrets or claiming that the
+ * provider dashboard has already been configured.
+ */
+export function getTelephonyReadiness(ownerUid: string): TelephonyReadiness {
+  const config = getTelephonyConfig(ownerUid);
+  const activeDepartments = listDepartments(ownerUid).filter((department) => department.active);
+  const uncoveredDepartments = activeDepartments
+    .filter((department) => !department.agents.some((agent) => agent.active && isDialablePhone(agent.phone)))
+    .map((department) => department.name);
+  const reachableAgents = activeDepartments.reduce(
+    (count, department) =>
+      count + department.agents.filter((agent) => agent.active && isDialablePhone(agent.phone)).length,
+    0,
+  );
+  const baseUrl = String(process.env.PUBLIC_BASE_URL || process.env.APP_BASE_URL || "").replace(/\/$/, "");
+  const mainNumberReady = isDialablePhone(config.main_number);
+  const publicUrlReady = publicHttpsUrl(baseUrl);
+  const checks: TelephonyReadinessCheck[] = [
+    {
+      id: "system_enabled",
+      label: "تشغيل الرد الآلي",
+      ready: config.enabled,
+      blocking: true,
+      detail: config.enabled ? "النظام يسمح باستقبال المكالمات وتوجيهها." : "فعّل النظام من الإعدادات العامة.",
+    },
+    {
+      id: "main_number",
+      label: "الرقم الأساسي",
+      ready: mainNumberReady,
+      blocking: true,
+      detail: mainNumberReady ? "تم حفظ رقم الاستقبال بصيغة قابلة للتحويل." : "أدخل رقم الشركة الأساسي بصيغة دولية.",
+    },
+    {
+      id: "public_url",
+      label: "رابط عام آمن",
+      ready: publicUrlReady,
+      blocking: true,
+      detail: publicUrlReady ? "رابط HTTPS العام جاهز لاستقبال Webhooks." : "PUBLIC_BASE_URL يجب أن يكون رابط HTTPS عاماً وليس عنوان شبكة محلية.",
+    },
+    {
+      id: "webhook_secret",
+      label: "حماية Webhook",
+      ready: Boolean(process.env.TELEPHONY_WEBHOOK_SECRET),
+      blocking: true,
+      detail: process.env.TELEPHONY_WEBHOOK_SECRET ? "السر المشترك مضبوط ولا يتم عرضه." : "اضبط TELEPHONY_WEBHOOK_SECRET في بيئة الخادم.",
+    },
+    {
+      id: "departments",
+      label: "أقسام الاستقبال",
+      ready: activeDepartments.length > 0,
+      blocking: true,
+      detail: activeDepartments.length > 0 ? `${activeDepartments.length} قسم نشط في القائمة الصوتية.` : "أضف قسماً نشطاً واحداً على الأقل.",
+    },
+    {
+      id: "agents",
+      label: "المختصون المتاحون",
+      ready: activeDepartments.length > 0 && uncoveredDepartments.length === 0,
+      blocking: true,
+      detail:
+        activeDepartments.length === 0
+          ? "أضف الأقسام أولاً ثم عيّن المختصين."
+          : uncoveredDepartments.length > 0
+            ? `أقسام بلا مختص نشط: ${uncoveredDepartments.join("، ")}.`
+            : `${reachableAgents} مختص نشط جاهز للتحويل.`,
+    },
+  ];
+
+  return {
+    ready: checks.filter((check) => check.blocking).every((check) => check.ready),
+    provider: config.provider,
+    enabled: config.enabled,
+    active_departments: activeDepartments.length,
+    reachable_agents: reachableAgents,
+    uncovered_departments: uncoveredDepartments,
+    webhook_base_url: baseUrl,
+    ivr_webhook_url: baseUrl ? `${baseUrl}/webhooks/telephony/ivr` : "",
+    status_webhook_url: baseUrl ? `${baseUrl}/webhooks/telephony/status` : "",
+    checks,
+  };
 }
 
 export function getDepartment(ownerUid: string, id: string): IvrDepartment | null {
@@ -277,8 +404,8 @@ export function deleteDepartment(ownerUid: string, id: string): boolean {
  * first employee. Advances and persists the department's pointer.
  */
 export function pickAgentRoundRobin(dept: IvrDepartment): IvrAgent | null {
-  const agents = dept.agents.filter((a) => a.active && a.phone);
-  if (agents.length === 0) return dept.agents[0] || null;
+  const agents = dept.agents.filter((agent) => agent.active && isDialablePhone(agent.phone));
+  if (agents.length === 0) return null;
   const row = db.prepare("SELECT rr_counter FROM ivr_departments WHERE id = ?").get(dept.id) as
     | { rr_counter?: number }
     | undefined;
@@ -462,6 +589,12 @@ export function buildMenuText(ownerUid: string): { greeting: string; prompt: str
 /** Instructions for a fresh inbound call: greet, then gather one digit. */
 export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
   const config = getTelephonyConfig(ownerUid);
+  if (!config.enabled) {
+    return [
+      { action: "say", text: "عذراً، خدمة الرد الآلي غير متاحة حالياً. سيتم التواصل معكم في أقرب وقت.", language: "ar" },
+      { action: "hangup" },
+    ];
+  }
   const { greeting, prompt } = buildMenuText(ownerUid);
 
   // Record the call so the status webhook can correlate it later.
@@ -493,12 +626,18 @@ export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, bas
 
 /** Instructions after a digit press: forward to the department's agent. */
 export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
+  const config = getTelephonyConfig(ownerUid);
+  if (!config.enabled) {
+    return [
+      { action: "say", text: "عذراً، خدمة الرد الآلي غير متاحة حالياً. سيتم التواصل معكم في أقرب وقت.", language: "ar" },
+      { action: "hangup" },
+    ];
+  }
   const digit = String(call.digit || "");
 
   // Ensure a call row exists even if the provider didn't hit the greeting first
   // (so the later status webhook can correlate this call by sid).
   if (call.callSid && !getCallBySid(call.callSid)) {
-    const config = getTelephonyConfig(ownerUid);
     recordCall({
       ownerUid,
       provider: config.provider,
@@ -561,7 +700,6 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
     forwarded_at: nowIso(),
   });
 
-  const config = getTelephonyConfig(ownerUid);
   return [
     {
       action: "dial",
