@@ -1,7 +1,9 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import {
+  deduplicateProductsForUser,
   getSallaStatus,
   getSallaConnectUrl,
+  syncSallaProductsForUser,
   syncSallaStoreForUser,
 } from "./salla";
 import { adminDb } from "./firebaseAdmin";
@@ -118,6 +120,30 @@ export function registerSallaRoutes(app: Express) {
         const message = error instanceof Error ? error.message : String(error);
         throw httpError(409, message);
       }
+    }),
+  );
+
+  app.post(
+    "/api/integrations/salla/products/sync",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      try {
+        res.json(await syncSallaProductsForUser(userReq.user.uid));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("not linked") || message.includes("not connected") || message.includes("token")) {
+          throw httpError(412, message);
+        }
+        throw httpError(424, message.includes("Salla") ? message : `Salla products sync failed: ${message}`);
+      }
+    }),
+  );
+
+  app.post(
+    "/api/products/deduplicate",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      res.json(await deduplicateProductsForUser(userReq.user.uid));
     }),
   );
 

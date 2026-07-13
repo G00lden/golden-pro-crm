@@ -598,7 +598,7 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.get("/api/products", asyncRoute(async (req, res) => {
-    res.json(await listOwned("products", userId(req), "name", 250));
+    res.json(await listOwned("products", userId(req), "name", 1000));
   }));
 
   app.post("/api/products", asyncRoute(async (req, res) => {

@@ -10,6 +10,13 @@ import {
   type StoreItemType,
   type StoreWebhookOrder,
 } from "./storeWebhook";
+import {
+  buildProductDuplicateGroups,
+  chooseCanonicalProduct,
+  mergeProductCatalogRecords,
+  normalizeProductSku,
+  type ProductCatalogRecord,
+} from "./productCatalog";
 
 type SallaIntegrationRecord = {
   provider: "salla";
@@ -60,6 +67,8 @@ type SyncResult = {
   fetched: number;
   last_sync_at: string;
   last_error?: string | null;
+  deduplicated?: number;
+  relinked?: number;
 };
 
 const SALLA_AUTHORIZE_URL = "https://accounts.salla.sa/oauth2/auth";
@@ -559,6 +568,8 @@ function firstImageUrl(product: Record<string, any>) {
   return firstText(
     product.image_url,
     product.thumbnail_url,
+    product.thumbnail,
+    product.main_image,
     image.url,
     image.src,
     thumbnail.url,
@@ -570,6 +581,48 @@ function firstImageUrl(product: Record<string, any>) {
   );
 }
 
+function sallaProductImages(product: Record<string, any>) {
+  return [...new Set([
+    firstImageUrl(product),
+    ...asArray(product.images).map((item) => firstText(item.url, item.src, item.image)),
+  ].filter(Boolean))].slice(0, 20);
+}
+
+function sallaProductCategories(product: Record<string, any>) {
+  const primary = asRecord(product.category);
+  const categories = asArray(product.categories);
+  const rows = [primary, ...categories]
+    .map((item) => ({
+      id: firstText(item.id, item.category_id, item.uuid) || null,
+      name: truncate(firstText(item.name, item.title, item.slug), 120),
+    }))
+    .filter((item) => item.name);
+  const seen = new Set<string>();
+  return rows.filter((item) => {
+    const key = `${item.id || ""}:${item.name.toLocaleLowerCase("en-US")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sallaProductVariants(product: Record<string, any>) {
+  return asArray(product.variants).map((variant) => {
+    const price = asRecord(variant.price);
+    const regularPrice = asRecord(variant.regular_price);
+    const salePrice = asRecord(variant.sale_price);
+    return {
+      id: firstText(variant.id, variant.variant_id, variant.sku_id) || null,
+      name: truncate(firstText(variant.name, variant.variant, variant.title), 160),
+      sku: truncate(firstText(variant.sku, variant.code), 100),
+      barcode: truncate(firstText(variant.barcode, variant.gtin, variant.mpn), 100),
+      price: optionalNumberValue(variant.price, price.amount, regularPrice.amount) ?? null,
+      sale_price: optionalNumberValue(variant.sale_price, salePrice.amount) ?? null,
+      stock_quantity: optionalNumberValue(variant.stock_quantity, variant.quantity, variant.stock) ?? null,
+    };
+  });
+}
+
 function mapSallaProduct(remoteProduct: Record<string, any>, syncedAt: string) {
   const productId = firstText(remoteProduct.id, remoteProduct.product_id, remoteProduct.uuid);
   if (!productId) return null;
@@ -578,11 +631,16 @@ function mapSallaProduct(remoteProduct: Record<string, any>, syncedAt: string) {
   const salePrice = asRecord(remoteProduct.sale_price);
   const regularPrice = asRecord(remoteProduct.regular_price);
   const category = asRecord(remoteProduct.category);
-  const categories = asArray(remoteProduct.categories);
+  const categories = sallaProductCategories(remoteProduct);
+  const urls = asRecord(remoteProduct.urls);
+  const images = sallaProductImages(remoteProduct);
+  const variants = sallaProductVariants(remoteProduct);
+  const status = asRecord(remoteProduct.status);
+  const storeStatus = truncate(firstText(status.name, status.slug, remoteProduct.status, remoteProduct.is_available === false ? "unavailable" : "available"), 40);
   const sku = truncate(firstText(remoteProduct.sku, remoteProduct.code, remoteProduct.product_code) || `SALLA-${productId}`, 80);
   const tags = [
     ...asArray(remoteProduct.tags).map((tag) => firstText(tag.name, tag.title, tag.slug, tag.value)),
-    ...categories.map((item) => firstText(item.name, item.title, item.slug)),
+    ...categories.map((item) => item.name),
   ].filter(Boolean);
   const maintenanceMonths = Number(
     remoteProduct.maintenance_months ||
@@ -594,25 +652,134 @@ function mapSallaProduct(remoteProduct: Record<string, any>, syncedAt: string) {
 
   return {
     remoteId: productId,
+    defaults: {
+      interval_months: Math.max(1, Number.isFinite(maintenanceMonths) ? maintenanceMonths : 3),
+      remind_text: firstText(remoteProduct.remind_text) || "",
+      product_type: classifyItemType(sku, tags, firstText(remoteProduct.crm_type, remoteProduct.order_type)),
+    },
     data: {
       name: truncate(firstText(remoteProduct.name, remoteProduct.title) || `Salla product ${productId}`, 120),
-      interval_months: Math.max(1, Number.isFinite(maintenanceMonths) ? maintenanceMonths : 3),
-      category: truncate(firstText(category.name, categories[0]?.name, categories[0]?.title, remoteProduct.category_name), 80),
+      category: truncate(firstText(category.name, categories[0]?.name, remoteProduct.category_name), 80),
       sku,
-      remind_text: firstText(remoteProduct.remind_text) || "",
       source: "salla",
       store_provider: "salla",
       store_product_id: productId,
       price: optionalNumberValue(remoteProduct.price, price.amount, regularPrice.amount) ?? null,
       sale_price: optionalNumberValue(remoteProduct.sale_price, salePrice.amount, remoteProduct.discounted_price) ?? null,
       currency: truncate(firstText(remoteProduct.currency, price.currency, salePrice.currency, regularPrice.currency, "SAR"), 12),
-      image_url: truncate(firstImageUrl(remoteProduct), 500),
+      image_url: truncate(images[0] || "", 500),
+      image_urls: images,
       stock_quantity: optionalNumberValue(remoteProduct.quantity, remoteProduct.stock_quantity, remoteProduct.available_quantity, remoteProduct.stock) ?? null,
-      store_status: truncate(firstText(asRecord(remoteProduct.status).name, asRecord(remoteProduct.status).slug, remoteProduct.status, remoteProduct.is_available === false ? "unavailable" : "available"), 40),
-      product_type: classifyItemType(sku, tags, firstText(remoteProduct.crm_type, remoteProduct.order_type)),
+      store_status: storeStatus,
+      description: truncate(firstText(remoteProduct.description, remoteProduct.short_description), 8000),
+      store_url: truncate(firstText(urls.customer, remoteProduct.url), 500),
+      store_admin_url: truncate(firstText(urls.admin), 500),
+      store_product_type: truncate(firstText(remoteProduct.type, remoteProduct.product_type), 80),
+      categories,
+      variants,
+      is_available: remoteProduct.is_available !== false && !["hidden", "out", "deleted"].includes(storeStatus.toLowerCase()),
+      unlimited_quantity: remoteProduct.unlimited_quantity === true,
       last_synced_at: syncedAt,
     },
   };
+}
+
+async function relinkDirectProductReferences(
+  uid: string,
+  fromId: string,
+  toId: string,
+  product: Record<string, any>,
+) {
+  const targets = [
+    { table: "installations", fields: { product_id: toId, product_name: product.name || "", product_sku: product.sku || "" } },
+    { table: "bookings", fields: { product_id: toId, product_name: product.name || "" } },
+    { table: "reminders", fields: { product_id: toId } },
+    { table: "technician_notifications", fields: { product_id: toId, product_name: product.name || "" } },
+    { table: "customer_assets", fields: { product_id: toId, product_name: product.name || "", product_sku: product.sku || "" } },
+    { table: "service_cycles", fields: { product_id: toId, product_name: product.name || "" } },
+    { table: "replacement_links", fields: { product_id: toId, product_name: product.name || "" } },
+  ];
+  let relinked = 0;
+  for (const target of targets) {
+    const snap = await adminDb
+      .collection(target.table)
+      .where("createdBy", "==", uid)
+      .where("product_id", "==", fromId)
+      .limit(1000)
+      .get();
+    for (const doc of snap.docs) {
+      await doc.ref.update({ ...target.fields, updatedAt: nowIso() });
+      relinked += 1;
+    }
+  }
+  return relinked;
+}
+
+function replaceProductIdList(value: unknown, fromId: string, toId: string) {
+  if (!Array.isArray(value)) return value;
+  return [...new Set(value.map((item) => String(item) === fromId ? toId : item))];
+}
+
+function replaceProductIdInItems(value: unknown, fromId: string, toId: string) {
+  if (!Array.isArray(value)) return value;
+  return value.map((item) => {
+    const row = asRecord(item);
+    return String(row.product_id || "") === fromId ? { ...row, product_id: toId } : item;
+  });
+}
+
+async function relinkNestedProductReferences(uid: string, fromId: string, toId: string) {
+  const targets = [
+    { table: "store_orders", listFields: ["product_ids"], itemFields: ["items"] },
+    { table: "quotes", listFields: [], itemFields: ["items"] },
+    { table: "invoices", listFields: [], itemFields: ["items"] },
+    { table: "marketing_campaigns", listFields: ["selected_product_ids"], itemFields: [] },
+  ];
+  let relinked = 0;
+  for (const target of targets) {
+    const snap = await adminDb.collection(target.table).where("createdBy", "==", uid).limit(1000).get();
+    for (const doc of snap.docs) {
+      const data = doc.data() || {};
+      const patch: Record<string, unknown> = {};
+      for (const field of target.listFields) {
+        const next = replaceProductIdList(data[field], fromId, toId);
+        if (JSON.stringify(next) !== JSON.stringify(data[field])) patch[field] = next;
+      }
+      for (const field of target.itemFields) {
+        const next = replaceProductIdInItems(data[field], fromId, toId);
+        if (JSON.stringify(next) !== JSON.stringify(data[field])) patch[field] = next;
+      }
+      if (Object.keys(patch).length) {
+        await doc.ref.update({ ...patch, updatedAt: nowIso() });
+        relinked += 1;
+      }
+    }
+  }
+  return relinked;
+}
+
+export async function deduplicateProductsForUser(currentUid: string) {
+  const snap = await adminDb.collection("products").where("createdBy", "==", currentUid).limit(2000).get();
+  const records: ProductCatalogRecord[] = snap.docs.map((doc) => ({ id: doc.id, data: doc.data() || {} }));
+  const groups = buildProductDuplicateGroups(records);
+  let deduplicated = 0;
+  let relinked = 0;
+
+  for (const group of groups) {
+    const canonical = chooseCanonicalProduct(group);
+    const merged = mergeProductCatalogRecords(group, canonical.id);
+    await adminDb.collection("products").doc(canonical.id).set({ ...merged, updatedAt: nowIso() }, { merge: true });
+
+    for (const duplicate of group) {
+      if (duplicate.id === canonical.id) continue;
+      relinked += await relinkDirectProductReferences(currentUid, duplicate.id, canonical.id, merged);
+      relinked += await relinkNestedProductReferences(currentUid, duplicate.id, canonical.id);
+      await adminDb.collection("products").doc(duplicate.id).delete();
+      deduplicated += 1;
+    }
+  }
+
+  return { success: true, deduplicated, relinked, remaining: records.length - deduplicated };
 }
 
 function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | null {
@@ -1036,11 +1203,31 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
     }
   }
 
-  // Product lifecycle events: log only for now — the CRM products table is
-  // owner-curated; we don't auto-overwrite it from Salla.
+  // Keep the CRM catalog aligned with Salla product lifecycle events. Deleted
+  // products are retained for historical references, but hidden from the
+  // available catalog rather than being hard-deleted underneath installations.
   if (event === "product.created" || event === "product.updated" || event === "product.deleted") {
     const data = asRecord(body.data);
     const productId = firstText(data.id, data.uuid) || null;
+    if (event === "product.deleted" && productId) {
+      const products = await adminDb
+        .collection("products")
+        .where("createdBy", "==", uid)
+        .where("store_product_id", "==", productId)
+        .limit(20)
+        .get();
+      for (const doc of products.docs) {
+        await doc.ref.update({ store_status: "deleted", is_available: false, last_synced_at: nowIso(), updatedAt: nowIso() });
+      }
+      return {
+        success: true,
+        event,
+        owner_uid: uid,
+        product_id: productId,
+        product_name: firstText(data.name) || null,
+        archived: products.size,
+      };
+    }
     const sync = await syncSallaProductsForUser(uid).catch((error) => ({
       success: false,
       error: error instanceof Error ? error.message : String(error),
@@ -1200,6 +1387,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
 
   const token = await ensureFreshAccessToken(currentUid, integration);
   const syncedAt = nowIso();
+  const cleanup = await deduplicateProductsForUser(currentUid);
   const existingProductsSnap = await adminDb
     .collection("products")
     .where("createdBy", "==", currentUid)
@@ -1210,7 +1398,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   for (const doc of existingProductsSnap.docs as Array<{ id: string; data: () => Record<string, any> }>) {
     const data = doc.data() || {};
     const remoteId = firstText(data.store_product_id);
-    const sku = firstText(data.sku).toLowerCase();
+    const sku = normalizeProductSku(data.sku);
     if (remoteId) existingByRemoteId.set(remoteId, { id: doc.id, data });
     if (sku && !existingBySku.has(sku)) existingBySku.set(sku, { id: doc.id, data });
   }
@@ -1221,6 +1409,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   let fetched = 0;
   let pages = 0;
   let firstFailureMessage: string | null = null;
+  const seenRemoteIds = new Set<string>();
 
   try {
     for (let page = 1; page <= maxSyncPages(); page += 1) {
@@ -1236,12 +1425,20 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
           failed += 1;
           continue;
         }
+        if (seenRemoteIds.has(mapped.remoteId)) continue;
+        seenRemoteIds.add(mapped.remoteId);
 
         try {
-          const skuKey = firstText(mapped.data.sku).toLowerCase();
-          const existing = existingByRemoteId.get(mapped.remoteId) || existingBySku.get(skuKey);
+          const skuKey = normalizeProductSku(mapped.data.sku);
+          const skuMatch = existingBySku.get(skuKey);
+          const skuMatchRemoteId = firstText(skuMatch?.data?.store_product_id);
+          const safeLegacySkuMatch = skuMatch && (!skuMatchRemoteId || skuMatchRemoteId === mapped.remoteId)
+            ? skuMatch
+            : undefined;
+          const existing = existingByRemoteId.get(mapped.remoteId) || safeLegacySkuMatch;
           const docId = existing?.id || productDocId(currentUid, mapped.remoteId);
           await adminDb.collection("products").doc(docId).set({
+            ...(existing ? {} : mapped.defaults),
             ...mapped.data,
             createdBy: currentUid,
             createdAt: existing?.data?.createdAt || existing?.data?.created_at || syncedAt,
@@ -1289,6 +1486,8 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       fetched,
       last_sync_at: syncedAt,
       last_error: errorMessage,
+      deduplicated: cleanup.deduplicated,
+      relinked: cleanup.relinked,
     };
   } catch (syncError) {
     const message = syncError instanceof Error ? syncError.message : "Salla products sync failed.";
