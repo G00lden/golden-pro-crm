@@ -74,8 +74,17 @@ export type Product = {
   sale_price?: number | null;
   currency?: string;
   image_url?: string;
+  image_urls?: string[] | string;
   stock_quantity?: number | null;
   store_status?: string;
+  description?: string;
+  store_url?: string;
+  store_admin_url?: string;
+  store_product_type?: string;
+  categories?: Array<{ id?: string | null; name: string }> | string;
+  variants?: ProductVariant[] | string;
+  is_available?: boolean | number;
+  unlimited_quantity?: boolean | number;
   last_synced_at?: string;
   product_type?: "sale_only" | "install_maintenance" | "maintenance_existing" | "external_maintenance" | "needs_review";
   createdBy?: string;
@@ -83,6 +92,15 @@ export type Product = {
   updatedAt?: string;
 };
 
+export type ProductVariant = {
+  id?: string | null;
+  name?: string;
+  sku?: string;
+  barcode?: string;
+  price?: number | null;
+  sale_price?: number | null;
+  stock_quantity?: number | null;
+};
 export type Installation = {
   id: string;
   customer_id: string;
@@ -542,6 +560,8 @@ export type SallaSyncResult = {
   fetched: number;
   last_sync_at: string;
   last_error?: string | null;
+  deduplicated?: number;
+  relinked?: number;
   orders?: {
     success: boolean;
     imported: number;
@@ -561,6 +581,8 @@ export type SallaSyncResult = {
     fetched: number;
     last_sync_at: string;
     last_error?: string | null;
+    deduplicated?: number;
+    relinked?: number;
   };
   customers?: {
     success: boolean;
@@ -578,6 +600,13 @@ export type SallaSyncResult = {
     unique_fetched?: number;
     warning?: string | null;
   };
+};
+
+export type ProductDeduplicationResult = {
+  success: boolean;
+  deduplicated: number;
+  relinked: number;
+  remaining: number;
 };
 
 export type DailyPreparationResult = {
@@ -3158,6 +3187,14 @@ export const getSallaConnectUrl = async (): Promise<SallaConnectResponse> => {
 
 export const syncSallaOrders = async (): Promise<SallaSyncResult> => {
   return apiFetch<SallaSyncResult>("/api/integrations/salla/sync", { method: "POST" });
+};
+
+export const syncSallaProductsCatalog = async (): Promise<SallaSyncResult> => {
+  return apiFetch<SallaSyncResult>("/api/integrations/salla/products/sync", { method: "POST" });
+};
+
+export const deduplicateProducts = async (): Promise<ProductDeduplicationResult> => {
+  return apiFetch<ProductDeduplicationResult>("/api/products/deduplicate", { method: "POST" });
 };
 
 export const prepareDailyOperations = async (data: { syncSalla?: boolean } = {}): Promise<DailyPreparationResult> => {
