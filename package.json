@@ -25,6 +25,8 @@
     "test:smoke": "node scripts/smoke.mjs",
     "salla:webhooks": "node scripts/salla-reconcile-webhooks.mjs",
     "test:golden": "node scripts/golden-path.mjs",
+    "test:products": "node --import tsx --test server/productCatalog.test.ts",
+    "sync:salla-products": "node --import tsx scripts/sync-salla-products.ts",
     "doctor": "node scripts/doctor.mjs",
     "doctor:prod": "node scripts/doctor.mjs --production",
     "env:prod": "node scripts/create-production-env.mjs",

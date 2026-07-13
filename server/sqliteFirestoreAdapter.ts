@@ -283,6 +283,9 @@ const jsonColumns = new Set([
   "permissions",
   "product_ids",
   "payload",
+  "categories",
+  "image_urls",
+  "variants",
 ]);
 
 function mapToColumn(key: string): string {
@@ -290,6 +293,7 @@ function mapToColumn(key: string): string {
 }
 
 function serializeValue(value: unknown) {
+  if (typeof value === "boolean") return value ? 1 : 0;
   if (
     value &&
     typeof value === "object" &&
