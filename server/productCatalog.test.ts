@@ -39,6 +39,29 @@ test("different Salla products sharing a SKU stay separate", () => {
   assert.equal(groups.length, 0);
 });
 
+test("legacy order SKU joins one unambiguous Salla variant parent", () => {
+  const groups = buildProductDuplicateGroups([
+    row("legacy", { sku: "FILTER-BLUE", source: "salla" }),
+    row("parent", {
+      store_product_id: "parent-1",
+      sku: "FILTER",
+      source: "salla",
+      variants: [{ id: "variant-1", sku: "filter-blue" }],
+    }),
+  ]);
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].map((record) => record.id).sort(), ["legacy", "parent"]);
+});
+
+test("ambiguous variant SKU never merges different Salla parents", () => {
+  const groups = buildProductDuplicateGroups([
+    row("legacy", { sku: "SHARED-VARIANT", source: "salla" }),
+    row("one", { store_product_id: "1", sku: "ONE", variants: [{ sku: "SHARED-VARIANT" }] }),
+    row("two", { store_product_id: "2", sku: "TWO", variants: [{ sku: "SHARED-VARIANT" }] }),
+  ]);
+  assert.equal(groups.length, 0);
+});
+
 test("canonical merge preserves the richest CRM maintenance policy", () => {
   const records = [
     row("salla", { store_product_id: "7", sku: "F-7", source: "salla", name: "Store name", interval_months: 3 }),

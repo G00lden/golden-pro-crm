@@ -129,9 +129,13 @@ export function registerSallaRoutes(app: Express) {
         .limit(10_001)
         .get();
 
-      const productDocs = products.docs.slice(0, 10_000);
+      const boundedProductDocs = products.docs.slice(0, 10_000);
+      const productDocs = boundedProductDocs.filter((doc) => {
+        const value = (doc.data() as Record<string, unknown>).catalog_visible;
+        return value !== false && value !== 0 && String(value).toLowerCase() !== "false";
+      });
       const orderDocs = orders.docs.slice(0, 10_000);
-      const capped = products.docs.length > productDocs.length || orders.docs.length > orderDocs.length;
+      const capped = products.docs.length > boundedProductDocs.length || orders.docs.length > orderDocs.length;
 
       const usageBySku = new Map<string, number>();
       for (const doc of orderDocs) {

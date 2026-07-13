@@ -41,6 +41,24 @@ function remoteId(record: ProductCatalogRecord) {
   return text(record.data.store_product_id);
 }
 
+function variantSkus(record: ProductCatalogRecord) {
+  const value = record.data.variants;
+  let variants: Array<Record<string, unknown>> = [];
+  if (Array.isArray(value)) {
+    variants = value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object");
+  } else if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        variants = parsed.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object");
+      }
+    } catch {
+      return [];
+    }
+  }
+  return [...new Set(variants.map((variant) => normalizeProductSku(variant.sku || variant.code)).filter(Boolean))];
+}
+
 function recordScore(record: ProductCatalogRecord) {
   const data = record.data;
   let score = 0;
@@ -92,11 +110,17 @@ export function buildProductDuplicateGroups(records: ProductCatalogRecord[]) {
 
   const remoteBuckets = new Map<string, ProductCatalogRecord[]>();
   const skuBuckets = new Map<string, ProductCatalogRecord[]>();
+  const variantBuckets = new Map<string, ProductCatalogRecord[]>();
   for (const record of records) {
     const remote = remoteId(record);
     const sku = normalizeProductSku(record.data.sku);
     if (remote) remoteBuckets.set(remote, [...(remoteBuckets.get(remote) || []), record]);
     if (sku) skuBuckets.set(sku, [...(skuBuckets.get(sku) || []), record]);
+    if (remote) {
+      for (const variantSku of variantSkus(record)) {
+        variantBuckets.set(variantSku, [...(variantBuckets.get(variantSku) || []), record]);
+      }
+    }
   }
 
   for (const bucket of remoteBuckets.values()) {
@@ -114,6 +138,23 @@ export function buildProductDuplicateGroups(records: ProductCatalogRecord[]) {
     // multiple old rows that have no Salla id yet.
     const legacy = bucket.filter((record) => !remoteId(record));
     for (let index = 1; index < legacy.length; index += 1) union(legacy[0].id, legacy[index].id);
+  }
+
+  // Older order imports created one product row per item SKU. When that SKU is
+  // now an unambiguous variant of exactly one Salla product, fold the legacy
+  // row into its parent. Ambiguous aliases are deliberately left untouched.
+  for (const [sku, parents] of variantBuckets) {
+    const legacy = (skuBuckets.get(sku) || []).filter((record) => !remoteId(record));
+    if (!legacy.length) continue;
+    const remoteOwners = new Set([
+      ...parents.map(remoteId).filter(Boolean),
+      ...(skuBuckets.get(sku) || []).map(remoteId).filter(Boolean),
+    ]);
+    if (remoteOwners.size !== 1) continue;
+    const targetRemoteId = [...remoteOwners][0];
+    const parentRecord = parents.find((record) => remoteId(record) === targetRemoteId);
+    if (!parentRecord) continue;
+    for (const record of legacy) union(parentRecord.id, record.id);
   }
 
   const groups = new Map<string, ProductCatalogRecord[]>();
