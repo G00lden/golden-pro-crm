@@ -17,6 +17,18 @@ export function isSaudiVatNumber(value: unknown) {
   return /^\d{15}$/.test(normalizeVatNumber(value));
 }
 
+export function cleanInvoiceTerms(value: unknown) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return false;
+      const normalized = line.replace(/[.،,:؛\-–—]/g, " ").replace(/\s+/g, " ").trim();
+      return !/^(?:فاتورة ضريبية مبسطة )?(?:الكود )?متوافقة? مع (?:هيئة )?(?:الزكاة والدخل )?(?:زاتكا|zatca)$/i.test(normalized);
+    })
+    .join("\n");
+}
+
 /** B2C is simplified at any value; B2B may be simplified only below SAR 1,000. */
 export function resolveInvoiceTaxType(input: {
   requested?: InvoiceTaxTypeInput;

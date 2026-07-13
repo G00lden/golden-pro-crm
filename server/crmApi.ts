@@ -38,6 +38,7 @@ import {
   type DiscountMode,
 } from "../shared/financial";
 import {
+  cleanInvoiceTerms,
   generateZatcaQrBase64,
   resolveInvoiceTaxType,
   zatcaQrFields,
@@ -80,7 +81,7 @@ const defaultSettings = {
   jobs_per_tech: 4,
   response_rate: 50,
   maxDaily: 24,
-  seller_name: "Breexe Pro Co.",
+  seller_name: "BreeXe Pro Co.",
   seller_vat_number: "313049114100003",
   seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض",
 };
@@ -1074,7 +1075,8 @@ function invoiceBreakdown(invoice: Record<string, any>) {
 
 async function publicInvoiceHtml(invoice: Record<string, any>) {
   const timestamp = invoiceQrTimestamp(invoice);
-  const sellerName = invoice.seller_name || "Breexe Pro Co.";
+  const sellerName = invoice.seller_name || "BreeXe Pro Co.";
+  const sellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
   const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
   const sellerCr = invoice.seller_cr || invoice.seller_cr_number || "7016449519";
   const sellerPhone = invoice.seller_phone || "+966533971168";
@@ -1093,6 +1095,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     color: { dark: "#000000", light: "#ffffff" },
   });
   const currency = String(invoice.currency || "SAR");
+  const visibleTerms = cleanInvoiceTerms(invoice.terms);
   const breakdown = invoiceBreakdown(invoice);
   const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
     const line = breakdown.lines[index];
@@ -1100,14 +1103,14 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const unitNet = quantity ? line.netBeforeDiscount / quantity : 0;
     const sku = item.product_sku ? `<small style="display:block;opacity:.6;font-size:.85em;direction:ltr">${escapeHtml(item.product_sku)}</small>` : "";
     return `<tr>
-      <td>${index + 1}</td>
-      <td>${escapeHtml(item.description)}${sku}</td>
-      <td>${quantity}</td>
-      <td>${escapeHtml(formatMoney(unitNet, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.discount, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.taxableAmount, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.vat, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.gross, currency))}</td>
+      <td data-label="البند">${index + 1}</td>
+      <td class="description" data-label="البيان">${escapeHtml(item.description)}${sku}</td>
+      <td data-label="الكمية">${quantity}</td>
+      <td data-label="سعر الوحدة قبل الضريبة">${escapeHtml(formatMoney(unitNet, currency))}</td>
+      <td data-label="خصم البند">${escapeHtml(formatMoney(line.discount, currency))}</td>
+      <td data-label="الخاضع بعد الخصم">${escapeHtml(formatMoney(line.taxableAmount, currency))}</td>
+      <td data-label="الضريبة">${escapeHtml(formatMoney(line.vat, currency))}</td>
+      <td data-label="الإجمالي شامل الضريبة">${escapeHtml(formatMoney(line.gross, currency))}</td>
     </tr>`;
   }).join("");
   return `<!doctype html>
@@ -1121,19 +1124,29 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     * { box-sizing: border-box; }
     body { margin: 0; background: #eef2f5; color: #17212b; font-family: Arial, Tahoma, sans-serif; }
     .doc { width: 210mm; min-height: 297mm; margin: 0 auto; padding: 12mm; background: #fff; }
-    .head { display: flex; justify-content: space-between; gap: 16px; align-items: start; padding-bottom: 12px; border-bottom: 3px solid #d6a84f; }
-    .brand strong { display: block; font-size: 21px; color: #0f3f54; }
-    .brand span, .title span, .box span { color: #64748b; font-size: 11px; font-weight: 800; }
-    .title { text-align: left; }
-    .title h1 { margin: 4px 0; color: #0f3f54; font-size: 24px; }
+    .head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(170px, auto); gap: 14px; align-items: stretch; padding: 14px; border-radius: 12px; background: linear-gradient(135deg, #0b355c, #10212c); color: #fff; }
+    .brand { display: grid; grid-template-columns: 194px minmax(0, 1fr); gap: 14px; align-items: center; min-width: 0; }
+    .brand-logo { display: block; width: 194px; height: 61px; padding: 5px 7px; border-radius: 8px; background: #fff; object-fit: contain; }
+    .brand-copy { min-width: 0; }
+    .brand-copy strong { display: block; font-size: 12px; line-height: 1.55; }
+    .brand-copy small { display: block; margin-top: 3px; color: rgba(255,255,255,.78); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+    .title { display: grid; align-content: center; gap: 5px; min-width: 170px; padding: 12px; border: 1px solid rgba(214,168,79,.45); border-radius: 10px; text-align: center; }
+    .title span { color: #d6a84f; font-size: 12px; font-weight: 900; }
+    .title h1 { margin: 0; color: #fff; font-size: 20px; }
+    .title strong { color: #fff; font-size: 13px; }
+    .box span { color: #64748b; font-size: 10px; font-weight: 900; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 14px 0; }
-    .box { border: 1px solid #d7e0ea; border-radius: 8px; padding: 8px; min-height: 58px; }
-    .box strong { display: block; margin-top: 4px; color: #10212c; font-size: 13px; }
-    .parties { display: grid; grid-template-columns: 1fr 1fr 150px; gap: 10px; margin-bottom: 14px; }
-    .party, .qr { border: 1px solid #d7e0ea; border-radius: 10px; padding: 10px; }
-    .party h2 { margin: 0 0 8px; color: #0f6a86; font-size: 14px; }
-    .party p { margin: 5px 0; color: #334155; font-size: 12px; }
-    .qr { display: grid; place-items: center; }
+    .box { border: 1px solid #d7e0ea; border-radius: 10px; padding: 8px 9px; background: #f8fafc; }
+    .box strong { display: block; margin-top: 4px; color: #10212c; font-size: 12px; }
+    .parties { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: stretch; margin-bottom: 12px; }
+    .party, .qr { border: 1px solid #d7e0ea; border-radius: 10px; background: #f8fafc; }
+    .party { padding: 10px 12px; }
+    .party h2 { margin: 0 0 7px; color: #0b355c; font-size: 12px; }
+    .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
+    .facts div { min-width: 0; padding: 6px 8px; border-radius: 7px; background: #fff; }
+    .facts dt { color: #64748b; font-size: 9px; font-weight: 900; }
+    .facts dd { margin: 2px 0 0; color: #172033; font-size: 11px; font-weight: 800; line-height: 1.45; overflow-wrap: anywhere; }
+    .qr { display: grid; min-width: 114px; place-items: center; padding: 8px; }
     table { width: 100%; table-layout: fixed; border-collapse: collapse; margin-bottom: 12px; }
     th { padding: 8px 5px; background: #0f6a86; color: #fff; font-size: 9px; }
     td { padding: 7px 5px; border-bottom: 1px solid #e2e8f0; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; break-inside: avoid; }
@@ -1145,18 +1158,34 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     .totals p { display: flex; justify-content: space-between; margin: 0; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
     .totals p:last-child { border-bottom: 0; background: #12314a; color: #fff; font-weight: 900; }
     .terms { margin-top: 14px; padding: 10px; border: 1px solid #d7e0ea; border-radius: 10px; color: #475569; font-size: 11px; white-space: pre-line; }
+    @media screen and (max-width: 820px) {
+      .doc { width: 100%; min-height: 0; padding: 18px; }
+      .head, .grid, .parties { grid-template-columns: 1fr; }
+      .brand { grid-template-columns: 1fr; }
+      .brand-logo { width: min(220px, 100%); height: auto; }
+      .facts { grid-template-columns: 1fr; }
+      .qr { justify-self: center; }
+      table, tbody { display: block; }
+      thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }
+      tbody tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px; border: 1px solid #d7e0ea; border-radius: 10px; background: #f8fafc; }
+      tbody tr + tr { margin-top: 8px; }
+      td, td:nth-child(2) { display: grid; min-width: 0; gap: 3px; padding: 7px; border: 0; text-align: start; white-space: normal; }
+      td::before { content: attr(data-label); color: #64748b; font-size: 9px; font-weight: 900; }
+      td.description { grid-column: 1 / -1; }
+      .totals { width: 100%; }
+    }
     @media print { body { background: #fff; } .doc { margin: 0; box-shadow: none; } }
   </style>
 </head>
 <body>
   <main class="doc">
     <header class="head">
-      <div class="brand" style="display:flex;gap:12px;align-items:flex-start">
-        <img src="/brand/icon-256.png" alt="Breexe Pro" width="58" height="58" style="object-fit:contain;border-radius:10px;flex-shrink:0" />
-        <div>
-          <strong>${escapeHtml(sellerName)}</strong>
-          <span>شركة بريكس برو شخص واحد ذات مسؤولية محدودة</span>
-          <p>${escapeHtml(invoice.seller_address || "")}</p>
+      <div class="brand">
+        <img class="brand-logo" src="/brand/logo-full.png" alt="BreeXe Pro" width="194" height="61" />
+        <div class="brand-copy">
+          <strong>${sellerLegalName}</strong>
+          <small>${escapeHtml(invoice.seller_address || "الرياض، المملكة العربية السعودية")}</small>
+          <small><bdi dir="ltr">${escapeHtml(sellerPhone)}</bdi></small>
         </div>
       </div>
       <div class="title">
@@ -1167,28 +1196,22 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       </div>
     </header>
     <section class="grid">
-      <div class="box"><span>رقم الفاتورة</span><strong>${escapeHtml(invoice.invoice_number || "")}</strong></div>
       <div class="box"><span>تاريخ الإصدار</span><strong>${escapeHtml(invoice.issue_date || "")}</strong></div>
       <div class="box"><span>الرقم الضريبي للبائع</span><strong>${escapeHtml(sellerVat)}</strong></div>
+      <div class="box"><span>السجل التجاري</span><strong>${escapeHtml(sellerCr)}</strong></div>
       <div class="box"><span>الحالة</span><strong>${escapeHtml(invoice.status || "")}</strong></div>
     </section>
     <section class="parties">
       <article class="party">
-        <h2>بيانات البائع</h2>
-        <p>الاسم: ${escapeHtml(sellerName)}</p>
-        <p>الرقم الضريبي: ${escapeHtml(sellerVat)}</p>
-        <p>السجل التجاري: ${escapeHtml(sellerCr)}</p>
-        <p>الجوال: ${escapeHtml(sellerPhone)}</p>
-        <p>العنوان: ${escapeHtml(invoice.seller_address || "-")}</p>
-      </article>
-      <article class="party">
         <h2>بيانات العميل</h2>
-        <p>الاسم: ${escapeHtml(invoice.customer_name || "-")}</p>
-        <p>الجوال: ${escapeHtml(invoice.customer_phone || "-")}</p>
-        <p>المدينة: ${escapeHtml(invoice.customer_city || "-")}</p>
-        <p>الرقم الضريبي: ${escapeHtml(invoice.customer_vat || "-")}</p>
+        <dl class="facts">
+          <div><dt>الاسم</dt><dd>${escapeHtml(invoice.customer_name || "-")}</dd></div>
+          <div><dt>الجوال</dt><dd><bdi dir="ltr">${escapeHtml(invoice.customer_phone || "-")}</bdi></dd></div>
+          <div><dt>المدينة</dt><dd>${escapeHtml(invoice.customer_city || "-")}</dd></div>
+          <div><dt>الرقم الضريبي</dt><dd>${escapeHtml(invoice.customer_vat || "-")}</dd></div>
+        </dl>
       </article>
-      <aside class="qr"><img src="${qrSrc}" width="132" height="132" alt="ZATCA QR" /></aside>
+      <aside class="qr" aria-label="رمز الفاتورة الضريبية"><img src="${qrSrc}" width="96" height="96" alt="رمز الفاتورة الضريبية" /></aside>
     </section>
     <table>
       <thead><tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th><th>خصم البند</th><th>الخاضع بعد الخصم</th><th>VAT</th><th>الإجمالي شامل الضريبة</th></tr></thead>
@@ -1201,7 +1224,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       <p><span>ضريبة القيمة المضافة (${escapeHtml(normalizeVatPercent(invoice.vat_percent))}%)</span><strong>${escapeHtml(formatMoney(invoice.vat_amount || invoice.vat, currency))}</strong></p>
       <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
     </section>
-    ${invoice.terms ? `<section class="terms">${escapeHtml(invoice.terms)}</section>` : ""}
+    ${visibleTerms ? `<section class="terms">${escapeHtml(visibleTerms)}</section>` : ""}
   </main>
 </body>
 </html>`;
@@ -1289,7 +1312,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       notes: String(req.body?.notes || "").trim(),
       terms: String(req.body?.terms || "").trim(),
       ...totals,
-      seller_name: String(req.body?.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
+      seller_name: String(req.body?.seller_name || settings.seller_name || "BreeXe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
@@ -1355,7 +1378,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       notes: String(req.body?.notes ?? existing.notes ?? "").trim(),
       terms: String(req.body?.terms ?? existing.terms ?? "").trim(),
       ...totals,
-      seller_name: String(req.body?.seller_name || existing.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
+      seller_name: String(req.body?.seller_name || existing.seller_name || settings.seller_name || "BreeXe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || existing.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
@@ -1418,7 +1441,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       (item: Record<string, any>, index: number) => `- ${item.description} × ${item.quantity}: ${Number(breakdown.lines[index]?.gross || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
     const message = [
-      `${invoiceKindLabels(invoice.invoice_type).ar} - Breexe Pro Co.`,
+      `${invoiceKindLabels(invoice.invoice_type).ar} - BreeXe Pro Co.`,
       `${invoice.invoice_number}`,
       `العميل: ${invoice.customer_name}`,
       "",
@@ -1477,7 +1500,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     }
     const invoice = normalizeInvoice(existing);
     const timestamp = invoiceQrTimestamp(invoice);
-    const sellerName = invoice.seller_name || "Breexe Pro Co.";
+    const sellerName = invoice.seller_name || "BreeXe Pro Co.";
     const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
     const total = Number(invoice.total_with_vat || 0);
     const vatTotal = Number(invoice.vat_amount || invoice.vat || 0);
@@ -1530,7 +1553,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       notes: quote.notes || "",
       terms: quote.terms || "",
       ...totals,
-      seller_name: String(req.body?.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
+      seller_name: String(req.body?.seller_name || settings.seller_name || "BreeXe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),

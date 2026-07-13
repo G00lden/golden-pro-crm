@@ -930,7 +930,7 @@ type LocalDb = {
   settings: Settings;
 };
 
-const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24, seller_name: "Breexe Pro Co.", seller_vat_number: "313049114100003", seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض" });
+const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24, seller_name: "BreeXe Pro Co.", seller_vat_number: "313049114100003", seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض" });
 const localDbKey = (uid: string) => `golden-pro-crm-local-db:${uid}`;
 const localId = (prefix: string) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const withoutId = <T extends { id: string }>(item: T): Omit<T, "id"> => {
@@ -3304,9 +3304,9 @@ function buildDemoDataSet(uid: string, count = 10) {
     total_with_vat: 920,
     total_without_vat: 800,
     notes: "",
-    terms: "فاتورة ضريبية مبسطة - متوافقة مع ZATCA",
-    seller_name: "Breexe Pro Co.",
-    seller_vat_number: "300000000000003",
+    terms: "",
+    seller_name: "BreeXe Pro Co.",
+    seller_vat_number: "313049114100003",
     seller_address: "الرياض، المملكة العربية السعودية",
     qr_code: "",
     createdBy: uid,
