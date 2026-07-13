@@ -3117,6 +3117,7 @@ export type ManagedAppUser = {
   permissions: Record<string, boolean>;
   active: boolean;
   provider: string;
+  workspace_owner_uid: string;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
@@ -3129,6 +3130,7 @@ export type MeResponse = {
   role: AppUserRole;
   permissions: Record<string, boolean>;
   active: boolean;
+  workspace_owner_uid: string;
   record: ManagedAppUser | null;
 };
 
@@ -3403,6 +3405,8 @@ export type Customer360 = {
   installations: Installation[];
   bookings: Booking[];
   conversations: WhatsAppMessage[];
+  calls: CallLogRow[];
+  leads: OdooDeal[];
   notes: Array<{ id: string; body: string; created_by?: string; created_at?: string }>;
   tasks: OdooTask[];
   audit: OdooAuditLog[];
@@ -3464,6 +3468,9 @@ export type TelephonyDepartment = {
   ring_timeout_sec: number;
   active: boolean;
   sort_order: number;
+  workflow_action: "lead" | "service_task" | "none";
+  schedule_json: string;
+  fallback_user_id: string | null;
   agents: TelephonyAgent[];
 };
 
@@ -3473,6 +3480,9 @@ export type TelephonyDepartmentInput = {
   ring_timeout_sec?: number;
   active?: boolean;
   sort_order?: number;
+  workflow_action?: "lead" | "service_task" | "none";
+  schedule_json?: string;
+  fallback_user_id?: string | null;
   agents?: TelephonyAgentInput[];
 };
 
@@ -3486,6 +3496,29 @@ export type TelephonyConfig = {
   enabled: boolean;
 };
 
+export type TelephonyReadinessCheck = {
+  id: "system_enabled" | "main_number" | "public_url" | "webhook_secret" | "status_auth" | "departments" | "agents" | "live_verified";
+  label: string;
+  ready: boolean;
+  blocking: boolean;
+  detail: string;
+};
+
+export type TelephonyReadiness = {
+  ready: boolean;
+  provider: string;
+  enabled: boolean;
+  active_departments: number;
+  reachable_agents: number;
+  uncovered_departments: string[];
+  webhook_base_url: string;
+  ivr_webhook_url: string;
+  status_webhook_url: string;
+  setup_complete: boolean;
+  live_verified: boolean;
+  checks: TelephonyReadinessCheck[];
+};
+
 export type CallLogRow = {
   id: string;
   from_phone: string | null;
@@ -3495,7 +3528,16 @@ export type CallLogRow = {
   agent_name: string | null;
   agent_phone: string | null;
   customer_name: string | null;
+  customer_id: string | null;
+  agent_user_id: string | null;
+  assigned_user_id: string | null;
   status: string;
+  call_status: string;
+  follow_up_status: "new" | "assigned" | "in_progress" | "done";
+  follow_up_outcome: string | null;
+  follow_up_notes: string | null;
+  lead_id: string | null;
+  task_id: string | null;
   missed: number;
   handled: number;
   handled_at: string | null;
@@ -3506,6 +3548,9 @@ export type CallLogRow = {
 
 export const getTelephonyConfig = () =>
   apiFetch<{ config: TelephonyConfig }>("/api/telephony/config").then((r) => r.config);
+
+export const getTelephonyReadiness = () =>
+  apiFetch<{ readiness: TelephonyReadiness }>("/api/telephony/readiness").then((r) => r.readiness);
 
 export const updateTelephonyConfig = (patch: Partial<TelephonyConfig>) =>
   apiFetch<{ config: TelephonyConfig }>("/api/telephony/config", {
@@ -3531,10 +3576,27 @@ export const updateTelephonyDepartment = (id: string, data: Partial<TelephonyDep
 export const deleteTelephonyDepartment = (id: string) =>
   apiFetch(`/api/telephony/departments/${id}`, { method: "DELETE" }).then(() => undefined);
 
-export const getCallLogs = (opts: { limit?: number; missed?: boolean } = {}) => {
+export type CallLogFilter = {
+  limit?: number;
+  missed?: boolean;
+  status?: string;
+  follow_up_status?: string;
+  department_id?: string;
+  search?: string;
+  from_date?: string;
+  to_date?: string;
+};
+
+export const getCallLogs = (opts: CallLogFilter = {}) => {
   const params = new URLSearchParams();
   if (opts.limit) params.set("limit", String(opts.limit));
   if (opts.missed) params.set("missed", "true");
+  if (opts.status) params.set("status", opts.status);
+  if (opts.follow_up_status) params.set("follow_up_status", opts.follow_up_status);
+  if (opts.department_id) params.set("department_id", opts.department_id);
+  if (opts.search) params.set("search", opts.search);
+  if (opts.from_date) params.set("from_date", opts.from_date);
+  if (opts.to_date) params.set("to_date", opts.to_date);
   return apiFetch<{ calls: CallLogRow[] }>(
     `/api/telephony/calls${params.toString() ? `?${params}` : ""}`,
   ).then((r) => r.calls);
@@ -3542,6 +3604,12 @@ export const getCallLogs = (opts: { limit?: number; missed?: boolean } = {}) => 
 
 export const markCallHandled = (id: string) =>
   apiFetch<{ success: boolean }>(`/api/telephony/calls/${id}/handle`, { method: "POST" });
+
+export const completeCallFollowUp = (id: string, data: { outcome: string; notes?: string }) =>
+  apiFetch<{ success: boolean }>(`/api/telephony/calls/${id}/follow-up`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
 
 export type CallStats = { missed_unhandled: number; missed_today: number; total_today: number };
 

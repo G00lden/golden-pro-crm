@@ -3,7 +3,7 @@ import crypto from "crypto";
 import QRCode from "qrcode";
 import { adminDb } from "./firebaseAdmin";
 import { todayInTimeZone } from "./reminderEngine";
-import type { AuthedRequest } from "./auth";
+import { requestOwnerUid } from "./auth";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
 import { publicInvoiceShareQuerySchema, validateQuery } from "./validation";
 
@@ -32,7 +32,7 @@ function asyncRoute(
 }
 
 function userId(req: express.Request) {
-  return (req as AuthedRequest).user.uid;
+  return requestOwnerUid(req);
 }
 
 function nowIso() {

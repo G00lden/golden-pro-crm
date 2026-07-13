@@ -20,7 +20,9 @@
 ```bash
 # 1) جهّز ملف الإنتاج
 cp .env.production.example .env.production
-#    املأ الأسرار: GATEWAY_TOKEN, TELEPHONY_WEBHOOK_SECRET, PUBLIC_BASE_URL=https://نطاقك,
+#    املأ الأسرار: TELEPHONY_WEBHOOK_SECRET, TELEPHONY_STATUS_WEBHOOK_USER,
+#    TELEPHONY_STATUS_WEBHOOK_PASSWORD, WORKSPACE_OWNER_UID,
+#    PUBLIC_BASE_URL=https://نطاقك، وGATEWAY_TOKEN إذا ستستخدم احتياط SMS.
 #    SUPABASE_*، FIREBASE_*، OUTBOUND_MODE=production (عند الجاهزية) ...
 #    توليد سر: openssl rand -hex 24
 
@@ -35,7 +37,7 @@ docker compose logs -f
 
 ## الواجهة العكسية + HTTPS (لازمة للوصول العام)
 
-واتساب/المزوّد/الجوال يحتاجون عنوان **HTTPS** عاماً. على VPS استخدم Caddy (الأبسط):
+واتساب وUnifonic وبوابة الجوال يحتاجون عنوان **HTTPS** عاماً. على VPS استخدم Caddy (الأبسط):
 
 ```
 # /etc/caddy/Caddyfile
@@ -61,16 +63,19 @@ NODE_ENV=production ENV_FILE=.env.production PORT=3000 npm start
 
 ```bash
 npm run preflight:prod      # يفحص متغيرات/أسرار الإنتاج
-npm run lint && npm run build && npm run test:smoke
+npm run lint && npm run build && npm run test:smoke && npm run test:golden && npm run test:telephony
 curl https://نطاقك/api/health        # يجب 200 و status: ok
 ```
 
 ## بعد النشر (تشغيل فعلي)
 
-1. افتح اللوحة → «واتساب» → امسح QR لربط واتساب (تُحفظ الجلسة على volume).
-2. أضِف الأقسام والموظفين من صفحة «نظام المكالمات».
-3. للمكالمات العادية: اضبط MacroDroid على عنوان `PUBLIC_BASE_URL` مع `GATEWAY_TOKEN` (انظر `docs/gateway-setup.md`).
-4. عند الجاهزية للإرسال الحقيقي: `OUTBOUND_MODE=production` + `OFFICIAL_LAUNCH_APPROVED=true`.
+1. اضبط `WORKSPACE_OWNER_UID` على مالك بيانات الشركة الحالي قبل أول تشغيل للنسخة الجديدة.
+2. افتح اللوحة → «واتساب» → امسح QR لربط واتساب (تُحفظ الجلسة على volume).
+3. من «نظام المكالمات» احفظ رقم Unifonic، أنشئ الأقسام، واختر مستخدمي CRM أو وجهات خارجية واضحة.
+4. في Incoming Call Application ضع `GET /webhooks/telephony/ivr` مع `Authorization`، واضبط Status Webhook على `POST /webhooks/telephony/status` مع Basic Authentication مستقل.
+5. بوابة أندرويد ليست بديلاً للرد الصوتي؛ استخدمها فقط كاحتياط SMS عند تعذر واتساب.
+6. شغّل المحاكي ثم مكالمة حقيقية، ولا تعتمد الإنتاج حتى تظهر «تم التحقق بمكالمة حقيقية» وتُنشأ المتابعة مرة واحدة.
+7. عند الجاهزية للإرسال الحقيقي: `OUTBOUND_MODE=production` + `OFFICIAL_LAUNCH_APPROVED=true`.
 
 ## نسخ احتياطي
 

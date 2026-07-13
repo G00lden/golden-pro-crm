@@ -17,6 +17,7 @@ export type ManagedUser = {
   permissions: Record<string, boolean>;
   active: boolean;
   provider: string;
+  workspace_owner_uid: string;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
@@ -32,6 +33,7 @@ type Row = {
   permissions: string | null;
   active: number | null;
   provider: string | null;
+  workspace_owner_uid: string | null;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
@@ -65,6 +67,15 @@ function normalizeRole(value: unknown): UserRole {
   return (ROLES as ReadonlyArray<string>).includes(v) ? (v as UserRole) : "user";
 }
 
+export function configuredWorkspaceOwnerUid(fallbackUid = ""): string {
+  return (
+    process.env.WORKSPACE_OWNER_UID ||
+    process.env.STORE_WEBHOOK_OWNER_UID ||
+    process.env.LOCAL_AUTH_SHARED_UID ||
+    fallbackUid
+  );
+}
+
 function rowToUser(row: Row | undefined): ManagedUser | null {
   if (!row) return null;
   return {
@@ -77,6 +88,7 @@ function rowToUser(row: Row | undefined): ManagedUser | null {
     permissions: parsePermissions(row.permissions),
     active: row.active === null ? true : row.active === 1,
     provider: row.provider || "firebase",
+    workspace_owner_uid: row.workspace_owner_uid || row.uid || row.id,
     created_at: row.created_at,
     updated_at: row.updated_at,
     last_login_at: row.last_login_at,
@@ -114,16 +126,21 @@ function countAdmins(): number {
 }
 
 // Active admins only — used to block removing/demoting the last one (lockout guard).
-function countActiveAdmins(): number {
+function countActiveAdmins(workspaceOwnerUid?: string): number {
   const row = db
-    .prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1")
-    .get() as { c: number };
+    .prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1${workspaceOwnerUid ? " AND workspace_owner_uid = ?" : ""}`)
+    .get(...(workspaceOwnerUid ? [workspaceOwnerUid] : [])) as { c: number };
   return Number(row?.c || 0);
 }
 
-export function listUsers(filter: { search?: string; role?: string; active?: boolean } = {}): ManagedUser[] {
+export function listUsers(filter: { search?: string; role?: string; active?: boolean; workspaceOwnerUid?: string } = {}): ManagedUser[] {
   const where: string[] = [];
   const args: unknown[] = [];
+
+  if (filter.workspaceOwnerUid) {
+    where.push("workspace_owner_uid = ?");
+    args.push(filter.workspaceOwnerUid);
+  }
 
   if (filter.search) {
     where.push("(LOWER(name) LIKE ? OR LOWER(IFNULL(email,'')) LIKE ? OR phone LIKE ?)");
@@ -156,12 +173,14 @@ export type EnsureUserInput = {
 export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
   const existing = getUserByUid(input.uid);
   if (existing) {
-    db.prepare("UPDATE users SET last_login_at = ?, updated_at = ? WHERE uid = ?").run(
+    const workspaceOwnerUid = configuredWorkspaceOwnerUid(existing.workspace_owner_uid || input.uid);
+    db.prepare("UPDATE users SET workspace_owner_uid = ?, last_login_at = ?, updated_at = ? WHERE uid = ?").run(
+      workspaceOwnerUid,
       nowIso(),
       nowIso(),
       input.uid,
     );
-    return { ...existing, last_login_at: nowIso() };
+    return { ...existing, workspace_owner_uid: workspaceOwnerUid, last_login_at: nowIso() };
   }
 
   const provider = input.provider || "firebase";
@@ -174,10 +193,11 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
   // email, so an unverified email matching an invite can't inherit its role.
   const byEmail = emailTrusted && input.email ? getUserByEmail(input.email) : null;
   if (byEmail && !byEmail.uid) {
+    const workspaceOwnerUid = configuredWorkspaceOwnerUid(byEmail.workspace_owner_uid || input.uid);
     db.prepare(
-      "UPDATE users SET uid = ?, last_login_at = ?, updated_at = ?, provider = COALESCE(provider, ?) WHERE id = ?",
-    ).run(input.uid, nowIso(), nowIso(), input.provider || "firebase", byEmail.id);
-    return { ...byEmail, uid: input.uid, last_login_at: nowIso() };
+      "UPDATE users SET uid = ?, workspace_owner_uid = ?, last_login_at = ?, updated_at = ?, provider = COALESCE(provider, ?) WHERE id = ?",
+    ).run(input.uid, workspaceOwnerUid, nowIso(), nowIso(), input.provider || "firebase", byEmail.id);
+    return { ...byEmail, uid: input.uid, workspace_owner_uid: workspaceOwnerUid, last_login_at: nowIso() };
   }
 
   const localOwnerUid = process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
@@ -195,9 +215,10 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
       ? "admin"
       : "user";
   const id = newId();
+  const workspaceOwnerUid = configuredWorkspaceOwnerUid(input.uid);
   db.prepare(
-    `INSERT INTO users (id, uid, name, email, phone, password_hash, role, permissions, active, provider, created_at, updated_at, last_login_at)
-     VALUES (?, ?, ?, ?, ?, '', ?, '{}', 1, ?, ?, ?, ?)`,
+    `INSERT INTO users (id, uid, name, email, phone, password_hash, role, permissions, active, provider, workspace_owner_uid, created_at, updated_at, last_login_at)
+     VALUES (?, ?, ?, ?, ?, '', ?, '{}', 1, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.uid,
@@ -206,6 +227,7 @@ export function ensureUserRecord(input: EnsureUserInput): ManagedUser {
     "",
     role,
     provider,
+    workspaceOwnerUid,
     nowIso(),
     nowIso(),
     nowIso(),
@@ -306,6 +328,7 @@ export function registerUserAdminRoutes(app: Express) {
       role: (record?.role || user.role || "user") as UserRole,
       permissions: record?.permissions || user.permissions || {},
       active: record?.active ?? true,
+      workspace_owner_uid: record?.workspace_owner_uid || user.workspace_owner_uid,
       record,
     });
   });
@@ -316,7 +339,12 @@ export function registerUserAdminRoutes(app: Express) {
     const activeQ = typeof req.query.active === "string" ? req.query.active : undefined;
     const active =
       activeQ === "true" ? true : activeQ === "false" ? false : undefined;
-    const users = listUsers({ search, role, active });
+    const users = listUsers({
+      search,
+      role,
+      active,
+      workspaceOwnerUid: (req as AuthedRequest).user.workspace_owner_uid,
+    });
     res.json({ users: users.map(publicUser) });
   });
 
@@ -343,9 +371,10 @@ export function registerUserAdminRoutes(app: Express) {
 
     const id = newId();
     const role = normalizeRole(body.role);
+    const workspaceOwnerUid = (req as AuthedRequest).user.workspace_owner_uid;
     db.prepare(
-      `INSERT INTO users (id, uid, name, email, phone, password_hash, role, permissions, active, provider, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, '', ?, ?, 1, 'manual', ?, ?)`,
+      `INSERT INTO users (id, uid, name, email, phone, password_hash, role, permissions, active, provider, workspace_owner_uid, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, '', ?, ?, 1, 'manual', ?, ?, ?)`,
     ).run(
       id,
       body.uid ? String(body.uid) : null,
@@ -354,6 +383,7 @@ export function registerUserAdminRoutes(app: Express) {
       String(body.phone || "").trim(),
       role,
       JSON.stringify(body.permissions || {}),
+      workspaceOwnerUid,
       nowIso(),
       nowIso(),
     );
@@ -377,6 +407,10 @@ export function registerUserAdminRoutes(app: Express) {
       active: boolean;
     }>;
     const me = (req as AuthedRequest).user;
+    if (target.workspace_owner_uid !== me.workspace_owner_uid) {
+      res.status(404).json({ error: "المستخدم غير موجود في مساحة شركتك." });
+      return;
+    }
     const willDeactivate = body.active === false;
     const willDemote = body.role !== undefined && normalizeRole(body.role) !== "admin";
     // Same self-guard as /deactivate: can't disable your own account mid-session.
@@ -386,7 +420,7 @@ export function registerUserAdminRoutes(app: Express) {
     }
     // Never let the last active admin be demoted or deactivated — it would lock
     // everyone out of every admin-gated route.
-    if (target.role === "admin" && target.active && (willDeactivate || willDemote) && countActiveAdmins() <= 1) {
+    if (target.role === "admin" && target.active && (willDeactivate || willDemote) && countActiveAdmins(me.workspace_owner_uid) <= 1) {
       res.status(400).json({ error: "لا يمكن إزالة آخر مسؤول نشط في النظام." });
       return;
     }
@@ -402,11 +436,15 @@ export function registerUserAdminRoutes(app: Express) {
       return;
     }
     const me = (req as AuthedRequest).user;
+    if (target.workspace_owner_uid !== me.workspace_owner_uid) {
+      res.status(404).json({ error: "المستخدم غير موجود في مساحة شركتك." });
+      return;
+    }
     if (target.uid && me && target.uid === me.uid) {
       res.status(400).json({ error: "لا يمكنك تعطيل حسابك أثناء استخدامه." });
       return;
     }
-    if (target.role === "admin" && target.active && countActiveAdmins() <= 1) {
+    if (target.role === "admin" && target.active && countActiveAdmins(me.workspace_owner_uid) <= 1) {
       res.status(400).json({ error: "لا يمكن تعطيل آخر مسؤول نشط في النظام." });
       return;
     }
@@ -416,7 +454,9 @@ export function registerUserAdminRoutes(app: Express) {
 
   app.post("/api/admin/users/:id/activate", requireRole(["admin"]), (req, res) => {
     const id = req.params.id;
-    if (!getUserById(id)) {
+    const target = getUserById(id);
+    const me = (req as AuthedRequest).user;
+    if (!target || target.workspace_owner_uid !== me.workspace_owner_uid) {
       res.status(404).json({ error: "المستخدم غير موجود." });
       return;
     }
@@ -432,11 +472,15 @@ export function registerUserAdminRoutes(app: Express) {
       return;
     }
     const me = (req as AuthedRequest).user;
+    if (target.workspace_owner_uid !== me.workspace_owner_uid) {
+      res.status(404).json({ error: "المستخدم غير موجود في مساحة شركتك." });
+      return;
+    }
     if (target.uid && me && target.uid === me.uid) {
       res.status(400).json({ error: "لا يمكنك حذف حسابك أثناء استخدامه." });
       return;
     }
-    if (target.role === "admin" && target.active && countActiveAdmins() <= 1) {
+    if (target.role === "admin" && target.active && countActiveAdmins(me.workspace_owner_uid) <= 1) {
       res.status(400).json({ error: "لا يمكن حذف آخر مسؤول نشط في النظام." });
       return;
     }

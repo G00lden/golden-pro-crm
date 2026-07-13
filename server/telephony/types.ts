@@ -43,6 +43,8 @@ export type NormalizedInboundCall = {
   to: string;
   /** DTMF digit collected, if this hit is a menu response. */
   digit?: string;
+  /** Opaque session token echoed only by our protected response URL. */
+  sessionToken?: string;
   /** Raw provider payload for logging/debugging. */
   raw: Record<string, unknown>;
 };
@@ -63,6 +65,8 @@ export type NormalizedCallStatus = {
     | "voicemail"
     | "unknown";
   durationSec?: number;
+  /** Provider event time when supplied; used for deterministic idempotency. */
+  occurredAt?: string;
   raw: Record<string, unknown>;
 };
 

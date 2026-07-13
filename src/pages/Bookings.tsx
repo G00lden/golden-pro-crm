@@ -19,6 +19,14 @@ import {
   type ModalState,
 } from "../shared";
 
+type BookingPrefill = {
+  target?: string;
+  call_id?: string;
+  customer_id?: string | null;
+  customer_name?: string | null;
+  phone?: string | null;
+};
+
 export default function BookingsPage({
   notify,
   refreshStats,
@@ -59,13 +67,14 @@ export default function BookingsPage({
     }
   };
 
-  const openForm = (booking?: api.Booking) => {
+  const openForm = (booking?: api.Booking, prefill?: BookingPrefill) => {
     setModal({
       title: booking ? "تعديل حجز" : "إضافة حجز",
       wide: true,
       content: (
         <BookingForm
           initial={booking}
+          prefill={prefill}
           selectedDate={date}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
@@ -115,6 +124,19 @@ export default function BookingsPage({
       ),
     });
   };
+
+  useEffect(() => {
+    try {
+      const context = JSON.parse(sessionStorage.getItem("telephony_action_context") || "null") as BookingPrefill | null;
+      if (context?.target !== "bookings") return;
+      sessionStorage.removeItem("telephony_action_context");
+      openForm(undefined, context);
+    } catch {
+      sessionStorage.removeItem("telephony_action_context");
+    }
+    // This hand-off is consumed once when the page opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const remove = async (booking: api.Booking) => {
     if (!window.confirm(`حذف حجز ${booking.customer_name}؟`)) return;
@@ -172,11 +194,13 @@ export default function BookingsPage({
 
 function BookingForm({
   initial,
+  prefill,
   selectedDate,
   onSave,
   onCancel,
 }: {
   initial?: api.Booking;
+  prefill?: BookingPrefill;
   selectedDate: string;
   onSave: (payload: Omit<api.Booking, "id">) => Promise<void>;
   onCancel: () => void;
@@ -205,8 +229,14 @@ function BookingForm({
   const selectedTechnician = technicians.data?.find((item) => item.id === technicianId);
 
   useEffect(() => {
-    if (!installationId && selectableInstallations[0]) setInstallationId(selectableInstallations[0].id);
-  }, [installationId, selectableInstallations]);
+    if (installationId || !selectableInstallations[0]) return;
+    const phoneTail = String(prefill?.phone || "").replace(/\D/g, "").slice(-9);
+    const preferred = selectableInstallations.find((item) =>
+      (prefill?.customer_id && item.customer_id === prefill.customer_id) ||
+      (phoneTail && String(item.customer_phone || "").replace(/\D/g, "").endsWith(phoneTail)),
+    );
+    setInstallationId((preferred || selectableInstallations[0]).id);
+  }, [installationId, prefill, selectableInstallations]);
 
   useEffect(() => {
     if (!technicianId && technicians.data?.[0]) setTechnicianId(technicians.data[0].id);

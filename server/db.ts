@@ -55,9 +55,31 @@ if (!hasUserColumn("last_login_at")) {
 if (!hasUserColumn("provider")) {
   db.exec("ALTER TABLE users ADD COLUMN provider TEXT DEFAULT 'firebase'");
 }
+if (!hasUserColumn("workspace_owner_uid")) {
+  db.exec("ALTER TABLE users ADD COLUMN workspace_owner_uid TEXT");
+}
+
+// A single company workspace may contain many authenticated users. Keep the
+// actor uid on each request, but route business data through one stable owner
+// partition so an assigned employee can see the same customer/call/task as the
+// manager. Existing installations can opt in with WORKSPACE_OWNER_UID without
+// rewriting any business-table primary keys.
+const configuredWorkspaceOwner =
+  process.env.WORKSPACE_OWNER_UID ||
+  process.env.STORE_WEBHOOK_OWNER_UID ||
+  process.env.LOCAL_AUTH_SHARED_UID ||
+  "";
+if (configuredWorkspaceOwner) {
+  db.prepare(
+    "UPDATE users SET workspace_owner_uid = ? WHERE workspace_owner_uid IS NULL OR workspace_owner_uid = '' OR workspace_owner_uid = uid",
+  ).run(configuredWorkspaceOwner);
+} else {
+  db.exec("UPDATE users SET workspace_owner_uid = COALESCE(NULLIF(uid,''), id) WHERE workspace_owner_uid IS NULL OR workspace_owner_uid = ''");
+}
 
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_uid ON users(uid) WHERE uid IS NOT NULL AND uid <> ''");
 db.exec("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_users_workspace ON users(workspace_owner_uid, active, role)");
 
 // store_orders needs imported_at to support storeWebhook orderBy and dedupe
 // logic. Original SQLite schema relied on created_at; add the missing column.
@@ -532,8 +554,8 @@ db.exec(`
   -- ===========================================================================
   -- Telephony / IVR call-routing (Unifonic). A published "main number" plays an
   -- IVR menu; the caller's DTMF digit selects a department; the call is forwarded
-  -- to that department's agent. On no-answer the missed-call flow fires WhatsApp
-  -- to both the customer and the agent. See server/ivrEngine.ts.
+  -- to one eligible agent. Missed outcomes create a CRM follow-up and dispatch
+  -- WhatsApp first with Android-gateway SMS fallback. See server/ivrEngine.ts.
   -- ===========================================================================
 
   -- Per-owner telephony settings (the advertised number, greeting, ring timeout).
@@ -547,6 +569,23 @@ db.exec(`
     enabled INTEGER DEFAULT 1,
     updated_at TEXT DEFAULT (datetime('now'))
   );
+
+  -- Resolve an incoming dialed number to the owning company workspace instead
+  -- of assigning every call to whichever admin happens to be first in an env
+  -- list. The normalized international number is unique per provider.
+  CREATE TABLE IF NOT EXISTS telephony_numbers (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'unifonic',
+    phone TEXT NOT NULL,
+    phone_norm TEXT NOT NULL,
+    active INTEGER DEFAULT 1,
+    live_verified_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_telephony_numbers_provider_phone ON telephony_numbers(provider, phone_norm);
+  CREATE INDEX IF NOT EXISTS idx_telephony_numbers_owner ON telephony_numbers(owner_uid, active);
 
   -- IVR menu departments: one row per DTMF digit (e.g. 1 = المبيعات).
   CREATE TABLE IF NOT EXISTS ivr_departments (
@@ -563,9 +602,8 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_ivr_dept_owner_digit ON ivr_departments(owner_uid, digit);
   CREATE INDEX IF NOT EXISTS idx_ivr_dept_owner ON ivr_departments(owner_uid, sort_order);
 
-  -- Agents (employees) reachable for a department. Multiple agents per department
-  -- are tried in sort_order — the first active agent receives the forward today;
-  -- the ordering is also the basis for sequential/round-robin routing later.
+  -- Agents (employees) reachable for a department. One active, dialable agent is
+  -- selected atomically per call using round-robin; there is no sequential dial.
   CREATE TABLE IF NOT EXISTS ivr_department_agents (
     id TEXT PRIMARY KEY,
     department_id TEXT NOT NULL,
@@ -581,8 +619,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ivr_agents_dept ON ivr_department_agents(department_id, sort_order);
   CREATE INDEX IF NOT EXISTS idx_ivr_agents_owner ON ivr_department_agents(owner_uid);
 
-  -- One row per inbound call. Tracks the IVR selection, the forward target, the
-  -- final status, and whether the missed-call WhatsApp messages were sent.
+  -- One row per inbound call/session. Connection and follow-up lifecycles are
+  -- stored independently; notification flags reflect completed delivery only.
   CREATE TABLE IF NOT EXISTS call_logs (
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
@@ -610,6 +648,48 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_call_logs_owner ON call_logs(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_call_logs_sid ON call_logs(call_sid);
   CREATE INDEX IF NOT EXISTS idx_call_logs_missed ON call_logs(owner_uid, missed, created_at DESC);
+
+  -- Durable, idempotent inbox for provider callbacks. A provider retry with the
+  -- same fingerprint is acknowledged without replaying CRM/message side effects.
+  CREATE TABLE IF NOT EXISTS telephony_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    provider_call_sid TEXT,
+    call_id TEXT,
+    payload TEXT,
+    status TEXT DEFAULT 'received',
+    attempts INTEGER DEFAULT 0,
+    error TEXT,
+    received_at TEXT DEFAULT (datetime('now')),
+    processed_at TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_telephony_events_key ON telephony_events(owner_uid, provider, event_key);
+  CREATE INDEX IF NOT EXISTS idx_telephony_events_pending ON telephony_events(owner_uid, status, received_at);
+
+  -- Idempotent cross-channel notification jobs. WhatsApp is attempted first;
+  -- the Android gateway becomes an SMS delivery fallback, not a voice ingress.
+  CREATE TABLE IF NOT EXISTS communication_outbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    call_id TEXT,
+    role TEXT DEFAULT 'customer',
+    to_phone TEXT NOT NULL,
+    body TEXT NOT NULL,
+    preferred_channel TEXT DEFAULT 'whatsapp_then_sms',
+    dispatched_channel TEXT,
+    status TEXT DEFAULT 'pending',
+    attempts INTEGER DEFAULT 0,
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    dispatched_at TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_communication_outbox_key ON communication_outbox(owner_uid, idempotency_key);
+  CREATE INDEX IF NOT EXISTS idx_communication_outbox_pending ON communication_outbox(owner_uid, status, created_at);
 
   -- Self-hosted phone gateway outbox. When a reply must go out as SMS (because
   -- WhatsApp isn't connected), it is queued here; the user's Android automation
@@ -714,6 +794,15 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_products_store_product ON products(owner
 if (!hasColumn("ivr_departments", "rr_counter")) {
   db.exec("ALTER TABLE ivr_departments ADD COLUMN rr_counter INTEGER DEFAULT 0");
 }
+for (const col of [
+  ["workflow_action", "TEXT DEFAULT 'none'"],
+  ["schedule_json", "TEXT DEFAULT ''"],
+  ["fallback_user_id", "TEXT"],
+] as const) {
+  if (!hasColumn("ivr_departments", col[0])) {
+    db.exec(`ALTER TABLE ivr_departments ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
 
 // Call lifecycle: recognized customer + agent acknowledgement / handled state.
 for (const col of [
@@ -722,12 +811,58 @@ for (const col of [
   ["handled", "INTEGER DEFAULT 0"],
   ["handled_at", "TEXT"],
   ["handled_by", "TEXT"],
+  ["session_token_hash", "TEXT"],
+  ["session_expires_at", "TEXT"],
+  ["provider_call_sid", "TEXT"],
+  ["from_phone_norm", "TEXT"],
+  ["to_phone_norm", "TEXT"],
+  ["call_status", "TEXT DEFAULT 'new'"],
+  ["follow_up_status", "TEXT DEFAULT 'new'"],
+  ["follow_up_outcome", "TEXT"],
+  ["follow_up_notes", "TEXT DEFAULT ''"],
+  ["assigned_user_id", "TEXT"],
+  ["lead_id", "TEXT"],
+  ["task_id", "TEXT"],
+  ["invalid_attempts", "INTEGER DEFAULT 0"],
+  ["live_verified", "INTEGER DEFAULT 0"],
 ] as const) {
   if (!hasColumn("call_logs", col[0])) {
     db.exec(`ALTER TABLE call_logs ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+db.exec(`
+  UPDATE call_logs
+  SET call_status = CASE
+    WHEN status = 'handled' THEN CASE WHEN missed = 1 THEN 'no_answer' ELSE 'completed' END
+    WHEN status IS NULL OR status = '' THEN 'new'
+    ELSE status
+  END
+  WHERE call_status IS NULL OR call_status = '' OR call_status = 'new';
+  UPDATE call_logs
+  SET follow_up_status = CASE WHEN IFNULL(handled, 0) = 1 THEN 'done' WHEN agent_user_id IS NOT NULL THEN 'assigned' ELSE 'new' END
+  WHERE follow_up_status IS NULL OR follow_up_status = '' OR follow_up_status = 'new';
+  UPDATE call_logs SET assigned_user_id = agent_user_id WHERE assigned_user_id IS NULL AND agent_user_id IS NOT NULL;
+`);
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_call_logs_session_hash ON call_logs(session_token_hash) WHERE session_token_hash IS NOT NULL AND session_token_hash <> ''");
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_provider_sid ON call_logs(owner_uid, provider_call_sid)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_assigned ON call_logs(owner_uid, assigned_user_id, follow_up_status, created_at DESC)");
+
+for (const col of [
+  ["due_at", "TEXT"],
+  ["contact_phone", "TEXT"],
+  ["source", "TEXT DEFAULT 'manual'"],
+] as const) {
+  if (!hasColumn("crm_tasks", col[0])) {
+    db.exec(`ALTER TABLE crm_tasks ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_crm_tasks_owner_due_at ON crm_tasks(owner_uid, status, due_at)");
+
+if (!hasColumn("gateway_outbox", "communication_job_id")) {
+  db.exec("ALTER TABLE gateway_outbox ADD COLUMN communication_job_id TEXT");
+}
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_outbox_communication_job ON gateway_outbox(communication_job_id) WHERE communication_job_id IS NOT NULL AND communication_job_id <> ''");
 
 for (const col of [
   ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],

@@ -1,137 +1,104 @@
-# Telephony / IVR call-routing architecture
+# معمارية الرد الآلي وتوجيه المكالمات
 
-> نظام الرد على المكالمات وتوجيهها — قائمة صوتية (IVR) عبر Unifonic، تحويل لجوال
-> الموظف المختص، وعند عدم الرد إرسال واتساب للعميل وللموظف.
+يعالج Unifonic المكالمة الصوتية. بوابة أندرويد ليست بديلًا للرد الصوتي؛ وظيفتها
+إرسال SMS احتياطيًا عندما يتعذر واتساب.
 
-## التدفق (Flow)
+## التدفق التشغيلي
 
-```
-العميل يتصل على الرقم الأساسي (المنشور في الإعلانات)
-        │
-        ▼
-Unifonic يستدعي  POST /webhooks/telephony/ivr      ← لا يوجد digit
-        │  buildGreeting() يبني القائمة من ivr_departments ويسجّل call_logs
-        ▼
-العميل يضغط رقماً → Unifonic يستدعي /ivr مرة أخرى   ← digits=N
-        │  handleDigit() → القسم → أول موظف نشط → تعليمة dial (تحويل)
-        ▼
-Unifonic يحوّل المكالمة لجوال الموظف، وعند الانتهاء يستدعي
-   POST /webhooks/telephony/status
-        │  handleCallStatus()
-        ├─ رد (completed/in_progress) → تُسجّل وتنتهي
-        └─ لم يُرد (no_answer/busy/failed/voicemail) → runMissedCallFlow()
-                 ├─ واتساب للعميل  (قالب missed_call_customer)
-                 └─ واتساب للموظف (قالب missed_call_agent)
-```
+1. يستقبل الخادم الطلب الأول على:
+   `GET /webhooks/telephony/ivr`
+2. يتحقق من ترويسة `Authorization`، ويحدد مساحة الشركة من الرقم المطلوب في
+   `telephony_numbers`.
+3. ينشئ صفًا جديدًا في `call_logs` لكل اتصال، حتى لو تكرر رقم المتصل، ويولد رمز
+   جلسة عشوائيًا صالحًا 30 دقيقة. لا تخزن قاعدة البيانات إلا بصمة الرمز.
+4. يتضمن `responseUrl` المسار:
+   `POST /webhooks/telephony/ivr/session/:token`
+5. بعد اختيار القسم، يختار النظام مختصًا نشطًا واحدًا بالتناوب داخل معاملة قاعدة
+   بيانات، ثم يصدر تعليمة تحويل مع تعطيل التسجيل الصوتي.
+6. عند اختيار خاطئ تُعاد القائمة مرة واحدة. بعد الخطأ الثاني أو عدم توفر مختص أو
+   الخروج عن ساعات العمل، تنتهي المكالمة وتُنشأ متابعة.
+7. تصل حالات المكالمة إلى:
+   `POST /webhooks/telephony/status`
+   باستخدام Basic Authentication مستقل.
+8. تُحفظ بصمة كل حدث في `telephony_events`. الحدث المكرر ينجح دون إعادة إنشاء
+   Lead أو مهمة أو رسالة، وفشل الحفظ يعيد خطأ قابلًا لإعادة المحاولة.
 
-## دورة حياة المكالمة (إضافة)
+## الهوية والصلاحيات
 
-- **التعرّف على العميل:** عند تسجيل أي مكالمة، يُطابَق رقم المتصل مع جدول `customers`؛
-  فإن كان عميلاً مسجّلاً يظهر اسمه في سجل المكالمات بدل الرقم المجرّد.
-- **توزيع بالتناوب:** عند تعدّد موظفي القسم تُوزَّع المكالمات بالعدل بينهم (`rr_counter`).
-- **منع التكرار:** لا يُعاد إرسال رد تلقائي لنفس المتصل خلال `GATEWAY_REPLY_COOLDOWN_MIN`.
-- **تأكيد الموظف:** حين يرد الموظف بكلمة «تم/استلمت/done» تُعلَّم مكالمته `handled` في السجل.
-- **معالجة يدوية:** يستطيع المشرف وضع أي مكالمة فائتة كمُعالَجة من اللوحة
-  (`POST /api/telephony/calls/:id/handle`).
+- `workspace_owner_uid` هو مالك مساحة بيانات الشركة المشتركة.
+- `uid` يبقى هو المستخدم الذي نفذ الإجراء ويظهر في سجل التدقيق.
+- المدير والمسؤول يعرضان سجل الشركة كاملًا ويديران الرقم والأقسام.
+- المبيعات والفنيون يعرضون المكالمات المسندة إليهم فقط من شاشة «مكالماتي».
+- المستخدم العادي لا يملك وصولًا لقسم الهاتف.
+- يربط `telephony_numbers` كل رقم وارد بمالك المساحة بدل اختيار أول مسؤول.
 
-## المكوّنات
+## حالات مستقلة
 
-| الملف | المسؤولية |
-|------|-----------|
-| `server/telephony/types.ts` | الأنواع الموحّدة المستقلة عن المزوّد (IvrInstruction، NormalizedInboundCall، NormalizedCallStatus). |
-| `server/telephony/unifonicAdapter.ts` | **النقطة الوحيدة** التي تعرف أسماء حقول Unifonic — تحويل الطلب الوارد ↔ الموحّد، وتسلسل التعليمات إلى JSON المتوقع. |
-| `server/ivrEngine.ts` | منطق القرار + الوصول لقاعدة البيانات + تدفق المكالمة الفائتة. |
-| `server/routes-telephony.ts` | مسارات webhook العامة + مسارات admin (إدارة الأقسام، الإعدادات، السجل، الاختبار). |
-| `src/pages/CallSystem.tsx` | لوحة الواجهة (الأقسام، الإعدادات، سجل المكالمات، اختبار). |
+حالة الاتصال في `call_status`:
 
-## قاعدة البيانات (server/db.ts)
+- `new`, `menu`, `selected`, `forwarding`, `ringing`, `connected`
+- `completed`, `no_answer`, `busy`, `failed`
 
-- `telephony_config` — إعدادات لكل مالك: الرقم الأساسي، الترحيب، نص القائمة، مهلة الرنين، التفعيل.
-- `ivr_departments` — صف لكل رقم اختيار (digit) → اسم القسم.
-- `ivr_department_agents` — موظفو القسم (الاسم + الجوال)، تُجرّب أرقامهم بترتيب `sort_order`.
-- `call_logs` — صف لكل مكالمة: الاختيار، الموظف، الحالة، هل فائتة، وهل أُرسل الواتساب.
+حالة المتابعة في `follow_up_status`:
 
-## نقاط النهاية (Endpoints)
+- `new`, `assigned`, `in_progress`, `done`
 
-**عامة (تتطلب السر المشترك `x-telephony-webhook-secret`؛ fail-closed في الإنتاج):**
-- `GET|POST /webhooks/telephony/ivr` — القائمة الصوتية ومعالجة الضغط.
-- `POST /webhooks/telephony/status` — حالة المكالمة → تدفق المكالمة الفائتة.
+تسجيل نتيجة المتابعة لا يغير حالة الاتصال الأصلية.
 
-**admin (تتطلب دور admin/manager):**
-- `GET|PUT /api/telephony/config`
-- `GET|POST /api/telephony/departments` ، `PUT|DELETE /api/telephony/departments/:id`
-- `GET /api/telephony/calls?missed=true`
-- `POST /api/telephony/test-missed` — محاكاة مكالمة فائتة (اختبار الواتساب بدون مكالمة حقيقية).
+## التكامل مع CRM
 
-## إعادة الاستخدام
+- يطابق المتصل مع العميل بالرقم الدولي الموحد.
+- قسم `lead` ينشئ فرصة للرقم غير المسجل فقط، ويمنع Lead مفتوحًا آخر لنفس الرقم
+  والقسم خلال 30 يومًا.
+- قسم `service_task` ينشئ مهمة خدمة.
+- قسم `none` يسجل المكالمة فقط.
+- المكالمة الفائتة أو المشغولة أو الفاشلة تنشئ مهمة أولوية عالية تستحق خلال
+  15 دقيقة، وتُسند للمختص أو طابور المدير.
+- يعرض عميل 360 المكالمات والفرص الهاتفية والمهام ومحادثات واتساب.
+- إنشاء العميل والحجز وعرض السعر إجراءات صريحة من واجهة المكالمة، ولا تُنشأ
+  الحجوزات أو العروض أو الفواتير تلقائيًا.
 
-- الإرسال عبر `sendWhatsAppTemplate()` و`recordWhatsAppMessage()` من `server/whatsapp.ts` — نفس قناة الواتساب الحالية وأمان الإرسال (`outboundSafety`).
-- القوالب العربية في `server/whatsappTemplates.ts`: `missed_call_customer`، `missed_call_agent`.
+## الإشعارات
 
-## الإعداد (.env)
+يحجز `communication_outbox` مفتاحًا فريدًا لكل رسالة. يجرب النظام واتساب أولًا،
+ثم يضع SMS واحدًا في `gateway_outbox` عند التعذر. إعادة Webhook لا تكرر الرسالة.
 
-```
+## الإعداد
+
+```dotenv
+WORKSPACE_OWNER_UID=<uid مالك بيانات الشركة>
 TELEPHONY_PROVIDER=unifonic
-TELEPHONY_MAIN_NUMBER=<الرقم الأساسي>
+TELEPHONY_MAIN_NUMBER=9665XXXXXXXX
 TELEPHONY_RING_TIMEOUT_SEC=20
-TELEPHONY_WEBHOOK_SECRET=<سر مشترك>
-PUBLIC_BASE_URL=https://<server>
+TELEPHONY_WEBHOOK_SECRET=<Authorization للطلب الأول>
+TELEPHONY_STATUS_WEBHOOK_USER=<Basic username>
+TELEPHONY_STATUS_WEBHOOK_PASSWORD=<Basic password>
+PUBLIC_BASE_URL=https://crm.example.com
 UNIFONIC_APP_SID=
 UNIFONIC_API_KEY=
 UNIFONIC_VOICE_BASE_URL=
 ```
 
-## خطوات الربط مع Unifonic (يدوية)
+## إعداد Unifonic
 
-1. شراء الرقم الأساسي من Unifonic.
-2. ضبط **IVR Endpoint** = `https://<server>/webhooks/telephony/ivr`.
-3. ضبط **Status Callback** = `https://<server>/webhooks/telephony/status`.
-4. وضع نفس `TELEPHONY_WEBHOOK_SECRET` في الطرفين (يُرسل في ترويسة `x-telephony-webhook-secret` أو `?secret=`).
+- اربط الرقم بـIncoming Call Application واجعل IVR Endpoint هو العنوان الذي
+  تعرضه الواجهة، واضبط قيمة Authorization. راجع
+  [Inbound IVR](https://docs.unifonic.com/articles/products-documentation/inbound-ivr).
+- يستدعي Unifonic `responseUrl` باعتماد `POST` وبدون Authorization، لذلك يحميه
+  رمز الجلسة وليس السر العام. راجع
+  [Managing incoming calls](https://docs.unifonic.com/articles/api-documentation/managing-your-incoming-calls).
+- اضبط Status Webhook مع Basic Authentication المستقل. راجع
+  [Call status webhook](https://docs.unifonic.com/articles/products-documentation/setting-up-a-webhook-to-receive-all-call-statuses/).
 
-## عقد Unifonic (مؤكَّد من التوثيق العام)
-
-مرجع: `unifonic.readme.io/reference/different-voice-parameters-that-are-available`،
-`.../sending-multiple-ivr-objects-in-a-single-request`،
-`.../making-an-outgoing-call-to-collect-response`.
-
-**الوارد إلى IVR Endpoint (GET، ويُستدعى أيضاً على responseUrl عند الضغط):**
-```json
-{ "callerId": "+9665XXXXXXXX", "recipient": "+9665XXXXXXXX", "digits": "1", "speechResult": "one", "confidence": 0.6 }
-```
-- `callerId` = العميل، `recipient` = الرقم المطلوب، `digits` = الضغط.
-- Unifonic **لا يرسل معرّف مكالمة ثابتاً** في حمولة الرد، لذا نربط المكالمة عبر
-  `callerId` المُطبّع (للمتصل مكالمة نشطة واحدة في حينه).
-
-**الاستجابة = مصفوفة JSON من كائنات IVR** (وليست غلافاً):
-```json
-[
-  { "say": "...", "language": "arabic", "voice": "male", "ttsEngine": "standard",
-    "responseUrl": "https://<server>/webhooks/telephony/ivr", "digitsLimit": "1",
-    "loop": "3", "onEmptyResponse": "..." }
-]
-```
-للتحويل:
-```json
-[ { "say": "يتم تحويلكم...", "language": "arabic", "voice": "male", "transfer": "+9665XXXXXXXX", "recording": false } ]
-```
-كائن `say` بدون `responseUrl` يُنهي المكالمة (لا يوجد verb منفصل لـ hangup).
-
-**الحالة (status):** تصل إلى webhook الحالة المُعدّ على مستوى الحساب/الرقم في لوحة
-Unifonic (← `/webhooks/telephony/status`). أسماء حقول حمولة الحالة قد تختلف حسب
-الحساب؛ `parseStatus` في المحوّل دفاعي ويطبّع أكثر القيم شيوعاً
-(`no-answer/busy/failed/voicemail/completed`...). إن اختلفت لدى حسابك، عدّل
-**`unifonicAdapter.ts` فقط**.
-
-## الاختبار المحلي (تم التحقق)
+## الفحص
 
 ```bash
-# 1) إنشاء قسم
-curl -X POST :3000/api/telephony/departments -H "Authorization: Bearer <tok>" \
-  -d '{"digit":"1","name":"المبيعات","agents":[{"name":"خالد","phone":"05XXXXXXXX"}]}'
-# 2) القائمة (بدون digit)
-curl -X POST :3000/webhooks/telephony/ivr -d '{"callSid":"c1","from":"9665..","to":"9665.."}'
-# 3) الضغط على 1 → تعليمة dial لرقم الموظف (مُطبّع 9665..)
-curl -X POST :3000/webhooks/telephony/ivr -d '{"callSid":"c1","from":"9665..","digits":"1"}'
-# 4) عدم الرد → واتساب للعميل والموظف
-curl -X POST :3000/webhooks/telephony/status -d '{"callSid":"c1","status":"noanswer"}'
+npm run lint
+npm run build
+npm run test:smoke
+npm run test:golden
+npm run test:telephony
 ```
+
+لا يُعتمد الإنتاج قبل مكالمة حقيقية تظهر في CRM، وتنشئ المتابعة الصحيحة، ولا
+تكرر المهمة أو الرسائل. تظهر حالة ذلك منفصلة في الواجهة عن اكتمال الإعداد.

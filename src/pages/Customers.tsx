@@ -1,5 +1,5 @@
 import { Plus, Search, Edit3, Trash2, Save } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import * as api from "../api";
 import {
   Button,
@@ -28,12 +28,12 @@ export default function CustomersPage({
   const [search, setSearch] = useState("");
   const customers = useData(() => api.getCustomers(search), [search]);
 
-  const openForm = (customer?: api.Customer) => {
+  const openForm = (customer?: api.Customer, prefill?: Partial<api.Customer>) => {
     setModal({
       title: customer ? "تعديل عميل" : "إضافة عميل",
       content: (
         <CustomerForm
-          initial={customer}
+          initial={customer || prefill}
           onCancel={() => setModal(null)}
           onSave={async (payload) => {
             try {
@@ -50,6 +50,27 @@ export default function CustomersPage({
       ),
     });
   };
+
+  useEffect(() => {
+    try {
+      const context = JSON.parse(sessionStorage.getItem("telephony_action_context") || "null") as {
+        target?: string;
+        customer_name?: string | null;
+        phone?: string | null;
+      } | null;
+      if (context?.target !== "customers") return;
+      sessionStorage.removeItem("telephony_action_context");
+      openForm(undefined, {
+        name: context.customer_name || (context.phone ? `متصل ${context.phone}` : ""),
+        phone: context.phone || "",
+        source: "manual",
+      });
+    } catch {
+      sessionStorage.removeItem("telephony_action_context");
+    }
+    // This hand-off is consumed once when the page opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const remove = async (customer: api.Customer) => {
     if (!window.confirm(`حذف العميل ${customer.name}؟`)) return;
@@ -100,7 +121,7 @@ function CustomerForm({
   onSave,
   onCancel,
 }: {
-  initial?: api.Customer;
+  initial?: Partial<api.Customer>;
   onSave: (payload: Omit<api.Customer, "id">) => Promise<void>;
   onCancel: () => void;
 }) {

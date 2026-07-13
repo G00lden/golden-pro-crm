@@ -128,6 +128,9 @@ export const telephonyDepartmentSchema = z.object({
   ring_timeout_sec: z.coerce.number().int().min(5).max(120).optional(),
   active: z.boolean().optional(),
   sort_order: z.coerce.number().int().min(0).max(9999).optional(),
+  workflow_action: z.enum(['lead', 'service_task', 'none']).optional(),
+  schedule_json: z.string().max(2000).optional(),
+  fallback_user_id: z.string().max(160).optional().nullable(),
   agents: z.array(ivrAgentSchema).max(20).optional(),
 });
 
@@ -150,7 +153,18 @@ export const telephonyTestMissedSchema = z.object({
 export const telephonyCallsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   missed: z.enum(['true', 'false']).optional(),
+  status: z.string().max(40).optional(),
+  follow_up_status: z.enum(['new', 'assigned', 'in_progress', 'done']).optional(),
+  department_id: z.string().max(160).optional(),
+  search: z.string().max(160).optional(),
+  from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 }).passthrough();
+
+export const telephonyFollowUpSchema = z.object({
+  outcome: z.string().min(1).max(80).optional(),
+  notes: z.string().max(2000).optional(),
+});
 
 // Self-hosted phone gateway schemas
 
