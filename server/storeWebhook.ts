@@ -6,6 +6,7 @@ import { adminDb } from "./firebaseAdmin";
 import { addCalendarMonths } from "../shared/date";
 import { publishStoreOrderChange } from "./storeOrderRealtime";
 import { compareAndSetDocument } from "./atomicDocumentUpdate";
+import { firstSallaDate } from "./sallaDate";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
 
@@ -68,6 +69,7 @@ export type StoreWebhookOrder = {
   scheduledTime?: string;
   total?: number;
   items: StoreWebhookItem[];
+  projectionExtras?: Record<string, unknown>;
 };
 
 type ImportedOrderItem = {
@@ -359,16 +361,35 @@ function tagsFrom(value: unknown): string[] {
   return [firstText(record.name, record.title, record.value, record.slug)].filter(Boolean);
 }
 
-function dateOnly(value: unknown, fallback = new Date()) {
-  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-  const parsed =
-    typeof value === "number"
-      ? new Date(value > 10_000_000_000 ? value : value * 1000)
-      : value
-        ? new Date(String(value))
-        : fallback;
-  const safeDate = Number.isNaN(parsed.getTime()) ? fallback : parsed;
-  return safeDate.toLocaleDateString("en-CA", { timeZone });
+function displayValue(value: unknown): string {
+  const direct = firstText(value);
+  if (direct) return direct;
+  const item = asRecord(value);
+  return firstText(item.name, item.title, item.label, item.slug, item.code, item.value);
+}
+
+function firstDisplayValue(...values: unknown[]) {
+  for (const value of values) {
+    const found = displayValue(value);
+    if (found) return found;
+  }
+  return "";
+}
+
+function optionalBoolean(...values: unknown[]): boolean | null {
+  for (const value of values) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value !== 0;
+    if (typeof value !== "string") continue;
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "read"].includes(normalized)) return true;
+    if (["false", "0", "no", "unread"].includes(normalized)) return false;
+  }
+  return null;
+}
+
+function uniqueTags(...values: unknown[]) {
+  return Array.from(new Set(values.flatMap(tagsFrom).map((value) => value.trim()).filter(Boolean)));
 }
 
 // Canonical phone form used across the CRM: digits only, KSA-normalized to a
@@ -526,6 +547,11 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
   const customer = asRecord(order.customer || order.client || order.user || body.customer || data.customer);
   const shipping = asRecord(order.shipping || order.shipping_address || order.delivery || body.shipping);
   const billing = asRecord(order.billing || order.billing_address || body.billing);
+  const shipmentList = Array.isArray(order.shipments) ? order.shipments : [];
+  const shipment = asRecord(order.shipment || shipmentList[0] || data.shipment);
+  const payment = asRecord(order.payment);
+  const metadata = asRecord(order.metadata);
+  const features = asRecord(order.features);
 
   const provider = truncate(
     firstText(req.get("x-store-provider"), body.provider, body.source, order.provider) || "salla",
@@ -578,17 +604,103 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
   );
   if (!customerPhone) throw httpError(422, "Store order does not include a customer phone number.");
 
-  const orderDate = dateOnly(firstText(order.created_at, order.createdAt, order.date, body.created_at));
-  const scheduledDateRaw = firstText(
+  const created = firstSallaDate([
+    order.created_at,
+    order.createdAt,
+    order.date,
+    asRecord(order.dates).created_at,
+  ], timeZone);
+  const updated = firstSallaDate([
+    order.updated_at,
+    order.updatedAt,
+    order.modified_at,
+    order.modifiedAt,
+    asRecord(order.dates).updated_at,
+  ], created?.timezone || timeZone);
+  const eventOccurred = firstSallaDate([
+    body.updated_at,
+    body.created_at,
+    body.occurred_at,
+  ], created?.timezone || timeZone);
+  const scheduled = firstSallaDate([
     order.installation_date,
     order.appointment_date,
     order.delivery_date,
     shipping.delivery_date,
-  );
+  ], created?.timezone || timeZone);
   const scheduledTime = truncate(
     firstText(order.installation_time, order.appointment_time, order.delivery_time, shipping.delivery_time, "10:00"),
     20,
   );
+  const assignedEmployees = Array.isArray(order.assigned_employees) ? order.assigned_employees : [];
+  const isRead = optionalBoolean(order.is_read, order.read, metadata.is_read);
+  const isUnread = optionalBoolean(order.unread, metadata.unread);
+  const projectionExtras = {
+    order_created_at: created?.createdAt || null,
+    order_date: created?.orderDate || null,
+    order_timezone: created?.timezone || null,
+    remote_updated_at: updated?.createdAt || null,
+    last_event_at: eventOccurred?.createdAt || updated?.createdAt || created?.createdAt || null,
+    payment_method: firstDisplayValue(
+      order.payment_method,
+      payment.method,
+      payment.payment_method,
+      payment.name,
+    ) || null,
+    shipping_company: firstDisplayValue(
+      order.shipping_company,
+      shipping.company,
+      shipping.shipping_company,
+      shipping.courier,
+      shipment.shipping_company,
+      shipment.company,
+      shipment.courier,
+    ) || null,
+    shipment_status: firstDisplayValue(
+      order.shipment_status,
+      shipment.status,
+      shipping.status,
+      shipping.shipment_status,
+    ) || null,
+    country: firstDisplayValue(
+      order.country,
+      shipping.country,
+      asRecord(shipping.address).country,
+      customer.country,
+      billing.country,
+    ) || null,
+    sales_channel: firstDisplayValue(
+      order.sales_channel,
+      order.selling_channel,
+      order.channel,
+      order.source,
+      metadata.sales_channel,
+    ) || null,
+    assigned_employee: firstDisplayValue(
+      order.assigned_employee,
+      order.assign_employee,
+      order.assigned_to,
+      order.employee,
+      assignedEmployees[0],
+    ) || null,
+    pickup_branch: firstDisplayValue(
+      order.pickup_branch,
+      order.branch,
+      shipping.pickup_branch,
+      shipment.pickup_branch,
+      metadata.pickup_branch,
+    ) || null,
+    order_tags: uniqueTags(order.order_tags, order.tags, metadata.tags),
+    is_read: isRead ?? (isUnread === null ? null : !isUnread),
+    is_price_quote: optionalBoolean(
+      order.is_price_quote,
+      order.price_quote,
+      order.is_quote,
+      features.is_price_quote,
+      metadata.is_price_quote,
+    ),
+    metadata_contract_version: 2,
+  };
 
   return {
     provider,
@@ -596,15 +708,16 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
     eventId,
     orderId,
     orderNumber,
-    status: truncate(firstText(order.status, body.status, "new"), 40),
+    status: truncate(firstDisplayValue(order.status, body.status, "new"), 40),
     customerName,
     customerPhone,
     customerCity: truncate(firstText(customer.city, shipping.city, billing.city), 80),
-    orderDate,
-    scheduledDate: scheduledDateRaw ? dateOnly(scheduledDateRaw) : undefined,
+    orderDate: created?.orderDate || "",
+    scheduledDate: scheduled?.orderDate,
     scheduledTime,
     total: optionalNumberValue(order.total, order.total_price, order.amount, at(order, "amounts.total.amount")),
     items: parseItems(order, provider, orderId),
+    projectionExtras,
   };
 }
 
@@ -1252,6 +1365,19 @@ async function projectStoreOrder(
   writeAttempt = 0,
 ) {
   const now = new Date().toISOString();
+  const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
+  const orderRef = adminDb.collection("store_orders").doc(orderKey);
+  const existingOrderDoc = await orderRef.get();
+  const existingOrder = existingOrderDoc.exists ? existingOrderDoc.data() || {} : {};
+  if (existingOrderDoc.exists && incomingProjectionIsOlder(existingOrder, extras)) {
+    return {
+      result: importedResultFromExisting(existingOrder),
+      existed: true,
+      orderKey,
+      stale: true,
+    };
+  }
+
   const customerId = order.customerPhone ? await upsertCustomer(uid, order, now) : "";
   const productIds: string[] = [];
   const projectedItems: ImportedOrderItem[] = [];
@@ -1269,18 +1395,6 @@ async function projectStoreOrder(
     projectedItems.push(projectedItemState(item, productId, existingInstallation?.id || null));
   }
 
-  const orderKey = getStoreOrderDocId(uid, order.provider, order.orderId);
-  const orderRef = adminDb.collection("store_orders").doc(orderKey);
-  const existingOrderDoc = await orderRef.get();
-  const existingOrder = existingOrderDoc.exists ? existingOrderDoc.data() || {} : {};
-  if (existingOrderDoc.exists && incomingProjectionIsOlder(existingOrder, extras)) {
-    return {
-      result: importedResultFromExisting(existingOrder),
-      existed: true,
-      orderKey,
-      stale: true,
-    };
-  }
   const mergedItems = mergeImportedItemsWithExisting(projectedItems, existingOrder, {
     preserveOperationalLinks: true,
   });
@@ -1765,6 +1879,7 @@ function localImportStoreOrder(data: LocalStoreDb, uid: string, order: StoreWebh
     imported_at: existingOrder.imported_at || now,
     last_event_at: now,
     updatedAt: now,
+    ...(order.projectionExtras || {}),
   };
 
   return {
@@ -2396,9 +2511,12 @@ export async function processStoreWebhook(req: RawBodyRequest) {
 
   try {
       const imported = await importStoreOrderForUser(ownerUid, order, {
+        ...(order.projectionExtras || {}),
         source: "salla",
         provider: order.provider,
         event_type: order.eventType,
+        remote_synced_at: now,
+        sync_origin: "store_webhook",
       });
     const processedAt = new Date().toISOString();
     await eventRef.set({

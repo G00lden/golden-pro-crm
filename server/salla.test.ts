@@ -406,6 +406,76 @@ test("full order sync suppresses per-order realtime noise and publishes one comp
   assert.equal(orderData.sync_origin, "salla_sync");
 });
 
+test("an older list page cannot lower a newer order watermark during metadata backfill", async () => {
+  const uid = "owner-order-metadata-race";
+  const remoteOrderId = "order-metadata-race";
+  await linkSallaOwner(uid);
+  const orderRef = adminDb.collection("store_orders").doc(getStoreOrderDocId(uid, "salla", remoteOrderId));
+  await orderRef.set({
+    createdBy: uid,
+    provider: "salla",
+    order_id: remoteOrderId,
+    order_number: "RACE-1",
+    customer_name: "Newer customer",
+    customer_phone: "966500000777",
+    total: 50,
+    items: [{
+      name: "Newer item",
+      sku: "SALE-RACE-1",
+      remote_item_id: "line-race-1",
+      quantity: 1,
+      unit_price: 50,
+      total_price: 50,
+      order_type: "sale_only",
+      status: "sale_recorded",
+    }],
+    metadata_contract_version: 1,
+    payment_method: "newer-payment",
+    last_event_at: "2026-07-13T12:00:00.900Z",
+    remote_updated_at: "2026-07-13T12:00:00.900Z",
+    remote_synced_at: "2026-07-13T12:01:00.000Z",
+    remote_status_id: "status-race",
+    remote_status_name: "Processing",
+    remote_status_slug: "processing",
+    sync_origin: "salla_webhook",
+    imported_at: "2026-07-13T10:00:00.000Z",
+  });
+
+  globalThis.fetch = (async () => jsonResponse({
+    data: [{
+      id: remoteOrderId,
+      reference_id: "RACE-1",
+      created_at: { date: "2026-07-12 10:00:00.000000", timezone: "Asia/Riyadh" },
+      updated_at: "2026-07-13T12:00:00.100Z",
+      payment_method: "older-payment",
+      status: { id: "status-race", name: "Processing", slug: "processing" },
+      customer: { name: "Older customer", mobile_code: "+966", mobile: "500000777" },
+      amounts: { total: { amount: 50, currency: "SAR" } },
+      items: [{
+        id: "line-race-1",
+        name: "Older item",
+        sku: "SALE-RACE-1",
+        quantity: 1,
+        amounts: { price_without_tax: { amount: 50 }, total: { amount: 50 } },
+      }],
+    }],
+    pagination: { total: 1, totalPages: 1, currentPage: 1, perPage: 30 },
+  })) as typeof fetch;
+
+  const result = await syncSallaOrdersForUser(uid);
+  assert.equal(result.success, true);
+
+  const stored = (await orderRef.get()).data() || {};
+  assert.equal(stored.last_event_at, "2026-07-13T12:00:00.900Z");
+  assert.equal(stored.remote_updated_at, "2026-07-13T12:00:00.900Z");
+  assert.equal(stored.payment_method, "newer-payment");
+  assert.equal(stored.customer_name, "Newer customer");
+  assert.equal(stored.items[0].name, "Newer item");
+  assert.equal(stored.metadata_contract_version, 1);
+  assert.equal((await customersForOwner(uid)).length, 0);
+  assert.equal((await recordsForOwner("products", uid)).length, 0);
+});
+
 test("uses independent customer pagination and requests bidirectional Salla scopes", () => {
   process.env.SALLA_SYNC_PAGE_SIZE = "10";
   process.env.SALLA_SYNC_MAX_PAGES = "3";
@@ -646,6 +716,115 @@ test("keeps duplicate phones separate, follows a remote id through phone changes
   const fallbackOne = salla.mapSallaCustomer(uid, { name: "Fallback", email: "USER@example.com" });
   const fallbackTwo = salla.mapSallaCustomer(uid, { email: "user@example.com", name: "Fallback" });
   assert.equal(fallbackOne.documentId, fallbackTwo.documentId);
+});
+
+test("maps Salla customer fields used by the store-style filters", () => {
+  const mapped = salla.mapSallaCustomer("owner-customer-metadata", {
+    id: 404,
+    name: "Customer filters",
+    mobile: "0501112233",
+    email: "FILTERS@EXAMPLE.COM",
+    city: { id: 1, name: "الرياض" },
+    country: { code: "SA", name: "السعودية" },
+    gender: "female",
+    groups: [{ id: 9, name: "عملاء مميزون" }, { id: 9, name: "مكرر" }, "جملة"],
+    is_blocked: true,
+    block_reason: "مراجعة الحساب",
+    created_at: { date: "2024-02-10 08:30:00.000000", timezone: "Asia/Riyadh" },
+    updated_at: { date: "2026-07-13 10:00:00.000000", timezone: "Asia/Riyadh" },
+  });
+
+  assert.deepEqual({
+    email: mapped.email,
+    city: mapped.city,
+    country: mapped.country,
+    gender: mapped.gender,
+    groups: mapped.groups,
+    isBlocked: mapped.isBlocked,
+    blockReason: mapped.blockReason,
+    remoteCreatedAt: mapped.remoteCreatedAt,
+    remoteUpdatedAt: mapped.remoteUpdatedAt,
+    remoteTimezone: mapped.remoteTimezone,
+  }, {
+    email: "filters@example.com",
+    city: "الرياض",
+    country: "السعودية",
+    gender: "female",
+    groups: [{ id: "9", name: "عملاء مميزون" }, { id: null, name: "جملة" }],
+    isBlocked: true,
+    blockReason: "مراجعة الحساب",
+    remoteCreatedAt: "2024-02-10T05:30:00.000Z",
+    remoteUpdatedAt: "2026-07-13T07:00:00.000Z",
+    remoteTimezone: "Asia/Riyadh",
+  });
+});
+
+test("remote timestamp equality keeps millisecond precision", () => {
+  assert.equal(
+    salla.sameRemoteStamp("2026-07-13T10:00:00.100Z", "2026-07-13T10:00:00.100Z"),
+    true,
+  );
+  assert.equal(
+    salla.sameRemoteStamp("2026-07-13T10:00:00.100Z", "2026-07-13T10:00:00.900Z"),
+    false,
+  );
+});
+
+test("newly available and explicitly cleared metadata refresh an existing order contract", () => {
+  assert.equal(salla.filterMetadataDiffers({
+    metadata_contract_version: 2,
+    payment_method: null,
+    is_read: null,
+  }, {
+    payment_method: "mada",
+    is_read: false,
+  }), true);
+  assert.equal(salla.filterMetadataDiffers({
+    payment_method: "mada",
+    is_read: false,
+    shipping_company: "Aramex",
+    order_tags: ["VIP"],
+  }, {
+    payment_method: "mada",
+    is_read: false,
+    shipping_company: null,
+    order_tags: [],
+  }), true);
+  assert.equal(salla.filterMetadataDiffers({
+    payment_method: "mada",
+    shipping_company: "Aramex",
+  }, {
+    payment_method: "mada",
+  }), false);
+});
+
+test("remote sync watermark only moves forward regardless of page order", () => {
+  assert.equal(
+    salla.newestRemoteTimestamp("2026-07-13T10:00:00.900Z", "2026-07-13T09:00:00.000Z"),
+    "2026-07-13T10:00:00.900Z",
+  );
+  assert.equal(
+    salla.newestRemoteTimestamp("2026-07-13T10:00:00.100Z", "2026-07-13T10:00:00.900Z"),
+    "2026-07-13T10:00:00.900Z",
+  );
+  assert.equal(salla.newestRemoteTimestamp(null, "not-a-date"), null);
+});
+
+test("list payload omissions preserve detail metadata while explicit empty fields clear it", () => {
+  const omitted = salla.sallaOrderMetadata({
+    id: 1,
+    date: { date: "2026-07-13 12:00:00.000000", timezone: "Asia/Riyadh" },
+  }, "2026-07-13T10:00:00.000Z");
+  assert.equal(Object.prototype.hasOwnProperty.call(omitted, "shipping_company"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(omitted, "order_tags"), false);
+
+  const cleared = salla.sallaOrderMetadata({
+    id: 1,
+    shipping_company: null,
+    tags: [],
+  }, "2026-07-13T10:00:00.000Z");
+  assert.equal(cleared.shipping_company, null);
+  assert.deepEqual(cleared.order_tags, []);
 });
 
 test("reuses an unbound legacy Salla customer without colliding with another provider", async () => {

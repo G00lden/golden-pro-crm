@@ -12,6 +12,7 @@ const files = [
   "shared/zatca.test.ts",
   "server/localAuthPolicy.test.ts",
   "server/salla.test.ts",
+  "server/sallaDate.test.ts",
   "server/sallaBidirectional.test.ts",
   "server/sallaOrderControl.test.ts",
   "server/sallaOrderCommandJournal.test.ts",
@@ -33,6 +34,7 @@ const files = [
   "server/storeOrderRealtime.test.ts",
   "server/supabaseFirestoreAdapter.test.ts",
   "src/dataProvider.test.ts",
+  "src/filterUrlState.test.ts",
   "src/pages/Settings.store-link.test.ts",
 ];
 

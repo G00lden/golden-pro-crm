@@ -35,18 +35,57 @@ export type Customer = {
   name: string;
   phone: string;
   city?: string;
-  source?: "manual" | "salla";
+  country?: string;
+  gender?: string;
+  status?: string;
+  is_blocked?: boolean;
+  source?: "manual" | "salla" | string;
   store_provider?: string;
   store_customer_id?: string | null;
+  orders_count?: number;
+  total_spent?: number;
+  last_order_at?: string | null;
+  activity_status?: "recent" | "inactive" | "no_orders" | "unknown" | string;
+  customer_groups?: Array<string | number | { id?: string | number; name?: string; title?: string }>;
+  customerGroups?: Array<string | number | { id?: string | number; name?: string; title?: string }>;
   createdBy?: string;
+  remote_created_at?: string;
+  remoteCreatedAt?: string;
   createdAt?: string;
+  created_at?: string;
   updatedAt?: string;
+};
+
+export type FilterFacetOption = {
+  value: string;
+  label: string;
+  count?: number;
+};
+
+export type CustomerFacets = {
+  sources: FilterFacetOption[];
+  groups: FilterFacetOption[];
+  cities: FilterFacetOption[];
+  countries: FilterFacetOption[];
+  genders: FilterFacetOption[];
+  statuses: FilterFacetOption[];
 };
 
 export type CustomerListOptions = {
   page?: number;
   pageSize?: number;
   all?: boolean;
+  source?: string;
+  group?: string;
+  city?: string;
+  country?: string;
+  gender?: string;
+  status?: "active" | "blocked" | "unknown" | string;
+  activity?: "has_orders" | "no_orders" | "recent" | "inactive" | string;
+  date_from?: string;
+  date_to?: string;
+  sort_by?: "name" | "created_at" | "last_order_at" | "orders_count" | "total_spent" | string;
+  sort_direction?: "asc" | "desc";
 };
 
 export type CustomerListResult = {
@@ -58,6 +97,7 @@ export type CustomerListResult = {
   hasNext: boolean;
   hasPrevious: boolean;
   capped?: boolean;
+  facets: CustomerFacets;
 };
 
 export type Product = {
@@ -372,7 +412,20 @@ export type StoreOrder = {
   scheduled_date?: string | null;
   scheduled_time?: string | null;
   order_date?: string;
+  order_created_at?: string | null;
+  order_timezone?: string | null;
   total?: number | null;
+  payment_method?: string | null;
+  shipping_company?: string | null;
+  shipping_company_name?: string | null;
+  shipment_status?: string | null;
+  customer_country?: string | null;
+  sales_channel?: string | null;
+  assigned_employee?: string | null;
+  pickup_branch?: string | null;
+  tags?: string[];
+  read_state?: "read" | "unread" | string | null;
+  order_kind?: "order" | "price_quote" | string | null;
   imported_at?: string;
   synced_at?: string;
   last_remote_update_at?: string;
@@ -390,6 +443,21 @@ export type StoreOrderPage = {
   hasPrevious: boolean;
   capped: boolean;
   warning: string | null;
+  facets: StoreOrderFacets;
+};
+
+export type StoreOrderFacets = {
+  statuses: FilterFacetOption[];
+  cities: FilterFacetOption[];
+  countries: FilterFacetOption[];
+  paymentMethods: FilterFacetOption[];
+  shippingCompanies: FilterFacetOption[];
+  shipmentStatuses: FilterFacetOption[];
+  salesChannels: FilterFacetOption[];
+  employees: FilterFacetOption[];
+  pickupBranches: FilterFacetOption[];
+  tags: FilterFacetOption[];
+  orderKinds: FilterFacetOption[];
 };
 
 export type StoreOrderListParams = {
@@ -397,10 +465,24 @@ export type StoreOrderListParams = {
   type?: string;
   journey?: string;
   status?: string;
+  date_from?: string;
+  date_to?: string;
+  payment_method?: string;
+  shipping_company?: string;
+  shipment_status?: string;
+  country?: string;
   city?: string;
+  sales_channel?: string;
+  assigned_employee?: string;
+  pickup_branch?: string;
+  tag?: string;
   product?: string;
+  read_state?: "read" | "unread" | string;
+  order_kind?: "order" | "price_quote" | string;
   min_total?: number;
   max_total?: number;
+  sort_by?: "order_created_at" | "order_date" | "remote_updated_at" | "total" | "order_number" | "customer_name" | string;
+  sort_direction?: "asc" | "desc";
   page?: number;
   pageSize?: number;
 };
@@ -1387,6 +1469,111 @@ const CUSTOMER_SCAN_LIMIT = 10_000;
 const DEFAULT_CUSTOMER_PAGE_SIZE = 50;
 const MAX_CUSTOMER_PAGE_SIZE = 100;
 
+const emptyCustomerFacets = (): CustomerFacets => ({
+  sources: [],
+  groups: [],
+  cities: [],
+  countries: [],
+  genders: [],
+  statuses: [],
+});
+
+function normalizeFacetOptions(value: unknown): FilterFacetOption[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const options: FilterFacetOption[] = [];
+  for (const item of value) {
+    const record = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    const rawValue = typeof item === "string" || typeof item === "number"
+      ? item
+      : record.value ?? record.id ?? record.slug ?? record.name;
+    const optionValue = String(rawValue ?? "").trim();
+    if (!optionValue || seen.has(optionValue)) continue;
+    seen.add(optionValue);
+    const label = String(record.label ?? record.name ?? optionValue).trim() || optionValue;
+    const countValue = Number(record.count);
+    options.push({
+      value: optionValue,
+      label,
+      ...(Number.isFinite(countValue) && countValue >= 0 ? { count: Math.trunc(countValue) } : {}),
+    });
+  }
+  return options;
+}
+
+function facetOptionsFromValues(values: unknown[]): FilterFacetOption[] {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    const clean = String(value ?? "").trim();
+    if (clean) counts.set(clean, (counts.get(clean) || 0) + 1);
+  }
+  return Array.from(counts, ([value, count]) => ({ value, label: value, count }))
+    .sort((left, right) => left.label.localeCompare(right.label, "ar"));
+}
+
+function normalizedCustomerText(value: unknown) {
+  return String(value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase("ar");
+}
+
+function customerGroupOptions(customer: Customer): FilterFacetOption[] {
+  const raw = customer.customer_groups ?? customer.customerGroups;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  return raw.flatMap((item) => {
+    if (item === null || item === undefined) return [];
+    if (typeof item !== "object") {
+      const label = String(item).trim();
+      const value = normalizedCustomerText(label);
+      if (!value || seen.has(value)) return [];
+      seen.add(value);
+      return [{ value, label }];
+    }
+    const record = item as { id?: string | number; name?: string; title?: string };
+    const id = String(record.id ?? "").trim();
+    const label = String(record.name ?? record.title ?? id).trim();
+    const value = normalizedCustomerText(id || label);
+    if (!value || !label || seen.has(value)) return [];
+    seen.add(value);
+    return [{ value, label }];
+  });
+}
+
+function customerGroupFacets(records: Customer[]): FilterFacetOption[] {
+  const groups = new Map<string, FilterFacetOption>();
+  for (const customer of records) {
+    for (const group of customerGroupOptions(customer)) {
+      const existing = groups.get(group.value);
+      if (existing) existing.count = (existing.count || 0) + 1;
+      else groups.set(group.value, { ...group, count: 1 });
+    }
+  }
+  return [...groups.values()].sort((left, right) => left.label.localeCompare(right.label, "ar"));
+}
+
+function customerFacetsFromRecords(records: Customer[]): CustomerFacets {
+  return {
+    sources: facetOptionsFromValues(records.map((customer) => customer.store_provider || customer.source || "unknown")),
+    groups: customerGroupFacets(records),
+    cities: facetOptionsFromValues(records.map((customer) => customer.city)),
+    countries: facetOptionsFromValues(records.map((customer) => customer.country)),
+    genders: facetOptionsFromValues(records.map((customer) => customer.gender)),
+    statuses: facetOptionsFromValues(records.map((customer) =>
+      customer.is_blocked === true ? "blocked" : customer.status || "unknown")),
+  };
+}
+
+function normalizeCustomerFacets(value: unknown): CustomerFacets {
+  const facets = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    sources: normalizeFacetOptions(facets.sources),
+    groups: normalizeFacetOptions(facets.groups),
+    cities: normalizeFacetOptions(facets.cities),
+    countries: normalizeFacetOptions(facets.countries),
+    genders: normalizeFacetOptions(facets.genders),
+    statuses: normalizeFacetOptions(facets.statuses),
+  };
+}
+
 function boundedCustomerInteger(value: unknown, fallback: number, minimum: number, maximum: number) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -1398,6 +1585,7 @@ function customerListFromRecords(
   options: Required<Pick<CustomerListOptions, "page" | "pageSize" | "all">>,
   total = records.length,
   capped = false,
+  facets = customerFacetsFromRecords(records),
 ): CustomerListResult {
   const accessible = records.slice(0, CUSTOMER_SCAN_LIMIT);
   const isCapped = capped || records.length > CUSTOMER_SCAN_LIMIT;
@@ -1411,6 +1599,7 @@ function customerListFromRecords(
       hasNext: false,
       hasPrevious: false,
       capped: isCapped,
+      facets,
     };
   }
 
@@ -1426,7 +1615,52 @@ function customerListFromRecords(
     hasNext: page < totalPages,
     hasPrevious: page > 1,
     capped: isCapped,
+    facets,
   };
+}
+
+function customerDateValue(customer: Customer) {
+  return String(customer.remote_created_at || customer.remoteCreatedAt || customer.createdAt || customer.created_at || "").slice(0, 10);
+}
+
+function customerMatchesOptions(customer: Customer, options: CustomerListOptions) {
+  const source = String(customer.store_provider || customer.source || "unknown");
+  const status = customer.is_blocked === true ? "blocked" : String(customer.status || "unknown");
+  const activity = String(customer.activity_status || (Number(customer.orders_count || 0) > 0 ? "recent" : "no_orders"));
+  const date = customerDateValue(customer);
+  return (!options.source || source === options.source) &&
+    (!options.group || customerGroupOptions(customer).some((group) => group.value === normalizedCustomerText(options.group))) &&
+    (!options.city || customer.city === options.city) &&
+    (!options.country || customer.country === options.country) &&
+    (!options.gender || customer.gender === options.gender) &&
+    (!options.status || status === options.status) &&
+    (!options.activity || (
+      options.activity === "has_orders" ? Number(customer.orders_count || 0) > 0 :
+      options.activity === "no_orders" ? Number(customer.orders_count || 0) === 0 :
+      activity === options.activity
+    )) &&
+    (!options.date_from || (date && date >= options.date_from)) &&
+    (!options.date_to || (date && date <= options.date_to));
+}
+
+function sortCustomerRecords(records: Customer[], options: CustomerListOptions) {
+  const sortBy = options.sort_by || "name";
+  const direction = options.sort_direction === "desc" ? -1 : 1;
+  const value = (customer: Customer): string | number => {
+    if (sortBy === "created_at") return customerDateValue(customer);
+    if (sortBy === "last_order_at") return String(customer.last_order_at || "");
+    if (sortBy === "orders_count") return Number(customer.orders_count || 0);
+    if (sortBy === "total_spent") return Number(customer.total_spent || 0);
+    return customer.name;
+  };
+  return [...records].sort((left, right) => {
+    const leftValue = value(left);
+    const rightValue = value(right);
+    const compared = typeof leftValue === "number" && typeof rightValue === "number"
+      ? leftValue - rightValue
+      : String(leftValue).localeCompare(String(rightValue), "ar", { numeric: true });
+    return compared * direction || left.id.localeCompare(right.id);
+  });
 }
 
 export const getCustomers = async (
@@ -1436,6 +1670,7 @@ export const getCustomers = async (
   const user = getCurrentAppUser();
   const all = requested.all ?? (requested.page === undefined && requested.pageSize === undefined);
   const options = {
+    ...requested,
     all,
     page: boundedCustomerInteger(requested.page, 1, 1, CUSTOMER_SCAN_LIMIT),
     pageSize: boundedCustomerInteger(
@@ -1449,36 +1684,52 @@ export const getCustomers = async (
   const uid = user.uid;
   if (user.local) {
     const cleanSearch = search.trim();
-    let data = [...loadLocalDb(uid).customers].sort((a, b) => a.name.localeCompare(b.name));
+    const allCustomers = [...loadLocalDb(uid).customers];
+    const facets = customerFacetsFromRecords(allCustomers);
+    let data = allCustomers.filter((customer) => customerMatchesOptions(customer, options));
     if (cleanSearch) data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
-    return customerListFromRecords(data, options);
+    data = sortCustomerRecords(data, options);
+    return customerListFromRecords(data, options, data.length, false, facets);
   }
   if (serverDataEnabled()) {
     const params = new URLSearchParams();
     if (search.trim()) params.set("search", search.trim());
+    for (const key of ["source", "group", "city", "country", "gender", "status", "activity", "date_from", "date_to", "sort_by", "sort_direction"] as const) {
+      const value = options[key];
+      if (value) params.set(key, String(value));
+    }
     if (options.all) {
       params.set("all", "true");
     } else {
       params.set("page", String(options.page));
       params.set("page_size", String(options.pageSize));
     }
-    return apiFetch<CustomerListResult>(`/api/customers${params.toString() ? `?${params}` : ""}`);
+    const response = await apiFetch<CustomerListResult>(`/api/customers${params.toString() ? `?${params}` : ""}`);
+    return { ...response, facets: normalizeCustomerFacets(response.facets) };
   }
   const baseQ = query(collection(db, "customers"), where("createdBy", "==", uid));
   const countSnap = await getCountFromServer(baseQ);
   const ownerTotal = countSnap.data().count;
   const cleanSearch = search.trim();
-  if (cleanSearch || options.all) {
+  const hasFilters = Boolean(
+    options.source || options.group || options.city || options.country || options.gender || options.status || options.activity ||
+    options.date_from || options.date_to || options.sort_by || options.sort_direction,
+  );
+  if (cleanSearch || options.all || hasFilters) {
     const snap = await getDocs(query(baseQ, orderBy("name"), limit(CUSTOMER_SCAN_LIMIT)));
-    let data = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+    const allCustomers = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Customer);
+    const facets = customerFacetsFromRecords(allCustomers);
+    let data = allCustomers.filter((customer) => customerMatchesOptions(customer, options));
     if (cleanSearch) {
       data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
     }
+    data = sortCustomerRecords(data, options);
     return customerListFromRecords(
       data,
       options,
-      cleanSearch ? data.length : ownerTotal,
+      cleanSearch || hasFilters ? data.length : ownerTotal,
       ownerTotal > CUSTOMER_SCAN_LIMIT,
+      facets,
     );
   }
 
@@ -1498,6 +1749,7 @@ export const getCustomers = async (
     hasNext: page < totalPages,
     hasPrevious: page > 1,
     capped: ownerTotal > CUSTOMER_SCAN_LIMIT,
+    facets: emptyCustomerFacets(),
   };
 };
 
@@ -3204,6 +3456,37 @@ export const prepareDailyOperations = async (data: { syncSalla?: boolean } = {})
   });
 };
 
+const emptyStoreOrderFacets = (): StoreOrderFacets => ({
+  statuses: [],
+  cities: [],
+  countries: [],
+  paymentMethods: [],
+  shippingCompanies: [],
+  shipmentStatuses: [],
+  salesChannels: [],
+  employees: [],
+  pickupBranches: [],
+  tags: [],
+  orderKinds: [],
+});
+
+function normalizeStoreOrderFacets(value: unknown): StoreOrderFacets {
+  const facets = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    statuses: normalizeFacetOptions(facets.statuses ?? facets.status),
+    cities: normalizeFacetOptions(facets.cities ?? facets.city),
+    countries: normalizeFacetOptions(facets.countries ?? facets.country),
+    paymentMethods: normalizeFacetOptions(facets.paymentMethods ?? facets.payment_methods ?? facets.payment_method),
+    shippingCompanies: normalizeFacetOptions(facets.shippingCompanies ?? facets.shipping_companies ?? facets.shipping_company),
+    shipmentStatuses: normalizeFacetOptions(facets.shipmentStatuses ?? facets.shipment_statuses ?? facets.shipment_status),
+    salesChannels: normalizeFacetOptions(facets.salesChannels ?? facets.sales_channels ?? facets.sales_channel),
+    employees: normalizeFacetOptions(facets.employees ?? facets.assigned_employee),
+    pickupBranches: normalizeFacetOptions(facets.pickupBranches ?? facets.pickup_branches ?? facets.pickup_branch),
+    tags: normalizeFacetOptions(facets.tags ?? facets.tag),
+    orderKinds: normalizeFacetOptions(facets.orderKinds ?? facets.order_kinds ?? facets.order_kind),
+  };
+}
+
 const emptyStoreOrderPage = (params: StoreOrderListParams = {}): StoreOrderPage => ({
   data: [],
   total: 0,
@@ -3214,6 +3497,7 @@ const emptyStoreOrderPage = (params: StoreOrderListParams = {}): StoreOrderPage 
   hasPrevious: false,
   capped: false,
   warning: null,
+  facets: emptyStoreOrderFacets(),
 });
 
 export const getStoreOrders = async (params: StoreOrderListParams = {}): Promise<StoreOrderPage> => {
@@ -3224,8 +3508,27 @@ export const getStoreOrders = async (params: StoreOrderListParams = {}): Promise
   if (params.type && params.type !== "all") search.set("type", params.type);
   if (params.journey && params.journey !== "all") search.set("journey", params.journey);
   if (params.status && params.status !== "all") search.set("status", params.status);
-  if (params.city?.trim()) search.set("city", params.city.trim());
-  if (params.product?.trim()) search.set("product", params.product.trim());
+  for (const key of [
+    "date_from",
+    "date_to",
+    "payment_method",
+    "shipping_company",
+    "shipment_status",
+    "country",
+    "city",
+    "sales_channel",
+    "assigned_employee",
+    "pickup_branch",
+    "tag",
+    "product",
+    "read_state",
+    "order_kind",
+    "sort_by",
+    "sort_direction",
+  ] as const) {
+    const value = params[key];
+    if (String(value || "").trim()) search.set(key, String(value).trim());
+  }
   if (typeof params.min_total === "number" && Number.isFinite(params.min_total)) {
     search.set("min_total", String(params.min_total));
   }
@@ -3237,7 +3540,7 @@ export const getStoreOrders = async (params: StoreOrderListParams = {}): Promise
   const response = await apiFetch<StoreOrderPage | StoreOrder[]>(
     `/api/store/orders${search.toString() ? `?${search.toString()}` : ""}`,
   );
-  if (!Array.isArray(response)) return response;
+  if (!Array.isArray(response)) return { ...response, facets: normalizeStoreOrderFacets(response.facets) };
   return {
     ...emptyStoreOrderPage(params),
     data: response,

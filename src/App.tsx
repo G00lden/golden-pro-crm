@@ -75,6 +75,31 @@ import {
 
 type AuthMode = "login" | "register";
 
+const pageIds = new Set<Page>([
+  "dash",
+  "customers",
+  "quotes",
+  "invoices",
+  "odooCrm",
+  "products",
+  "installations",
+  "bookings",
+  "storeOrders",
+  "care",
+  "technicians",
+  "messages",
+  "campaigns",
+  "callSystem",
+  "settings",
+  "adminUsers",
+]);
+
+function pageFromLocation(): Page {
+  if (typeof window === "undefined") return "dash";
+  const requested = new URL(window.location.href).searchParams.get("section");
+  return requested && pageIds.has(requested as Page) ? requested as Page : "dash";
+}
+
 function authErrorMessage(error: unknown) {
   const code = typeof error === "object" && error && "code" in error ? String((error as { code?: string }).code) : "";
   const message = error instanceof Error ? error.message : String(error || "");
@@ -268,7 +293,7 @@ function Modal({ modal, onClose }: { modal: ModalState; onClose: () => void }) {
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>("dash");
+  const [page, setPage] = useState<Page>(pageFromLocation);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [modal, setModal] = useState<ModalState>(null);
   const [toast, setToast] = useState<Toast>(null);
@@ -280,6 +305,12 @@ export default function App() {
     document.documentElement.classList.toggle("light-mode", lightMode);
     localStorage.setItem("gp_light_mode", String(lightMode));
   }, [lightMode]);
+
+  useEffect(() => {
+    const restorePageFromUrl = () => setPage(pageFromLocation());
+    window.addEventListener("popstate", restorePageFromUrl);
+    return () => window.removeEventListener("popstate", restorePageFromUrl);
+  }, []);
 
   useEffect(() => {
     return onAppAuthStateChanged((user) => {
@@ -369,6 +400,10 @@ export default function App() {
   const openPage = (nextPage: Page) => {
     setPage(nextPage);
     setSidebarOpen(false);
+    const url = new URL(window.location.href);
+    if (nextPage === "dash") url.searchParams.delete("section");
+    else url.searchParams.set("section", nextPage);
+    if (url.href !== window.location.href) window.history.pushState({}, "", url);
   };
 
   const pages: Record<Page, ReactNode> = {

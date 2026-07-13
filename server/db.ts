@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10303;
+const TARGET_SCHEMA_VERSION = 10304;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -105,6 +105,8 @@ for (const col of [
   ["order_id", "TEXT"],
   ["order_number", "TEXT"],
   ["order_date", "TEXT"],
+  ["order_created_at", "TEXT"],
+  ["order_timezone", "TEXT"],
   ["scheduled_date", "TEXT"],
   ["scheduled_time", "TEXT"],
   ["total", "NUMERIC"],
@@ -124,6 +126,17 @@ for (const col of [
   ["remote_synced_at", "TEXT"],
   ["sync_origin", "TEXT"],
   ["remote_deleted_at", "TEXT"],
+  ["payment_method", "TEXT"],
+  ["shipping_company", "TEXT"],
+  ["shipment_status", "TEXT"],
+  ["country", "TEXT"],
+  ["sales_channel", "TEXT"],
+  ["assigned_employee", "TEXT"],
+  ["pickup_branch", "TEXT"],
+  ["order_tags", "TEXT DEFAULT '[]'"],
+  ["is_read", "INTEGER"],
+  ["is_price_quote", "INTEGER"],
+  ["metadata_contract_version", "INTEGER DEFAULT 1"],
   // Columns that ONLY existed in the full CREATE TABLE below (line ~262). Because
   // the shell table above is created first, that CREATE ... IF NOT EXISTS is a
   // no-op, so on a fresh DB these were never created and every store-order
@@ -147,6 +160,8 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_imported ON store_orders(imported_at)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_owner_created ON store_orders(owner_uid, order_created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_owner_status_created ON store_orders(owner_uid, remote_status_slug, order_created_at DESC)");
 
 // Durable Salla order synchronization queues. The inbox makes incoming events
 // replayable; commands provide an idempotent outbox for changes sent to Salla.
@@ -1057,11 +1072,23 @@ db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices
 for (const col of [
   ["store_provider", "TEXT"],
   ["store_customer_id", "TEXT"],
+  ["email", "TEXT"],
+  ["country", "TEXT"],
+  ["gender", "TEXT"],
+  ["location", "TEXT"],
+  ["customer_groups", "TEXT DEFAULT '[]'"],
+  ["is_blocked", "INTEGER"],
+  ["block_reason", "TEXT"],
+  ["remote_created_at", "TEXT"],
+  ["remote_updated_at", "TEXT"],
+  ["remote_timezone", "TEXT"],
 ] as const) {
   if (!hasColumn("customers", col[0])) {
     db.exec(`ALTER TABLE customers ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+db.exec("CREATE INDEX IF NOT EXISTS idx_customers_owner_source_created ON customers(owner_uid, store_provider, created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_customers_owner_city_name ON customers(owner_uid, city, name)");
 
 // Seller identity is saved per-owner via PUT /api/settings (defaultSettings
 // always includes these), but the settings table never declared the columns —
@@ -1091,6 +1118,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10200, '1.2.0');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10300, '1.3.0');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10303, '1.3.3');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10304, '1.3.4');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

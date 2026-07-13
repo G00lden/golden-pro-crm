@@ -80,7 +80,7 @@ for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10303) throw new Error(`Expected schema 10303, got ${userVersion}`);
+if (userVersion !== 10304) throw new Error(`Expected schema 10304, got ${userVersion}`);
 
 for (const required of [
   "remote_status_id",
@@ -90,8 +90,43 @@ for (const required of [
   "remote_synced_at",
   "sync_origin",
   "remote_deleted_at",
+  "order_created_at",
+  "order_timezone",
+  "payment_method",
+  "shipping_company",
+  "shipment_status",
+  "country",
+  "sales_channel",
+  "assigned_employee",
+  "pickup_branch",
+  "order_tags",
+  "is_read",
+  "is_price_quote",
+  "metadata_contract_version",
 ]) {
   if (!columns("store_orders").has(required)) throw new Error(`store_orders.${required} is missing`);
+}
+
+for (const required of [
+  "email",
+  "country",
+  "gender",
+  "location",
+  "customer_groups",
+  "is_blocked",
+  "block_reason",
+  "remote_created_at",
+  "remote_updated_at",
+  "remote_timezone",
+]) {
+  if (!columns("customers").has(required)) throw new Error(`customers.${required} is missing`);
+}
+
+for (const required of ["idx_store_orders_owner_created", "idx_store_orders_owner_status_created"]) {
+  if (!indexes("store_orders").has(required)) throw new Error(`${required} is missing`);
+}
+for (const required of ["idx_customers_owner_source_created", "idx_customers_owner_city_name"]) {
+  if (!indexes("customers").has(required)) throw new Error(`${required} is missing`);
 }
 
 const inboxColumns = columns("salla_order_inbox");
@@ -204,6 +239,8 @@ const campaignMigration = db.prepare("SELECT release FROM schema_migrations WHER
 if (campaignMigration?.release !== "1.3.0") throw new Error("Campaign migration ledger was not updated.");
 const orderSyncMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10303").get() as { release?: string };
 if (orderSyncMigration?.release !== "1.3.3") throw new Error("Salla order-sync migration ledger was not updated.");
+const filterMetadataMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10304").get() as { release?: string };
+if (filterMetadataMigration?.release !== "1.3.4") throw new Error("Salla filter-metadata migration ledger was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

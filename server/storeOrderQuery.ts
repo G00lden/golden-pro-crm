@@ -1,9 +1,11 @@
 import { adminDb } from "./firebaseAdmin";
 import { MAX_OWNED_SCAN_LIMIT, type OwnedRecord } from "./repositories/ownedRepository";
 import {
+  buildStoreOrderFacets,
   filterStoreOrderRecords,
   paginateStoreOrderRecords,
   parseStoreOrderListQuery,
+  sortStoreOrderRecords,
   type StoreOrderPage,
 } from "./storeOrderPagination";
 
@@ -17,6 +19,18 @@ export function normalizeStoreOrderRemoteFields<T extends Record<string, unknown
     remote_synced_at: order.remote_synced_at ?? order.remoteSyncedAt ?? null,
     sync_origin: order.sync_origin ?? order.syncOrigin ?? null,
     remote_deleted_at: order.remote_deleted_at ?? order.remoteDeletedAt ?? null,
+    order_created_at: order.order_created_at ?? order.orderCreatedAt ?? null,
+    order_timezone: order.order_timezone ?? order.orderTimezone ?? null,
+    payment_method: order.payment_method ?? order.paymentMethod ?? null,
+    shipping_company: order.shipping_company ?? order.shippingCompany ?? null,
+    shipment_status: order.shipment_status ?? order.shipmentStatus ?? null,
+    sales_channel: order.sales_channel ?? order.salesChannel ?? null,
+    assigned_employee: order.assigned_employee ?? order.assignedEmployee ?? null,
+    pickup_branch: order.pickup_branch ?? order.pickupBranch ?? null,
+    order_tags: order.order_tags ?? order.orderTags ?? [],
+    is_read: order.is_read ?? order.isRead ?? null,
+    is_price_quote: order.is_price_quote ?? order.isPriceQuote ?? null,
+    metadata_contract_version: order.metadata_contract_version ?? order.metadataContractVersion ?? null,
   };
 }
 
@@ -38,8 +52,10 @@ export async function getStoreOrderPageForUser(
   const capped = loaded.length > MAX_OWNED_SCAN_LIMIT;
   const accessible = loaded.slice(0, MAX_OWNED_SCAN_LIMIT);
   const filtered = filterStoreOrderRecords(accessible, query);
-  return paginateStoreOrderRecords(filtered, query, {
+  const sorted = sortStoreOrderRecords(filtered, query);
+  return paginateStoreOrderRecords(sorted, query, {
     total: filtered.length,
     capped,
+    facets: buildStoreOrderFacets(accessible),
   });
 }

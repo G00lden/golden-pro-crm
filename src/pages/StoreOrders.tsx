@@ -12,6 +12,8 @@ import {
   SelectInput,
   TextInput,
   fmtDate,
+  fmtStoreOrderDateTime,
+  storeOrderDateKey,
   journeyLabel,
   journeyTone,
   moneyLabel,
@@ -22,6 +24,132 @@ import {
   useData,
   type ModalState,
 } from "../shared";
+import { usePrefixedUrlState, type UrlFilterSchema } from "../filterUrlState";
+
+const STORE_ORDER_TABS = [
+  ["all", "الكل"],
+  ["needs_review", "مراجعة"],
+  ["awaiting_schedule", "بانتظار الجدولة"],
+  ["booking_created", "محولة لفني"],
+  ["sale_only", "بيع فقط"],
+  ["install_maintenance", "تركيب"],
+  ["maintenance_existing", "صيانة سابقة"],
+  ["external_maintenance", "صيانة خارجية"],
+] as const;
+
+type StoreOrderUrlFilters = {
+  q: string;
+  tab: string;
+  status: string;
+  date_from: string;
+  date_to: string;
+  payment_method: string;
+  shipping_company: string;
+  shipment_status: string;
+  country: string;
+  city: string;
+  sales_channel: string;
+  assigned_employee: string;
+  pickup_branch: string;
+  tag: string;
+  product: string;
+  read_state: string;
+  order_kind: string;
+  min_total: string;
+  max_total: string;
+  sort_by: string;
+  sort_direction: string;
+  page: string;
+  page_size: string;
+};
+
+const STORE_ORDER_URL_DEFAULTS: StoreOrderUrlFilters = {
+  q: "",
+  tab: "all",
+  status: "",
+  date_from: "",
+  date_to: "",
+  payment_method: "",
+  shipping_company: "",
+  shipment_status: "",
+  country: "",
+  city: "",
+  sales_channel: "",
+  assigned_employee: "",
+  pickup_branch: "",
+  tag: "",
+  product: "",
+  read_state: "",
+  order_kind: "",
+  min_total: "",
+  max_total: "",
+  sort_by: "order_created_at",
+  sort_direction: "desc",
+  page: "1",
+  page_size: "50",
+};
+
+const STORE_ORDER_URL_SCHEMA: UrlFilterSchema<StoreOrderUrlFilters> = {
+  q: { type: "text", maxLength: 200, trim: false },
+  tab: { type: "enum", values: STORE_ORDER_TABS.map(([value]) => value) },
+  status: { type: "text", maxLength: 120 },
+  date_from: { type: "date" },
+  date_to: { type: "date" },
+  payment_method: { type: "text", maxLength: 120 },
+  shipping_company: { type: "text", maxLength: 120 },
+  shipment_status: { type: "text", maxLength: 120 },
+  country: { type: "text", maxLength: 120 },
+  city: { type: "text", maxLength: 120 },
+  sales_channel: { type: "text", maxLength: 120 },
+  assigned_employee: { type: "text", maxLength: 120 },
+  pickup_branch: { type: "text", maxLength: 120 },
+  tag: { type: "text", maxLength: 120 },
+  product: { type: "text", maxLength: 200, trim: false },
+  read_state: { type: "enum", values: ["", "read", "unread"] },
+  order_kind: { type: "enum", values: ["", "order", "price_quote"] },
+  min_total: { type: "decimal", minimum: 0 },
+  max_total: { type: "decimal", minimum: 0 },
+  sort_by: {
+    type: "enum",
+    values: ["order_created_at", "order_date", "remote_updated_at", "total", "order_number", "customer_name"],
+  },
+  sort_direction: { type: "enum", values: ["asc", "desc"] },
+  page: { type: "integer", minimum: 1, maximum: 10_000 },
+  page_size: { type: "enum", values: ["25", "50", "100"] },
+};
+
+function facetLabel(option: api.FilterFacetOption) {
+  return option.count === undefined ? option.label : `${option.label} (${option.count.toLocaleString("ar-SA")})`;
+}
+
+function FacetFilterSelect({
+  label,
+  name,
+  value,
+  allLabel,
+  options,
+  onChange,
+}: {
+  label: string;
+  name: string;
+  value: string;
+  allLabel: string;
+  options?: api.FilterFacetOption[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="filter-group">
+      <Field label={label}>
+        <SelectInput name={name} value={value} onChange={(event) => onChange(event.target.value)}>
+          <option value="">{allLabel}</option>
+          {(options || []).map((option) => (
+            <option key={option.value} value={option.value}>{facetLabel(option)}</option>
+          ))}
+        </SelectInput>
+      </Field>
+    </div>
+  );
+}
 
 export default function StoreOrdersPage({
   notify,
@@ -32,20 +160,17 @@ export default function StoreOrdersPage({
   refreshStats: () => Promise<void>;
   setModal: (modal: ModalState) => void;
 }) {
-  const [filter, setFilter] = useState("all");
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
-  const [cityInput, setCityInput] = useState("");
-  const [city, setCity] = useState("");
-  const [productInput, setProductInput] = useState("");
-  const [product, setProduct] = useState("");
-  const [minTotalInput, setMinTotalInput] = useState("");
-  const [minTotal, setMinTotal] = useState<number | undefined>();
-  const [maxTotalInput, setMaxTotalInput] = useState("");
-  const [maxTotal, setMaxTotal] = useState<number | undefined>();
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const [urlFilters, setUrlFilters] = usePrefixedUrlState(
+    "o",
+    STORE_ORDER_URL_DEFAULTS,
+    STORE_ORDER_URL_SCHEMA,
+  );
+  const [debouncedText, setDebouncedText] = useState(() => ({
+    search: urlFilters.q.trim(),
+    product: urlFilters.product.trim(),
+    minTotal: urlFilters.min_total,
+    maxTotal: urlFilters.max_total,
+  }));
   const [showFilters, setShowFilters] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -55,58 +180,82 @@ export default function StoreOrdersPage({
   const realtimeCreatedIdsRef = useRef<Set<string>>(new Set());
   const refreshRequestSequenceRef = useRef(0);
   const bootstrappedRef = useRef(false);
+  const firstFilterControlRef = useRef<HTMLSelectElement | null>(null);
+  const filter = urlFilters.tab;
+  const page = Number(urlFilters.page) || 1;
+  const pageSize = Number(urlFilters.page_size) || 50;
   const journeyFilter = ["needs_review", "awaiting_schedule", "booking_created"].includes(filter)
     ? filter
     : "";
   const typeFilter = filter !== "all" && !journeyFilter ? filter : "";
-  const orderQuery = useMemo<api.StoreOrderListParams>(() => ({
-    search,
-    type: typeFilter,
-    journey: journeyFilter,
-    status: statusFilter,
-    city,
-    product,
-    min_total: minTotal,
-    max_total: maxTotal,
-    page,
-    pageSize,
-  }), [city, journeyFilter, maxTotal, minTotal, page, pageSize, product, search, statusFilter, typeFilter]);
-  const orderQueryKey = useMemo(() => JSON.stringify(orderQuery), [orderQuery]);
-  const activeOrderQueryKeyRef = useRef(orderQueryKey);
-  activeOrderQueryKeyRef.current = orderQueryKey;
-  const orders = useData(
-    () => api.getStoreOrders(orderQuery),
-    [search, typeFilter, journeyFilter, statusFilter, city, product, minTotal, maxTotal, page, pageSize],
-  );
-  const sallaStatuses = useData(api.getSallaOrderStatuses);
-  const setOrderData = orders.setData;
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setSearch(searchInput.trim()), 300);
-    return () => window.clearTimeout(timer);
-  }, [searchInput]);
-
   const totalRangeError = useMemo(() => {
-    const minimum = minTotalInput.trim() === "" ? undefined : Number(minTotalInput);
-    const maximum = maxTotalInput.trim() === "" ? undefined : Number(maxTotalInput);
+    const minimum = urlFilters.min_total.trim() === "" ? undefined : Number(urlFilters.min_total);
+    const maximum = urlFilters.max_total.trim() === "" ? undefined : Number(urlFilters.max_total);
     if (minimum !== undefined && (!Number.isFinite(minimum) || minimum < 0)) return "أدخل حدًا أدنى صحيحًا للقيمة.";
     if (maximum !== undefined && (!Number.isFinite(maximum) || maximum < 0)) return "أدخل حدًا أعلى صحيحًا للقيمة.";
     if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
       return "يجب أن يكون الحد الأدنى للقيمة أقل من الحد الأعلى أو مساويًا له.";
     }
     return "";
-  }, [maxTotalInput, minTotalInput]);
+  }, [urlFilters.max_total, urlFilters.min_total]);
+  const dateRangeError = urlFilters.date_from && urlFilters.date_to && urlFilters.date_from > urlFilters.date_to
+    ? "يجب أن يكون تاريخ البداية قبل تاريخ النهاية أو مساويًا له."
+    : "";
+  const updateOrderFilter = useCallback((key: keyof StoreOrderUrlFilters, value: string, resetPage = true) => {
+    setUrlFilters((current) => ({
+      ...current,
+      [key]: value,
+      ...(resetPage && key !== "page" ? { page: "1" } : {}),
+    }));
+  }, [setUrlFilters]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setCity(cityInput.trim());
-      setProduct(productInput.trim());
-      if (totalRangeError) return;
-      setMinTotal(minTotalInput.trim() === "" ? undefined : Number(minTotalInput));
-      setMaxTotal(maxTotalInput.trim() === "" ? undefined : Number(maxTotalInput));
-    }, 300);
+    const timer = window.setTimeout(() => setDebouncedText({
+      search: urlFilters.q.trim(),
+      product: urlFilters.product.trim(),
+      minTotal: urlFilters.min_total,
+      maxTotal: urlFilters.max_total,
+    }), 300);
     return () => window.clearTimeout(timer);
-  }, [cityInput, maxTotalInput, minTotalInput, productInput, totalRangeError]);
+  }, [urlFilters.max_total, urlFilters.min_total, urlFilters.product, urlFilters.q]);
+
+  const minTotal = !totalRangeError && debouncedText.minTotal !== "" ? Number(debouncedText.minTotal) : undefined;
+  const maxTotal = !totalRangeError && debouncedText.maxTotal !== "" ? Number(debouncedText.maxTotal) : undefined;
+  const orderQuery = useMemo<api.StoreOrderListParams>(() => ({
+    search: debouncedText.search,
+    type: typeFilter,
+    journey: journeyFilter,
+    status: urlFilters.status,
+    date_from: dateRangeError ? "" : urlFilters.date_from,
+    date_to: dateRangeError ? "" : urlFilters.date_to,
+    payment_method: urlFilters.payment_method,
+    shipping_company: urlFilters.shipping_company,
+    shipment_status: urlFilters.shipment_status,
+    country: urlFilters.country,
+    city: urlFilters.city,
+    sales_channel: urlFilters.sales_channel,
+    assigned_employee: urlFilters.assigned_employee,
+    pickup_branch: urlFilters.pickup_branch,
+    tag: urlFilters.tag,
+    product: debouncedText.product,
+    read_state: urlFilters.read_state,
+    order_kind: urlFilters.order_kind,
+    min_total: minTotal,
+    max_total: maxTotal,
+    sort_by: urlFilters.sort_by,
+    sort_direction: urlFilters.sort_direction as "asc" | "desc",
+    page,
+    pageSize,
+  }), [dateRangeError, debouncedText.product, debouncedText.search, journeyFilter, maxTotal, minTotal, page, pageSize, typeFilter, urlFilters]);
+  const orderQueryKey = useMemo(() => JSON.stringify(orderQuery), [orderQuery]);
+  const activeOrderQueryKeyRef = useRef(orderQueryKey);
+  activeOrderQueryKeyRef.current = orderQueryKey;
+  const orders = useData(
+    () => api.getStoreOrders(orderQuery),
+    [orderQueryKey],
+  );
+  const sallaStatuses = useData(api.getSallaOrderStatuses);
+  const setOrderData = orders.setData;
 
   const openWorkflowForm = (order: api.StoreOrder, item?: api.StoreOrderItem) => {
     setModal({
@@ -188,8 +337,9 @@ export default function StoreOrdersPage({
         refreshRequestSequenceRef.current !== requestSequence
       ) return;
       setOrderData(nextOrders);
-      const isUnfilteredFirstPage = page === 1 && !search && !typeFilter && !journeyFilter && !statusFilter &&
-        !city && !product && minTotal === undefined && maxTotal === undefined;
+      const isUnfilteredFirstPage = page === 1 &&
+        (Object.keys(STORE_ORDER_URL_DEFAULTS) as Array<keyof StoreOrderUrlFilters>)
+          .every((key) => key === "page" || urlFilters[key] === STORE_ORDER_URL_DEFAULTS[key]);
       updateSeenOrders(nextOrders.data, !isUnfilteredFirstPage);
 
       if (!options.background || options.sync) {
@@ -203,7 +353,7 @@ export default function StoreOrdersPage({
       setSyncing(false);
       setRefreshing(false);
     }
-  }, [city, journeyFilter, maxTotal, minTotal, notify, orderQuery, page, product, refreshStats, search, setOrderData, statusFilter, typeFilter, updateSeenOrders]);
+  }, [notify, orderQuery, page, refreshStats, setOrderData, updateSeenOrders, urlFilters]);
   const refreshOrdersRef = useRef(refreshOrders);
   const realtimeRefreshTimerRef = useRef<number | null>(null);
 
@@ -262,35 +412,60 @@ export default function StoreOrdersPage({
 
   const pageData = orders.data;
   const allOrders = pageData?.data || [];
-  const availableStatuses = useMemo(
+  const facets = pageData?.facets;
+  const activeSallaStatuses = useMemo(
     () => (sallaStatuses.data || []).filter((status) => status.is_active !== false && status.slug),
     [sallaStatuses.data],
   );
+  const availableStatuses = useMemo(() => {
+    const bySlug = new Map<string, api.SallaOrderStatus>();
+    for (const status of activeSallaStatuses) {
+      const slug = String(status.slug || "").trim();
+      if (!slug) continue;
+      bySlug.set(slug.toLocaleLowerCase("en"), { ...status, slug });
+    }
+    for (const option of facets?.statuses || []) {
+      const slug = String(option.value || "").trim();
+      const key = slug.toLocaleLowerCase("en");
+      if (!slug || bySlug.has(key)) continue;
+      bySlug.set(key, {
+        id: `facet:${slug}`,
+        slug,
+        name: option.label || slug,
+        is_active: true,
+      });
+    }
+    return [...bySlug.values()];
+  }, [activeSallaStatuses, facets?.statuses]);
   const numberFormatter = useMemo(() => new Intl.NumberFormat("ar-SA"), []);
   const formatCount = useCallback((value: number) => numberFormatter.format(value), [numberFormatter]);
+  const activeOrderFilterCount = useMemo(() => (
+    (Object.keys(STORE_ORDER_URL_DEFAULTS) as Array<keyof StoreOrderUrlFilters>)
+      .filter((key) => !["q", "tab", "page"].includes(key))
+      .filter((key) => urlFilters[key] !== STORE_ORDER_URL_DEFAULTS[key]).length
+  ), [urlFilters]);
+
+  useEffect(() => {
+    if (activeOrderFilterCount > 0) setShowFilters(true);
+  }, [activeOrderFilterCount]);
+
+  useEffect(() => {
+    if (!pageData?.page || pageData.page === page) return;
+    updateOrderFilter("page", String(pageData.page), false);
+  }, [page, pageData?.page, updateOrderFilter]);
 
   const summary = useMemo(() => {
-    const todayKey = today();
+    const todayKey = storeOrderDateKey(new Date().toISOString(), "Asia/Riyadh");
     return {
       total: pageData?.total || 0,
       visible: allOrders.length,
       needsReview: allOrders.filter((order) => order.journey_status === "needs_review" || order.items?.some((item) => item.status === "needs_review")).length,
       currentPage: pageData?.page || 1,
       totalPages: pageData?.totalPages || 1,
-      today: allOrders.filter((order) => String(order.imported_at || order.order_date || "").startsWith(todayKey)).length,
+      today: allOrders.filter((order) =>
+        storeOrderDateKey(order.order_created_at, order.order_timezone, order.order_date) === todayKey).length,
     };
   }, [allOrders, pageData?.page, pageData?.total, pageData?.totalPages]);
-
-  const tabs = [
-    ["all", "الكل"],
-    ["needs_review", "مراجعة"],
-    ["awaiting_schedule", "بانتظار الجدولة"],
-    ["booking_created", "محولة لفني"],
-    ["sale_only", "بيع فقط"],
-    ["install_maintenance", "تركيب"],
-    ["maintenance_existing", "صيانة سابقة"],
-    ["external_maintenance", "صيانة خارجية"],
-  ] as const;
 
   const storeOrderItemTotal = (item: api.StoreOrderItem) => {
     if (typeof item.total_price === "number" && Number.isFinite(item.total_price)) return item.total_price;
@@ -345,7 +520,7 @@ export default function StoreOrdersPage({
       void sallaStatuses.refresh();
       return;
     }
-    if (!availableStatuses.length) {
+    if (!activeSallaStatuses.length) {
       notify("لم ترجع سلة أي حالات نشطة يمكن اختيارها.", false);
       return;
     }
@@ -355,7 +530,7 @@ export default function StoreOrdersPage({
       content: (
         <StoreOrderStatusForm
           order={order}
-          statuses={availableStatuses}
+          statuses={activeSallaStatuses}
           onCancel={() => setModal(null)}
           onSaved={async (message) => {
             notify(message);
@@ -432,20 +607,22 @@ export default function StoreOrdersPage({
               autoComplete="off"
               name="store_order_search"
               placeholder="ابحث برقم الطلب، العميل، الجوال، المنتج أو SKU…"
-              value={searchInput}
-              onChange={(event) => {
-                setSearchInput(event.target.value);
-                setPage(1);
-              }}
+              value={urlFilters.q}
+              onChange={(event) => updateOrderFilter("q", event.target.value)}
             />
           </div>
           <button
             type="button"
             className={`btn ${showFilters ? "primary" : "muted"}`}
             aria-expanded={showFilters}
-            onClick={() => setShowFilters(!showFilters)}
+            aria-controls="store-order-filters"
+            onClick={() => setShowFilters((current) => {
+              const next = !current;
+              if (next) window.requestAnimationFrame(() => firstFilterControlRef.current?.focus());
+              return next;
+            })}
           >
-            <Filter size={14} /> فلاتر متقدمة
+            <Filter size={14} /> فلاتر متقدمة{activeOrderFilterCount ? ` (${formatCount(activeOrderFilterCount)})` : ""}
           </button>
           <label className="toggle-control">
             <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
@@ -455,40 +632,57 @@ export default function StoreOrdersPage({
         </div>
 
         {showFilters && (
-          <div className="store-filters-bar">
+          <div className="store-filters-bar" id="store-order-filters" role="region" aria-label="فلاتر طلبات المتجر">
             <div className="filter-group">
-              <label>
-                <span>حالة الطلب في سلة</span>
+              <Field label="حالة الطلب في سلة">
                 <select
                   className="input"
+                  ref={firstFilterControlRef}
                   name="salla_status_filter"
-                  value={statusFilter}
-                  onChange={(event) => {
-                    setStatusFilter(event.target.value);
-                    setPage(1);
-                  }}
+                  value={urlFilters.status}
+                  disabled={sallaStatuses.loading && !availableStatuses.length}
+                  onChange={(event) => updateOrderFilter("status", event.target.value)}
                 >
                   <option value="">كل حالات سلة</option>
                   {availableStatuses.map((status) => (
                     <option key={String(status.id)} value={status.slug}>{status.name}</option>
                   ))}
                 </select>
-              </label>
+              </Field>
             </div>
             <div className="filter-group">
-              <Field label="المدينة">
+              <Field label="من تاريخ الطلب">
                 <TextInput
-                  name="store_order_city_filter"
+                  type="date"
+                  name="store_order_date_from"
                   autoComplete="off"
-                  placeholder="مثال: الرياض…"
-                  value={cityInput}
-                  onChange={(event) => {
-                    setCityInput(event.target.value);
-                    setPage(1);
-                  }}
+                  value={urlFilters.date_from}
+                  max={urlFilters.date_to || undefined}
+                  onChange={(event) => updateOrderFilter("date_from", event.target.value)}
                 />
               </Field>
             </div>
+            <div className="filter-group">
+              <Field label="إلى تاريخ الطلب">
+                <TextInput
+                  type="date"
+                  name="store_order_date_to"
+                  autoComplete="off"
+                  value={urlFilters.date_to}
+                  min={urlFilters.date_from || undefined}
+                  onChange={(event) => updateOrderFilter("date_to", event.target.value)}
+                />
+              </Field>
+            </div>
+            <FacetFilterSelect label="طريقة الدفع" name="store_order_payment_method" value={urlFilters.payment_method} allLabel="كل طرق الدفع" options={facets?.paymentMethods} onChange={(value) => updateOrderFilter("payment_method", value)} />
+            <FacetFilterSelect label="شركة الشحن" name="store_order_shipping_company" value={urlFilters.shipping_company} allLabel="كل شركات الشحن" options={facets?.shippingCompanies} onChange={(value) => updateOrderFilter("shipping_company", value)} />
+            <FacetFilterSelect label="حالة الشحنة" name="store_order_shipment_status" value={urlFilters.shipment_status} allLabel="كل حالات الشحنة" options={facets?.shipmentStatuses} onChange={(value) => updateOrderFilter("shipment_status", value)} />
+            <FacetFilterSelect label="الدولة" name="store_order_country" value={urlFilters.country} allLabel="كل الدول" options={facets?.countries} onChange={(value) => updateOrderFilter("country", value)} />
+            <FacetFilterSelect label="المدينة" name="store_order_city" value={urlFilters.city} allLabel="كل المدن" options={facets?.cities} onChange={(value) => updateOrderFilter("city", value)} />
+            <FacetFilterSelect label="قناة البيع" name="store_order_sales_channel" value={urlFilters.sales_channel} allLabel="كل قنوات البيع" options={facets?.salesChannels} onChange={(value) => updateOrderFilter("sales_channel", value)} />
+            <FacetFilterSelect label="الموظف" name="store_order_employee" value={urlFilters.assigned_employee} allLabel="كل الموظفين" options={facets?.employees} onChange={(value) => updateOrderFilter("assigned_employee", value)} />
+            <FacetFilterSelect label="فرع الاستلام" name="store_order_pickup_branch" value={urlFilters.pickup_branch} allLabel="كل الفروع" options={facets?.pickupBranches} onChange={(value) => updateOrderFilter("pickup_branch", value)} />
+            <FacetFilterSelect label="الوسم" name="store_order_tag" value={urlFilters.tag} allLabel="كل الوسوم" options={facets?.tags} onChange={(value) => updateOrderFilter("tag", value)} />
             <div className="filter-group">
               <Field label="المنتج أو رمز SKU">
                 <TextInput
@@ -496,12 +690,27 @@ export default function StoreOrdersPage({
                   autoComplete="off"
                   spellCheck={false}
                   placeholder="اسم المنتج أو الرمز…"
-                  value={productInput}
-                  onChange={(event) => {
-                    setProductInput(event.target.value);
-                    setPage(1);
-                  }}
+                  value={urlFilters.product}
+                  onChange={(event) => updateOrderFilter("product", event.target.value)}
                 />
+              </Field>
+            </div>
+            <div className="filter-group">
+              <Field label="حالة القراءة">
+                <SelectInput name="store_order_read_state" value={urlFilters.read_state} onChange={(event) => updateOrderFilter("read_state", event.target.value)}>
+                  <option value="">المقروءة وغير المقروءة</option>
+                  <option value="unread">غير مقروءة</option>
+                  <option value="read">مقروءة</option>
+                </SelectInput>
+              </Field>
+            </div>
+            <div className="filter-group">
+              <Field label="نوع الطلب">
+                <SelectInput name="store_order_kind" value={urlFilters.order_kind} onChange={(event) => updateOrderFilter("order_kind", event.target.value)}>
+                  <option value="">كل الطلبات</option>
+                  <option value="order">طلب عادي</option>
+                  <option value="price_quote">عرض سعر</option>
+                </SelectInput>
               </Field>
             </div>
             <div className="filter-group">
@@ -514,11 +723,8 @@ export default function StoreOrdersPage({
                   min="0"
                   step="0.01"
                   placeholder="مثال: 100…"
-                  value={minTotalInput}
-                  onChange={(event) => {
-                    setMinTotalInput(event.target.value);
-                    setPage(1);
-                  }}
+                  value={urlFilters.min_total}
+                  onChange={(event) => updateOrderFilter("min_total", event.target.value)}
                 />
               </Field>
             </div>
@@ -532,52 +738,53 @@ export default function StoreOrdersPage({
                   min="0"
                   step="0.01"
                   placeholder="مثال: 1,000…"
-                  value={maxTotalInput}
-                  onChange={(event) => {
-                    setMaxTotalInput(event.target.value);
-                    setPage(1);
-                  }}
+                  value={urlFilters.max_total}
+                  onChange={(event) => updateOrderFilter("max_total", event.target.value)}
                 />
               </Field>
             </div>
             <div className="filter-group">
-              <label>
-                <span>عدد الطلبات في الصفحة</span>
-                <select
-                  className="input"
-                  name="store_order_page_size"
-                  value={pageSize}
-                  onChange={(event) => {
-                    setPageSize(Number(event.target.value));
-                    setPage(1);
-                  }}
-                >
-                  <option value={25}>25</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                </select>
-              </label>
+              <Field label="ترتيب حسب">
+                <SelectInput name="store_order_sort_by" value={urlFilters.sort_by} onChange={(event) => updateOrderFilter("sort_by", event.target.value)}>
+                  <option value="order_created_at">تاريخ الطلب ووقته</option>
+                  <option value="order_date">تاريخ الطلب</option>
+                  <option value="remote_updated_at">آخر تحديث</option>
+                  <option value="order_number">رقم الطلب</option>
+                  <option value="customer_name">اسم العميل</option>
+                  <option value="total">إجمالي الطلب</option>
+                </SelectInput>
+              </Field>
             </div>
-            {(statusFilter || cityInput || productInput || minTotalInput || maxTotalInput || pageSize !== 50) && (
-              <div className="filter-group filter-actions">
-                <Button tone="muted" onClick={() => {
-                  setStatusFilter("");
-                  setCityInput("");
-                  setCity("");
-                  setProductInput("");
-                  setProduct("");
-                  setMinTotalInput("");
-                  setMinTotal(undefined);
-                  setMaxTotalInput("");
-                  setMaxTotal(undefined);
-                  setPageSize(50);
-                  setPage(1);
-                }}>
-                  مسح الفلاتر
-                </Button>
-              </div>
-            )}
+            <div className="filter-group">
+              <Field label="اتجاه الترتيب">
+                <SelectInput name="store_order_sort_direction" value={urlFilters.sort_direction} onChange={(event) => updateOrderFilter("sort_direction", event.target.value)}>
+                  <option value="desc">الأحدث أو الأعلى أولًا</option>
+                  <option value="asc">الأقدم أو الأقل أولًا</option>
+                </SelectInput>
+              </Field>
+            </div>
+            <div className="filter-group">
+              <Field label="عدد الطلبات في الصفحة">
+                <SelectInput
+                  name="store_order_page_size"
+                  value={urlFilters.page_size}
+                  onChange={(event) => updateOrderFilter("page_size", event.target.value)}
+                >
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </SelectInput>
+              </Field>
+            </div>
+            <div className="filter-group filter-actions">
+              <Button tone="muted" disabled={!activeOrderFilterCount} onClick={() => setUrlFilters((current) => ({
+                ...STORE_ORDER_URL_DEFAULTS,
+                q: current.q,
+                tab: current.tab,
+              }))}>إعادة تعيين الفلاتر</Button>
+            </div>
             {totalRangeError && <p className="inline-error" role="alert" aria-live="polite">{totalRangeError}</p>}
+            {dateRangeError && <p className="inline-error" role="alert" aria-live="polite">{dateRangeError}</p>}
             {sallaStatuses.error && (
               <div className="filter-group filter-actions">
                 <Button tone="muted" onClick={() => sallaStatuses.refresh()}>إعادة تحميل حالات سلة</Button>
@@ -587,13 +794,13 @@ export default function StoreOrdersPage({
         )}
 
         <div className="tabs table-tabs">
-          {tabs.map(([value, label]) => (
+          {STORE_ORDER_TABS.map(([value, label]) => (
             <button
               key={value}
               type="button"
               className={filter === value ? "active" : ""}
               aria-pressed={filter === value}
-              onClick={() => { setFilter(value); setPage(1); }}
+              onClick={() => updateOrderFilter("tab", value)}
             >
               {label} {filter === value && <b>{formatCount(summary.total)}</b>}
             </button>
@@ -632,7 +839,11 @@ export default function StoreOrdersPage({
                           <Badge tone={journeyTone(order.journey_status)}>{journeyLabel(order.journey_status)}</Badge>
                         </div>
                       </td>
-                      <td>{fmtDate(order.order_date || order.imported_at)}</td>
+                      <td>
+                        <time dateTime={order.order_created_at || order.order_date || undefined}>
+                          {fmtStoreOrderDateTime(order.order_created_at, order.order_timezone, order.order_date)}
+                        </time>
+                      </td>
                       <td>
                         <div className="order-customer-cell">
                           <strong>{order.customer_name || "-"}</strong>
@@ -686,7 +897,7 @@ export default function StoreOrdersPage({
                 <Button
                   tone="muted"
                   disabled={!pageData.hasPrevious || orders.loading}
-                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  onClick={() => updateOrderFilter("page", String(Math.max(1, page - 1)), false)}
                 >
                   الصفحة السابقة
                 </Button>
@@ -696,7 +907,7 @@ export default function StoreOrdersPage({
                 <Button
                   tone="muted"
                   disabled={!pageData.hasNext || orders.loading}
-                  onClick={() => setPage((current) => Math.min(pageData.totalPages, current + 1))}
+                  onClick={() => updateOrderFilter("page", String(Math.min(pageData.totalPages, page + 1)), false)}
                 >
                   الصفحة التالية
                 </Button>
@@ -1616,7 +1827,7 @@ function StoreOrderWorkflowForm({
         <article className="mini-card">
           <strong>قيمة الطلب</strong>
           <span>{moneyLabel(workflowOrderTotal)}</span>
-          <p>{fmtDate(order.order_date)}</p>
+          <p>{fmtStoreOrderDateTime(order.order_created_at, order.order_timezone, order.order_date)}</p>
         </article>
         <article className="mini-card">
           <strong>الحالة الحالية</strong>

@@ -280,6 +280,8 @@ const jsonColumns = new Set([
   "before_data",
   "after_data",
   "order_types",
+  "order_tags",
+  "customer_groups",
   "permissions",
   "product_ids",
   "payload",

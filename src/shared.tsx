@@ -54,6 +54,143 @@ export const addMonths = addCalendarMonths;
 export const fmtDate = (value?: string | null) =>
   value ? new Date(`${value.length === 10 ? `${value}T00:00:00` : value}`).toLocaleDateString("ar-SA") : "-";
 
+const gregorianDateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
+  dateStyle: "medium",
+});
+const storeDateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+const storeDatePartFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function validTimeZone(value?: string | null) {
+  const candidate = String(value || "").trim();
+  if (!candidate) return "";
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: candidate }).format(0);
+    return candidate;
+  } catch {
+    return "";
+  }
+}
+
+function datePartsFormatter(timeZone: string) {
+  const cached = storeDatePartFormatters.get(timeZone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("en-US-u-ca-gregory", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  storeDatePartFormatters.set(timeZone, formatter);
+  return formatter;
+}
+
+function timeZoneOffsetAt(epoch: number, timeZone: string) {
+  const values: Record<string, number> = {};
+  for (const part of datePartsFormatter(timeZone).formatToParts(new Date(epoch))) {
+    if (part.type !== "literal") values[part.type] = Number(part.value);
+  }
+  const represented = Date.UTC(
+    values.year,
+    values.month - 1,
+    values.day,
+    values.hour,
+    values.minute,
+    values.second,
+  );
+  return represented - Math.floor(epoch / 1_000) * 1_000;
+}
+
+function sallaWallClockDate(value: string, timeZone: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?$/);
+  if (!match) return null;
+  const milliseconds = Number(String(match[7] || "").slice(0, 3).padEnd(3, "0"));
+  const wallClock = Date.UTC(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+    Number(match[6] || 0),
+    milliseconds,
+  );
+  let instant = wallClock - timeZoneOffsetAt(wallClock, timeZone);
+  const correctedOffset = timeZoneOffsetAt(instant, timeZone);
+  instant = wallClock - correctedOffset;
+  const parsed = new Date(instant);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function storeDateTimeFormatter(timeZone: string) {
+  const key = timeZone || "local";
+  const cached = storeDateTimeFormatters.get(key);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    ...(timeZone ? { timeZone } : {}),
+  });
+  storeDateTimeFormatters.set(key, formatter);
+  return formatter;
+}
+
+export function fmtStoreOrderDateTime(
+  createdAt?: string | null,
+  orderTimeZone?: string | null,
+  fallbackDate?: string | null,
+) {
+  const value = String(createdAt || "").trim();
+  const timeZone = validTimeZone(orderTimeZone);
+  if (value) {
+    const hasExplicitOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+    const parsed = !hasExplicitOffset && timeZone
+      ? sallaWallClockDate(value, timeZone)
+      : new Date(value.replace(" ", "T"));
+    if (parsed && !Number.isNaN(parsed.getTime())) {
+      return storeDateTimeFormatter(timeZone).format(parsed);
+    }
+  }
+
+  const date = String(fallbackDate || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "-";
+  const parsedDate = new Date(`${date}T00:00:00`);
+  return Number.isNaN(parsedDate.getTime()) ? "-" : gregorianDateFormatter.format(parsedDate);
+}
+
+export function storeOrderDateKey(
+  createdAt?: string | null,
+  orderTimeZone?: string | null,
+  fallbackDate?: string | null,
+) {
+  const fallback = String(fallbackDate || "").slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fallback)) {
+    const parsedFallback = new Date(`${fallback}T00:00:00.000Z`);
+    if (!Number.isNaN(parsedFallback.getTime()) && parsedFallback.toISOString().slice(0, 10) === fallback) {
+      return fallback;
+    }
+  }
+
+  const value = String(createdAt || "").trim();
+  if (!value) return "";
+  const timeZone = validTimeZone(orderTimeZone) || "Asia/Riyadh";
+  const hasExplicitOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  if (!hasExplicitOffset) {
+    const wallClockDate = value.match(/^(\d{4}-\d{2}-\d{2})(?:[ T]|$)/)?.[1] || "";
+    if (wallClockDate) return wallClockDate;
+  }
+
+  const parsed = new Date(value.replace(" ", "T"));
+  if (Number.isNaN(parsed.getTime())) return "";
+  const parts: Record<string, string> = {};
+  for (const part of datePartsFormatter(timeZone).formatToParts(parsed)) {
+    if (part.type !== "literal") parts[part.type] = part.value;
+  }
+  return parts.year && parts.month && parts.day ? `${parts.year}-${parts.month}-${parts.day}` : "";
+}
+
 export const phoneLabel = (phone?: string) => {
   const clean = String(phone || "").replace(/\D/g, "");
   if (clean.length === 10 && clean.startsWith("05")) return clean.replace(/(\d{4})(\d{3})(\d{3})/, "$1 $2 $3");

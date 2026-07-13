@@ -29,7 +29,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10303/);
+    assert.match(result.stdout, /"userVersion":10304/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -51,9 +51,37 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10303/);
+    assert.match(backups[0], /pre-schema-10304/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the Supabase migration mirrors the Salla filter metadata schema", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260713020000_salla_filter_metadata.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "order_created_at",
+    "order_timezone",
+    "payment_method",
+    "shipping_company",
+    "shipment_status",
+    "sales_channel",
+    "assigned_employee",
+    "pickup_branch",
+    "order_tags jsonb",
+    "is_read boolean",
+    "metadata_contract_version",
+    "customer_groups jsonb",
+    "is_blocked boolean",
+    "remote_created_at",
+    "remote_updated_at",
+    "store_orders_owner_created_idx",
+    "customers_owner_source_created_idx",
+  ]) {
+    assert.match(migration, new RegExp(required));
   }
 });
 

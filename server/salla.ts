@@ -31,6 +31,7 @@ import {
   normalizeProductSku,
   type ProductCatalogRecord,
 } from "./productCatalog";
+import { firstSallaDate } from "./sallaDate";
 
 type SallaIntegrationRecord = {
   provider: "salla";
@@ -135,6 +136,7 @@ const REFRESH_OUTCOME_UNKNOWN_MESSAGE =
   "Salla could not confirm token refresh. Reconnect the Salla app before syncing again.";
 const SALLA_ORDER_PAGE_SIZE = 30;
 const SALLA_ORDER_MAX_PAGES = 200;
+const SALLA_ORDER_METADATA_CONTRACT_VERSION = 2;
 
 class SallaRequestError extends Error {
   readonly status?: number;
@@ -558,11 +560,330 @@ function joinCountryCode(code: unknown, number: unknown) {
   return dialCode ? `${dialCode}${num}` : num;
 }
 
-function dateOnly(value: unknown, fallback = new Date()) {
-  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-  const parsed = value ? new Date(String(value)) : fallback;
-  const safeDate = Number.isNaN(parsed.getTime()) ? fallback : parsed;
-  return safeDate.toISOString().slice(0, 10);
+function displayValue(value: unknown): string {
+  const direct = firstText(value);
+  if (direct) return direct;
+  const item = asRecord(value);
+  return firstText(
+    item.name,
+    item.title,
+    item.label,
+    item.slug,
+    item.code,
+    item.value,
+    item.reference_id,
+  );
+}
+
+function firstDisplayValue(...values: unknown[]) {
+  for (const value of values) {
+    const found = displayValue(value);
+    if (found) return found;
+  }
+  return "";
+}
+
+function optionalBoolean(...values: unknown[]): boolean | null {
+  for (const value of values) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value !== 0;
+    if (typeof value !== "string") continue;
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "read"].includes(normalized)) return true;
+    if (["false", "0", "no", "unread"].includes(normalized)) return false;
+  }
+  return null;
+}
+
+function uniqueDisplayValues(...values: unknown[]) {
+  const result: string[] = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const label = displayValue(value);
+    if (label && !result.includes(label)) result.push(label);
+  };
+  values.forEach(visit);
+  return result;
+}
+
+function hasOwnField(record: Record<string, unknown>, ...keys: string[]) {
+  return keys.some((key) => Object.prototype.hasOwnProperty.call(record, key));
+}
+
+function sallaOrderDates(remoteOrder: Record<string, any>) {
+  const dates = asRecord(remoteOrder.dates);
+  const created = firstSallaDate([
+    remoteOrder.created_at,
+    remoteOrder.createdAt,
+    remoteOrder.date,
+    dates.created_at,
+    dates.created,
+  ]);
+  const updated = firstSallaDate([
+    remoteOrder.updated_at,
+    remoteOrder.updatedAt,
+    remoteOrder.modified_at,
+    remoteOrder.modifiedAt,
+    dates.updated_at,
+    dates.updated,
+  ], created?.timezone);
+  return { created, updated };
+}
+
+function sallaOrderMetadata(remoteOrder: Record<string, any>, syncedAt: string) {
+  const { created, updated } = sallaOrderDates(remoteOrder);
+  const customer = asRecord(remoteOrder.customer);
+  const shipping = asRecord(remoteOrder.shipping || remoteOrder.shipping_details);
+  const shippingAddress = asRecord(shipping.address);
+  const billing = asRecord(remoteOrder.billing);
+  const shipmentList = Array.isArray(remoteOrder.shipments) ? remoteOrder.shipments : [];
+  const shipment = asRecord(remoteOrder.shipment || shipmentList[0]);
+  const payment = asRecord(remoteOrder.payment);
+  const metadata = asRecord(remoteOrder.metadata);
+  const features = asRecord(remoteOrder.features);
+  const assignedEmployees = Array.isArray(remoteOrder.assigned_employees)
+    ? remoteOrder.assigned_employees
+    : Array.isArray(remoteOrder.employees)
+      ? remoteOrder.employees
+      : [];
+  const isRead = optionalBoolean(remoteOrder.is_read, remoteOrder.read, metadata.is_read);
+  const isUnread = optionalBoolean(remoteOrder.unread, metadata.unread);
+
+  // List Orders and Order Details do not always expose the same optional
+  // fields. Only project an optional field when this payload actually carries
+  // one of its source keys. An explicit null/empty value can then clear stale
+  // metadata, while an omitted list field cannot erase richer webhook/detail
+  // data.
+  const projected: Record<string, unknown> = {
+    remote_synced_at: syncedAt,
+    metadata_contract_version: SALLA_ORDER_METADATA_CONTRACT_VERSION,
+  };
+  if (created) {
+    projected.order_created_at = created.createdAt;
+    projected.order_date = created.orderDate;
+    projected.order_timezone = created.timezone;
+  }
+  if (updated) projected.remote_updated_at = updated.createdAt;
+
+  if (hasOwnField(remoteOrder, "payment_method") || hasOwnField(payment, "method", "payment_method", "name")) {
+    projected.payment_method = firstDisplayValue(
+      remoteOrder.payment_method,
+      payment.method,
+      payment.payment_method,
+      payment.name,
+    ) || null;
+  }
+  if (
+    hasOwnField(remoteOrder, "shipping_company") ||
+    hasOwnField(shipping, "company", "shipping_company", "courier") ||
+    hasOwnField(shipment, "shipping_company", "company", "courier") ||
+    (hasOwnField(remoteOrder, "shipments") && shipmentList.length === 0)
+  ) {
+    projected.shipping_company = firstDisplayValue(
+      remoteOrder.shipping_company,
+      shipping.company,
+      shipping.shipping_company,
+      shipping.courier,
+      shipment.shipping_company,
+      shipment.company,
+      shipment.courier,
+    ) || null;
+  }
+  if (
+    hasOwnField(remoteOrder, "shipment_status") ||
+    hasOwnField(shipment, "status") ||
+    hasOwnField(shipping, "status", "shipment_status") ||
+    (hasOwnField(remoteOrder, "shipments") && shipmentList.length === 0)
+  ) {
+    projected.shipment_status = firstDisplayValue(
+      remoteOrder.shipment_status,
+      shipment.status,
+      shipping.status,
+      shipping.shipment_status,
+    ) || null;
+  }
+  if (
+    hasOwnField(remoteOrder, "country") ||
+    hasOwnField(shipping, "country") ||
+    hasOwnField(shippingAddress, "country") ||
+    hasOwnField(customer, "country") ||
+    hasOwnField(billing, "country")
+  ) {
+    projected.country = firstDisplayValue(
+      remoteOrder.country,
+      shipping.country,
+      shippingAddress.country,
+      customer.country,
+      billing.country,
+    ) || null;
+  }
+  if (
+    hasOwnField(remoteOrder, "sales_channel", "selling_channel", "channel", "source") ||
+    hasOwnField(metadata, "sales_channel")
+  ) {
+    projected.sales_channel = firstDisplayValue(
+      remoteOrder.sales_channel,
+      remoteOrder.selling_channel,
+      remoteOrder.channel,
+      remoteOrder.source,
+      metadata.sales_channel,
+    ) || null;
+  }
+  if (
+    hasOwnField(remoteOrder, "assigned_employee", "assign_employee", "assigned_to", "employee", "assigned_employees", "employees")
+  ) {
+    projected.assigned_employee = firstDisplayValue(
+      remoteOrder.assigned_employee,
+      remoteOrder.assign_employee,
+      remoteOrder.assigned_to,
+      remoteOrder.employee,
+      assignedEmployees[0],
+    ) || null;
+  }
+  if (
+    hasOwnField(remoteOrder, "pickup_branch", "branch") ||
+    hasOwnField(shipping, "pickup_branch") ||
+    hasOwnField(shipment, "pickup_branch") ||
+    hasOwnField(metadata, "pickup_branch")
+  ) {
+    projected.pickup_branch = firstDisplayValue(
+      remoteOrder.pickup_branch,
+      remoteOrder.branch,
+      shipping.pickup_branch,
+      shipment.pickup_branch,
+      metadata.pickup_branch,
+    ) || null;
+  }
+  if (hasOwnField(remoteOrder, "order_tags", "tags") || hasOwnField(metadata, "tags")) {
+    projected.order_tags = uniqueDisplayValues(remoteOrder.order_tags, remoteOrder.tags, metadata.tags);
+  }
+  if (hasOwnField(remoteOrder, "is_read", "read", "unread") || hasOwnField(metadata, "is_read", "unread")) {
+    projected.is_read = isRead ?? (isUnread === null ? null : !isUnread);
+  }
+  if (
+    hasOwnField(remoteOrder, "is_price_quote", "price_quote", "is_quote") ||
+    hasOwnField(features, "is_price_quote") ||
+    hasOwnField(metadata, "is_price_quote")
+  ) {
+    projected.is_price_quote = optionalBoolean(
+      remoteOrder.is_price_quote,
+      remoteOrder.price_quote,
+      remoteOrder.is_quote,
+      features.is_price_quote,
+      metadata.is_price_quote,
+    );
+  }
+  return projected;
+}
+
+function metadataContractVersion(order: Record<string, unknown>) {
+  const parsed = Number(order.metadata_contract_version ?? order.metadataContractVersion ?? 0);
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+}
+
+function timestampMillis(value: unknown) {
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function newestRemoteTimestamp(current: unknown, candidate: unknown): string | null {
+  const currentText = firstText(current) || null;
+  const candidateText = firstText(candidate) || null;
+  const currentMs = timestampMillis(currentText);
+  const candidateMs = timestampMillis(candidateText);
+  if (candidateMs === null) return currentText;
+  if (currentMs === null || candidateMs > currentMs) return candidateText;
+  return currentText;
+}
+
+function observedCasField(
+  record: Record<string, unknown>,
+  snakeCase: string,
+  camelCase: string,
+) {
+  if (Object.prototype.hasOwnProperty.call(record, snakeCase)) {
+    return { [snakeCase]: record[snakeCase] ?? null };
+  }
+  if (Object.prototype.hasOwnProperty.call(record, camelCase)) {
+    return { [camelCase]: record[camelCase] ?? null };
+  }
+  return { [snakeCase]: null };
+}
+
+function filterMetadataDiffers(
+  existing: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+) {
+  const aliases: Array<[string, string]> = [
+    ["order_created_at", "orderCreatedAt"],
+    ["order_date", "orderDate"],
+    ["order_timezone", "orderTimezone"],
+    ["payment_method", "paymentMethod"],
+    ["shipping_company", "shippingCompany"],
+    ["shipment_status", "shipmentStatus"],
+    ["country", "country"],
+    ["sales_channel", "salesChannel"],
+    ["assigned_employee", "assignedEmployee"],
+    ["pickup_branch", "pickupBranch"],
+    ["order_tags", "orderTags"],
+    ["is_read", "isRead"],
+    ["is_price_quote", "isPriceQuote"],
+  ];
+  return aliases.some(([snakeCase, camelCase]) => {
+    const incomingKey = Object.prototype.hasOwnProperty.call(incoming, snakeCase)
+      ? snakeCase
+      : Object.prototype.hasOwnProperty.call(incoming, camelCase)
+        ? camelCase
+        : null;
+    if (!incomingKey) return false;
+    const next = incoming[incomingKey];
+    const current = Object.prototype.hasOwnProperty.call(existing, snakeCase)
+      ? existing[snakeCase]
+      : existing[camelCase];
+    return stableJson(current) !== stableJson(next);
+  });
+}
+
+async function backfillSallaOrderMetadata(
+  orderDocId: string,
+  existing: Record<string, any>,
+  remoteOrder: Record<string, any>,
+  syncedAt: string,
+) {
+  if (metadataContractVersion(existing) >= SALLA_ORDER_METADATA_CONTRACT_VERSION) return existing;
+  const ref = adminDb.collection("store_orders").doc(orderDocId);
+  const metadata = sallaOrderMetadata(remoteOrder, syncedAt);
+  const remoteVersionAt = metadata.remote_updated_at || metadata.order_created_at || null;
+  const existingVersionAt = firstText(
+    existing.remote_updated_at,
+    existing.remoteUpdatedAt,
+    existing.last_event_at,
+    existing.lastEventAt,
+  ) || null;
+  const incomingMs = timestampMillis(remoteVersionAt);
+  const existingMs = timestampMillis(existingVersionAt);
+
+  // A list page can race a newer webhook. Never let that older page lower the
+  // order watermark or overwrite metadata from the authoritative detail read.
+  if (incomingMs !== null && existingMs !== null && incomingMs < existingMs) return existing;
+
+  const patch: Record<string, unknown> = { ...metadata };
+  if (!metadata.remote_updated_at) delete patch.remote_updated_at;
+  const expected = {
+    ...observedCasField(existing, "metadata_contract_version", "metadataContractVersion"),
+    ...observedCasField(existing, "remote_updated_at", "remoteUpdatedAt"),
+    ...observedCasField(existing, "last_event_at", "lastEventAt"),
+  };
+  const changed = await compareAndSetDocument(ref, expected, patch);
+  if (changed) return { ...existing, ...patch };
+
+  // Another worker may have won the metadata upgrade. Re-read its result so
+  // the subsequent stale/CAS checks use the winning canonical timestamps.
+  const latest = await ref.get();
+  return latest.exists ? latest.data() || {} : existing;
 }
 
 function classifyItemType(sku: string, tags: string[], explicitType = ""): StoreItemType {
@@ -1493,11 +1814,20 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
   const orderId = firstText(remoteOrder.id, remoteOrder.order_id, remoteOrder.reference_id);
   if (!orderId) return null;
   const amounts = asRecord(remoteOrder.amounts);
+  const { created, updated } = sallaOrderDates(remoteOrder);
+  const metadata = asRecord(remoteOrder.metadata);
+  const scheduled = firstSallaDate([
+    remoteOrder.installation_date,
+    remoteOrder.appointment_date,
+    shipping.delivery_date,
+    metadata.installation_date,
+  ], created?.timezone);
+  const versionStamp = updated?.createdAt || created?.createdAt || "undated";
 
   return {
     provider: "salla",
     eventType: "salla.api.sync",
-    eventId: `salla:sync:${orderId}:${firstText(remoteOrder.updated_at, remoteOrder.created_at, nowIso())}`,
+    eventId: `salla:sync:${orderId}:${versionStamp}`,
     orderId: truncate(orderId, 80),
     orderNumber: truncate(firstText(remoteOrder.reference_id, remoteOrder.number, orderId), 80),
     status: truncate(firstText(statusRecord.name, statusRecord.slug, remoteOrder.status, "new"), 40),
@@ -1507,18 +1837,8 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
     ),
     customerPhone: phone,
     customerCity: truncate(firstText(customer.city, shipping.city, billing.city), 80),
-    orderDate: dateOnly(firstText(remoteOrder.created_at, remoteOrder.date)),
-    scheduledDate: firstText(
-      remoteOrder.installation_date,
-      remoteOrder.appointment_date,
-      shipping.delivery_date,
-      asRecord(remoteOrder.metadata).installation_date,
-    ) ? dateOnly(firstText(
-      remoteOrder.installation_date,
-      remoteOrder.appointment_date,
-      shipping.delivery_date,
-      asRecord(remoteOrder.metadata).installation_date,
-    )) : undefined,
+    orderDate: created?.orderDate || "",
+    scheduledDate: scheduled?.orderDate,
     scheduledTime: truncate(firstText(
       remoteOrder.installation_time,
       remoteOrder.appointment_time,
@@ -1556,7 +1876,10 @@ function sameRemoteStamp(existing: unknown, incoming: string | null) {
   if (!incoming) return false;
   const left = String(existing || "");
   const right = String(incoming || "");
-  return left === right || left.startsWith(right) || left.slice(0, 19) === right.slice(0, 19);
+  const leftMs = timestampMillis(left);
+  const rightMs = timestampMillis(right);
+  if (leftMs !== null && rightMs !== null) return leftMs === rightMs;
+  return left === right;
 }
 
 function normalizedOrderHasMoney(order: StoreWebhookOrder) {
@@ -1649,13 +1972,13 @@ function eventOrderRecord(data: Record<string, unknown>) {
 
 function remoteOrderProjectionExtras(remoteOrder: Record<string, any>, origin: "salla_webhook" | "salla_command") {
   const status = asRecord(remoteOrder.status);
-  const remoteUpdatedAt = firstText(remoteOrder.updated_at, remoteOrder.created_at, remoteOrder.date) || nowIso();
+  const syncedAt = nowIso();
+  const metadata = sallaOrderMetadata(remoteOrder, syncedAt);
   return {
+    ...metadata,
     source: "salla",
     provider: "salla",
-    last_event_at: remoteUpdatedAt,
-    remote_updated_at: remoteUpdatedAt,
-    remote_synced_at: nowIso(),
+    last_event_at: metadata.remote_updated_at || metadata.order_created_at || syncedAt,
     remote_status_id: firstText(status.id) || null,
     remote_status_name: firstText(status.name, remoteOrder.status) || null,
     remote_status_slug: firstText(status.slug) || null,
@@ -1675,11 +1998,11 @@ async function persistAuthoritativeSallaOrder(
     error.status = 422;
     throw error;
   }
-  const extras = {
-    ...remoteOrderProjectionExtras(remoteOrder, options.origin),
-    order_date: normalized.orderDate,
-  };
-  const imported = options.operationalCreate && Boolean(normalized.customerPhone)
+  const extras = remoteOrderProjectionExtras(remoteOrder, options.origin);
+  // Operational records need a real store date. If Salla ever returns an
+  // incomplete detail payload, keep the order visible for review without
+  // inventing today's date for installations, bookings, or maintenance.
+  const imported = options.operationalCreate && Boolean(normalized.customerPhone) && Boolean(normalized.orderDate)
     ? await importStoreOrderForUser(currentUid, normalized, extras)
     : await projectStoreOrderForUser(currentUid, normalized, extras);
   return {
@@ -2388,13 +2711,29 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
       }
 
       const orderDocId = getStoreOrderDocId(currentUid, normalized.provider, normalized.orderId);
-      const existing = existingOrders.get(orderDocId);
-      const remoteUpdatedAt =
-        firstText(remoteOrder.updated_at, remoteOrder.created_at, remoteOrder.date, normalized.orderDate) || null;
+      let existing = existingOrders.get(orderDocId);
+      const metadata = sallaOrderMetadata(remoteOrder, importedAt);
+      const remoteUpdatedAt = firstText(metadata.remote_updated_at) || null;
+      const remoteVersionAt = remoteUpdatedAt || firstText(metadata.order_created_at) || null;
       const remoteStatus = asRecord(remoteOrder.status);
       const remoteStatusId = firstText(remoteStatus.id) || null;
       const remoteStatusName = firstText(remoteStatus.name, normalized.status) || null;
       const remoteStatusSlug = firstText(remoteStatus.slug) || null;
+
+      if (existing && metadataContractVersion(existing) < SALLA_ORDER_METADATA_CONTRACT_VERSION) {
+        try {
+          existing = await backfillSallaOrderMetadata(orderDocId, existing, remoteOrder, importedAt);
+          existingOrders.set(orderDocId, existing);
+        } catch (metadataError) {
+          failed += 1;
+          if (!firstFailureMessage) {
+            firstFailureMessage = metadataError instanceof Error
+              ? `Salla order metadata backfill failed: ${metadataError.message}`
+              : "Salla order metadata backfill failed.";
+          }
+          continue;
+        }
+      }
 
       const shouldRefreshMoney =
         existing &&
@@ -2403,6 +2742,7 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
       const shouldRefreshRemoteMetadata = Boolean(existing && (
         !existing.remote_synced_at ||
         !existing.sync_origin ||
+        filterMetadataDiffers(existing, metadata) ||
         (remoteStatusId && firstText(existing.remote_status_id) !== remoteStatusId) ||
         (remoteStatusName && firstText(existing.remote_status_name) !== remoteStatusName) ||
         (remoteStatusSlug && firstText(existing.remote_status_slug) !== remoteStatusSlug)
@@ -2410,23 +2750,21 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
 
       if (
         existing &&
-        sameRemoteStamp((existing as Record<string, unknown>).last_event_at, remoteUpdatedAt) &&
+        sameRemoteStamp((existing as Record<string, unknown>).last_event_at, remoteVersionAt) &&
         !shouldRefreshMoney &&
         !shouldRefreshRemoteMetadata
       ) {
         updated += 1;
-        lastRemoteUpdate = remoteUpdatedAt || lastRemoteUpdate;
+        lastRemoteUpdate = newestRemoteTimestamp(lastRemoteUpdate, remoteVersionAt);
         continue;
       }
 
       try {
         await projectStoreOrderForUser(currentUid, normalized, {
+          ...metadata,
           source: "salla",
           provider: "salla",
-          order_date: normalized.orderDate,
-          last_event_at: remoteUpdatedAt,
-          remote_updated_at: remoteUpdatedAt,
-          remote_synced_at: importedAt,
+          last_event_at: remoteVersionAt || importedAt,
           remote_status_id: remoteStatusId,
           remote_status_name: remoteStatusName,
           remote_status_slug: remoteStatusSlug,
@@ -2434,7 +2772,7 @@ export async function syncSallaOrdersForUser(currentUid: string): Promise<SyncRe
         }, { suppressRealtime: true });
         if (existing) updated += 1;
         else imported += 1;
-        lastRemoteUpdate = remoteUpdatedAt || lastRemoteUpdate;
+        lastRemoteUpdate = newestRemoteTimestamp(lastRemoteUpdate, remoteVersionAt);
       } catch (orderImportError) {
         failed += 1;
         if (!firstFailureMessage) {
@@ -2674,6 +3012,10 @@ async function fetchCustomersPage(session: SallaAuthorizedSession, page: number)
   const url = new URL(`${SALLA_API_BASE}/customers`);
   url.searchParams.set("page", String(page));
   url.searchParams.set("per_page", String(customerPageSize()));
+  // These optional fields power the account-status filter. They are requested
+  // on the paginated snapshot once, never when the user opens a filter.
+  url.searchParams.append("fields[]", "is_blocked");
+  url.searchParams.append("fields[]", "block_reason");
   return authorizedSallaGet(session, url);
 }
 
@@ -2683,6 +3025,16 @@ type MappedSallaCustomer = {
   name: string;
   phone: string;
   city: string;
+  email: string;
+  country: string;
+  gender: string;
+  location: string;
+  groups: Array<{ id: string | null; name: string }>;
+  isBlocked: boolean | null;
+  blockReason: string;
+  remoteCreatedAt: string | null;
+  remoteUpdatedAt: string | null;
+  remoteTimezone: string | null;
 };
 
 function stableJson(value: unknown): string {
@@ -2695,8 +3047,25 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function mapSallaCustomerGroups(value: unknown) {
+  const groups: Array<{ id: string | null; name: string }> = [];
+  const seen = new Set<string>();
+  const items = Array.isArray(value) ? value : [];
+  for (const item of items) {
+    const record = asRecord(item);
+    const id = firstText(record.id, record.group_id) || null;
+    const name = truncate(firstDisplayValue(item, record.name, record.title, id), 120);
+    const key = (id || name).trim().toLocaleLowerCase("ar");
+    if (!name || !key || seen.has(key)) continue;
+    seen.add(key);
+    groups.push({ id, name });
+  }
+  return groups;
+}
+
 function mapSallaCustomer(currentUid: string, remoteCustomer: Record<string, any>): MappedSallaCustomer {
   const mobile = asRecord(remoteCustomer.mobile);
+  const locationRecord = asRecord(remoteCustomer.location);
   const remoteId = firstText(remoteCustomer.id, remoteCustomer.customer_id, remoteCustomer.uuid) || null;
   const phone = normalizePhoneDigits(firstText(
     joinCountryCode(
@@ -2716,8 +3085,33 @@ function mapSallaCustomer(currentUid: string, remoteCustomer: Record<string, any
     120,
   );
   const cityRecord = asRecord(remoteCustomer.city);
-  const city = truncate(firstText(remoteCustomer.city, cityRecord.name, cityRecord.title), 80);
+  const countryRecord = asRecord(remoteCustomer.country);
+  const city = truncate(firstDisplayValue(remoteCustomer.city, cityRecord.name, cityRecord.title, locationRecord.city), 80);
   const email = firstText(remoteCustomer.email, remoteCustomer.email_address).toLowerCase();
+  const country = truncate(firstDisplayValue(
+    remoteCustomer.country,
+    countryRecord.name,
+    countryRecord.title,
+    locationRecord.country,
+  ), 120);
+  const gender = truncate(firstDisplayValue(remoteCustomer.gender), 40);
+  const location = truncate(firstDisplayValue(
+    remoteCustomer.location,
+    locationRecord.address,
+    locationRecord.description,
+  ), 240);
+  const groups = mapSallaCustomerGroups(remoteCustomer.groups ?? remoteCustomer.customer_groups);
+  const remoteCreated = firstSallaDate([
+    remoteCustomer.created_at,
+    remoteCustomer.createdAt,
+    remoteCustomer.registered_at,
+    remoteCustomer.account_created_at,
+  ]);
+  const remoteUpdated = firstSallaDate([
+    remoteCustomer.updated_at,
+    remoteCustomer.updatedAt,
+    remoteCustomer.modified_at,
+  ], remoteCreated?.timezone);
   const fallbackIdentity = phone
     ? `phone:${phone}`
     : email
@@ -2732,6 +3126,16 @@ function mapSallaCustomer(currentUid: string, remoteCustomer: Record<string, any
     name,
     phone,
     city,
+    email,
+    country,
+    gender,
+    location,
+    groups,
+    isBlocked: optionalBoolean(remoteCustomer.is_blocked, remoteCustomer.blocked),
+    blockReason: truncate(firstText(remoteCustomer.block_reason, remoteCustomer.blocked_reason), 240),
+    remoteCreatedAt: remoteCreated?.createdAt || null,
+    remoteUpdatedAt: remoteUpdated?.createdAt || null,
+    remoteTimezone: remoteCreated?.timezone || remoteUpdated?.timezone || null,
   };
 }
 
@@ -2922,6 +3326,16 @@ async function syncSallaCustomersForUserUnlocked(currentUid: string): Promise<Sy
             source: "salla",
             store_provider: "salla",
             store_customer_id: mapped.remoteId,
+            email: mapped.email || null,
+            country: mapped.country || null,
+            gender: mapped.gender || null,
+            location: mapped.location || null,
+            customer_groups: mapped.groups,
+            is_blocked: mapped.isBlocked,
+            block_reason: mapped.blockReason || null,
+            remote_created_at: mapped.remoteCreatedAt,
+            remote_updated_at: mapped.remoteUpdatedAt,
+            remote_timezone: mapped.remoteTimezone,
             updatedAt: syncedAt,
           };
           if (!target.exists) customerData.createdAt = syncedAt;
@@ -3198,12 +3612,16 @@ export const __sallaTestables = {
   isTransientSallaError,
   normalizeStorefrontUrl,
   mapSallaCustomer,
+  filterMetadataDiffers,
+  newestRemoteTimestamp,
   orderMaxSyncPages,
   orderPageSize,
   pageSize,
   readLocalIntegrationStore,
   readIntegration,
   requestSallaJson,
+  sameRemoteStamp,
+  sallaOrderMetadata,
   statusAfterSyncFailure,
   syncFailureResult,
   writeIntegration,

@@ -50,16 +50,18 @@ import {
   type FirestoreLikeStore,
 } from "./repositories/ownedRepository";
 import {
+  buildCustomerFacets,
+  enrichCustomerRecordsWithOrders,
   filterCustomerRecords,
   paginateCustomerRecords,
   parseCustomerListQuery,
+  sortCustomerRecords,
 } from "./customerPagination";
 
 const ownedRepository = createOwnedRepository(adminDb as unknown as FirestoreLikeStore);
 const {
   list: listOwned,
   count: countOwned,
-  listPage: listOwnedPage,
   get: getOwned,
   create: createOwned,
   update: updateOwned,
@@ -471,29 +473,37 @@ export function registerCrmApiRoutes(app: express.Express) {
     const uid = userId(req);
     const query = parseCustomerListQuery(req.query as Record<string, unknown>);
 
-    // Search must run against the complete bounded owner set before slicing;
-    // filtering a single page is what previously hid matches after row 250.
-    if (query.search || query.all) {
-      const customers = await listOwned("customers", uid, "name", MAX_OWNED_SCAN_LIMIT);
-      // A short bounded scan proves the exact owner total without a second
-      // query. Only the ambiguous 10,000-row boundary needs an explicit count.
-      const ownerCount = customers.length < MAX_OWNED_SCAN_LIMIT
-        ? { total: customers.length, capped: false }
-        : await countOwned("customers", uid);
-      const filtered = filterCustomerRecords(customers, query.search);
-      res.json(paginateCustomerRecords(filtered, query, {
-        total: query.search ? filtered.length : ownerCount.total,
-        capped: ownerCount.capped,
-      }));
-      return;
-    }
+    // Facets and activity metrics must describe the complete bounded owner
+    // snapshot. Load customers and orders once each, then aggregate in memory;
+    // querying orders per customer would turn this endpoint into an N+1 path.
+    const [customers, orders] = await Promise.all([
+      listOwned("customers", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+      listOwned("store_orders", uid, undefined, MAX_OWNED_SCAN_LIMIT),
+    ]);
+    const [customerCount, orderCount] = await Promise.all([
+      customers.length < MAX_OWNED_SCAN_LIMIT
+        ? Promise.resolve({ total: customers.length, capped: false })
+        : countOwned("customers", uid),
+      orders.length < MAX_OWNED_SCAN_LIMIT
+        ? Promise.resolve({ total: orders.length, capped: false })
+        : countOwned("store_orders", uid),
+    ]);
 
-    res.json(await listOwnedPage("customers", uid, {
-      orderField: "name",
-      page: query.page,
-      pageSize: query.pageSize,
-      maxScan: MAX_OWNED_SCAN_LIMIT,
-    }));
+    const enriched = enrichCustomerRecordsWithOrders(customers, orders);
+    const facets = buildCustomerFacets(enriched);
+    const filtered = filterCustomerRecords(enriched, query);
+    const sorted = sortCustomerRecords(filtered, query);
+    const hasFilters = Boolean(
+      query.search || query.source || query.city || query.country || query.gender || query.group ||
+      query.status || query.activity || query.dateFrom || query.dateTo,
+    );
+    res.json({
+      ...paginateCustomerRecords(sorted, query, {
+        total: hasFilters ? filtered.length : customerCount.total,
+        capped: customerCount.capped || orderCount.capped,
+      }),
+      facets,
+    });
   }));
 
   app.post("/api/customers", validate(customerCreateSchema), asyncRoute(async (req, res) => {
