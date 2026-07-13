@@ -152,7 +152,7 @@ export default function SettingsPage({ notify }: { notify: (message: string, ok?
               <legend>بيانات الفاتورة الضريبية (ZATCA)</legend>
               <div className="form-grid">
                 <Field label="اسم البائع (الجهة المصدرة)">
-                  <TextInput value={values.seller_name || ""} onChange={(e) => setValues({ ...values, seller_name: e.target.value })} placeholder="Breexe Pro Co." />
+                  <TextInput value={values.seller_name || ""} onChange={(e) => setValues({ ...values, seller_name: e.target.value })} placeholder="BreeXe Pro Co." />
                 </Field>
                 <Field label="الرقم الضريبي (VAT)">
                   <TextInput value={values.seller_vat_number || ""} onChange={(e) => setValues({ ...values, seller_vat_number: e.target.value.replace(/\D/g, '').slice(0, 15) })} placeholder="15 رقم" />

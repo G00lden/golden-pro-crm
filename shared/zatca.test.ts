@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  cleanInvoiceTerms,
   generateZatcaQrBase64,
   isSaudiVatNumber,
   resolveInvoiceTaxType,
 } from "./zatca";
+
+test("invoice output hides legacy compliance boilerplate but keeps real terms", () => {
+  assert.equal(cleanInvoiceTerms("فاتورة ضريبية مبسطة - متوافقة مع ZATCA"), "");
+  assert.equal(cleanInvoiceTerms("الكود متوافق مع زاتكا"), "");
+  assert.equal(
+    cleanInvoiceTerms("الدفع خلال 30 يوماً\nمتوافقة مع ZATCA\nالضمان سنة"),
+    "الدفع خلال 30 يوماً\nالضمان سنة",
+  );
+});
 
 test("invoice type follows B2C/B2B rules instead of total alone", () => {
   assert.equal(resolveInvoiceTaxType({ buyerVat: "", taxableAmount: 5000 }), "simplified");

@@ -24,7 +24,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { createPortal, flushSync } from "react-dom";
 import * as api from "../api";
 import { calculateDocumentLineAmounts, calculateDocumentTotals } from "../../shared/financial";
-import { generateZatcaQrBase64, resolveInvoiceTaxType } from "../../shared/zatca";
+import { cleanInvoiceTerms, generateZatcaQrBase64, resolveInvoiceTaxType } from "../../shared/zatca";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -46,7 +46,7 @@ const money = (value?: number, currency = "SAR") =>
 
 const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
 const sellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
-const sellerEnglishName = "Breexe Pro Co.";
+const sellerEnglishName = "BreeXe Pro Co.";
 const sellerCrNumber = "7016449519";
 const sellerPhone = "+966533971168";
 
@@ -147,7 +147,7 @@ function QRCodeDisplay({ data, size = 80 }: { data: string; size?: number }) {
   }, [data, size]);
 
   return src
-    ? <img src={src} width={size} height={size} className="zatca-qr-code" alt="ZATCA QR code" />
+    ? <img src={src} width={size} height={size} className="zatca-qr-code" alt="رمز الفاتورة الضريبية" />
     : <div className="zatca-qr-code qr-fallback" style={{ width: size, height: size }}>QR</div>;
 }
 
@@ -169,8 +169,7 @@ const invoiceStandaloneCss = `
   }
   .invoice-doc-head { grid-template-columns: minmax(0, 1fr) minmax(170px, auto) !important; }
   .invoice-identity-grid { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
-  .invoice-parties { grid-template-columns: minmax(0, 1fr) minmax(0, 250px) !important; align-items: stretch !important; }
-  .invoice-party-side { display: grid !important; gap: 8px !important; grid-template-rows: auto 1fr !important; }
+  .invoice-parties { grid-template-columns: minmax(0, 1fr) auto !important; align-items: stretch !important; }
   .invoice-bottom-grid { display: flex !important; justify-content: flex-end !important; align-items: start !important; }
   .invoice-doc-totals { width: min(100%, 300px) !important; }
   .invoice-doc-table { display: table !important; }
@@ -202,7 +201,7 @@ const invoiceStandaloneCss = `
   .invoice-doc-table,
   .invoice-bottom-grid { margin-bottom: 8px !important; }
   .invoice-doc-head { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-  .invoice-brand-block img { height: 40px !important; width: 40px !important; object-fit: contain !important; flex-shrink: 0 !important; }
+  .invoice-brand-logo { width: 194px !important; height: 61px !important; object-fit: contain !important; flex-shrink: 0 !important; }
 `;
 
 async function replaceInvoiceQrInClone(clone: HTMLElement, invoice: api.Invoice) {
@@ -213,21 +212,21 @@ async function replaceInvoiceQrInClone(clone: HTMLElement, invoice: api.Invoice)
   const qrSrc = await QRCode.toDataURL(qrData, {
     errorCorrectionLevel: "M",
     margin: 1,
-    width: 140,
+    width: 104,
     color: { dark: "#000000", light: "#ffffff" },
   });
   if (qrTarget instanceof HTMLImageElement) {
     qrTarget.src = qrSrc;
-    qrTarget.width = 140;
-    qrTarget.height = 140;
+    qrTarget.width = 104;
+    qrTarget.height = 104;
     return;
   }
   const qrImage = document.createElement("img");
   qrImage.src = qrSrc;
-  qrImage.width = 140;
-  qrImage.height = 140;
+  qrImage.width = 104;
+  qrImage.height = 104;
   qrImage.className = "zatca-qr-code";
-  qrImage.alt = "ZATCA QR code";
+  qrImage.alt = "رمز الفاتورة الضريبية";
   qrTarget.replaceWith(qrImage);
 }
 
@@ -607,8 +606,8 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       <section className="cloud-hero quotes-hero">
         <div className="cloud-hero-copy">
           <span className="eyebrow">الفواتير الضريبية</span>
-          <h1>الفواتير الضريبية (ZATCA)</h1>
-          <p>إصدار فواتير ضريبية واضحة مع رمز QR لحقول المرحلة الأولى. التكامل مع منصة فاتورة للمرحلة الثانية غير مفعّل بعد.</p>
+          <h1>الفواتير الضريبية</h1>
+          <p>إصدار الفواتير وإدارتها وطباعتها ومشاركتها مع العملاء.</p>
           <div className="hero-actions">
             <button className="btn primary" type="button" onClick={() => setCreating(true)}>
               <Plus size={16} /> إصدار فاتورة
@@ -807,7 +806,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
   const qrCode = useMemo(() => generateZATCAQR(invoice), [invoice]);
   const kind = invoiceKind(invoice);
   const breakdown = useMemo(() => invoiceBreakdown(invoice), [invoice]);
-  const issueTime = invoiceTimestamp(invoice).replace("T", " ").replace("Z", " UTC");
+  const visibleTerms = cleanInvoiceTerms(invoice.terms);
   const [sellerOption, setSellerOption] = useState<string>(invoiceSellerOptions[0]);
   const [customSeller, setCustomSeller] = useState("");
   const exportSellerName = sellerOption === "custom" ? customSeller.trim() : sellerOption;
@@ -817,12 +816,11 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
       <section className="invoice-a4-doc" dir="rtl">
         <header className="invoice-doc-head">
           <div className="invoice-brand-block">
-            <img src="/brand/icon-256.png" alt="BreeXe Pro" style={{ height: 40, width: 40, objectFit: "contain", flexShrink: 0 }} />
-            <div>
-              <span dir="ltr">{invoice.seller_name || sellerEnglishName}</span>
+            <img className="invoice-brand-logo" src="/brand/logo-full.png" alt="BreeXe Pro" width={194} height={61} />
+            <div className="invoice-brand-copy">
               <strong>{sellerLegalName}</strong>
               <small>{invoice.seller_address || "الرياض، المملكة العربية السعودية"}</small>
-              <small dir="ltr">{sellerPhone}</small>
+              <small><bdi dir="ltr">{sellerPhone}</bdi></small>
             </div>
           </div>
           <div className="invoice-title-block">
@@ -835,17 +833,16 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
 
         <section className="invoice-identity-grid">
           <article>
-            <span>رقم الفاتورة</span>
-            <strong>{invoice.invoice_number}</strong>
-          </article>
-          <article>
             <span>تاريخ الإصدار</span>
             <strong>{invoice.issue_date}</strong>
-            <small>{issueTime}</small>
           </article>
           <article>
             <span>الرقم الضريبي للبائع</span>
             <strong>{invoice.seller_vat_number || "-"}</strong>
+          </article>
+          <article>
+            <span>السجل التجاري</span>
+            <strong>{sellerCrNumber}</strong>
           </article>
           <article>
             <span>المندوب</span>
@@ -854,28 +851,18 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
         </section>
 
         <section className="invoice-parties">
-          <article>
-            <h3>بيانات البائع</h3>
-            <p><span>الاسم:</span> <bdi>{invoice.seller_name || sellerEnglishName}</bdi></p>
-            <p><span>السجل/الاسم القانوني:</span> {sellerLegalName}</p>
-            <p><span>الرقم الضريبي:</span> {invoice.seller_vat_number || "-"}</p>
-            <p><span>السجل التجاري:</span> {sellerCrNumber}</p>
-            <p><span>الجوال:</span> <bdi dir="ltr">{sellerPhone}</bdi></p>
-            <p><span>العنوان:</span> {invoice.seller_address || "-"}</p>
+          <article className="invoice-customer-card">
+            <h3>بيانات العميل</h3>
+            <dl className="invoice-party-facts">
+              <div><dt>الاسم</dt><dd>{invoice.customer_name || "-"}</dd></div>
+              <div><dt>الجوال</dt><dd><bdi dir="ltr">{invoice.customer_phone || "-"}</bdi></dd></div>
+              <div><dt>المدينة</dt><dd>{invoice.customer_city || "-"}</dd></div>
+              <div><dt>الرقم الضريبي</dt><dd>{invoice.customer_vat || "-"}</dd></div>
+            </dl>
           </article>
-          <div className="invoice-party-side">
-            <article>
-              <h3>بيانات العميل</h3>
-              <p><span>الاسم:</span> {invoice.customer_name}</p>
-              <p><span>الجوال:</span> {invoice.customer_phone || "-"}</p>
-              <p><span>المدينة:</span> {invoice.customer_city || "-"}</p>
-              <p><span>الرقم الضريبي:</span> {invoice.customer_vat || "-"}</p>
-            </article>
-            <aside className="invoice-zatca-card">
-              <QRCodeDisplay data={qrCode} size={132} />
-              <span>رمز الاستجابة السريع — حقول زاتكا للمرحلة الأولى</span>
-            </aside>
-          </div>
+          <aside className="invoice-zatca-card" aria-label="رمز الفاتورة الضريبية">
+            <QRCodeDisplay data={qrCode} size={96} />
+          </aside>
         </section>
 
         <table className="invoice-doc-table">
@@ -929,10 +916,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
           </div>
         </section>
 
-        {invoice.terms && <p className="invoice-doc-terms">{invoice.terms}</p>}
-        <footer className="invoice-doc-foot">
-          <strong>{sellerEnglishName}</strong>
-        </footer>
+        {visibleTerms && <p className="invoice-doc-terms">{visibleTerms}</p>}
       </section>
       <div className="form-actions">
         <div className="invoice-export-options">
