@@ -244,6 +244,9 @@ const jsonColumns = new Set([
   "selected_product_ids",
   "summary",
   "candidate_asset_ids",
+  "categories",
+  "image_urls",
+  "variants",
 ]);
 
 function mapToColumn(key: string): string {
