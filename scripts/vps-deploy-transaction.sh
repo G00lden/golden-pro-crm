@@ -428,7 +428,10 @@ if ! tar -tzf "$DEPLOY_ARCHIVE" | awk '
 '; then
   restore_previous "The deployment archive contains an unsafe or empty path list."
 fi
-tar -xzf "$DEPLOY_ARCHIVE" -C "$STAGED_SOURCE" || restore_previous "The deployment archive could not be extracted."
+# Security: archive member owners come from an untrusted build host (including
+# Windows/CI numeric UIDs), so GNU tar must map files to the trusted transaction user.
+tar --extract --gzip --no-same-owner --file "$DEPLOY_ARCHIVE" --directory "$STAGED_SOURCE" \
+  || restore_previous "The deployment archive could not be extracted."
 rm -rf -- "$STAGED_SOURCE/.git" "$STAGED_SOURCE/.deploy-rollback" \
   "$STAGED_SOURCE/backups" "$STAGED_SOURCE/data" "$STAGED_SOURCE/.runtime" "$STAGED_SOURCE/.wa-session"
 rm -f -- "$STAGED_SOURCE/.env.production"

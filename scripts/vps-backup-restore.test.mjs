@@ -437,6 +437,15 @@ test("deployment transaction owns both locks and restores source as a clean rena
   assert.match(deployTransaction, /mv -- "\$PREVIOUS_SOURCE" "\$RETAINED_SOURCE"/);
   assert.match(deployTransaction, /source retention must share APP_DIR's filesystem/);
   assert.doesNotMatch(deployTransaction, /cp -a -- "\$APP_DIR\/\.git"/);
+  const ownershipSafeExtraction = 'tar --extract --gzip --no-same-owner --file "$DEPLOY_ARCHIVE" --directory "$STAGED_SOURCE"';
+  assert.ok(deployTransaction.includes(ownershipSafeExtraction), "release extraction must discard archive-supplied numeric owners");
+  assert.doesNotMatch(deployTransaction, /chown[^\n]*\$STAGED_SOURCE/);
+  before(
+    deployTransaction,
+    ownershipSafeExtraction,
+    'mv -- "$APP_DIR" "$PREVIOUS_SOURCE"',
+    "ownership-safe extraction must complete before the source swap",
+  );
   assert.match(deployTransaction, /https:\/\/\$CRM_DOMAIN\/api\/health/);
   assert.match(deployTransaction, /https:\/\/\$CRM_DOMAIN\/api\/version/);
   assert.match(deployTransaction, /staged_proxy_contract_matches/);
