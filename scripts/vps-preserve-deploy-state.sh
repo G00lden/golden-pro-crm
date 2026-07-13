@@ -75,6 +75,106 @@ CADDY_CANDIDATES="$(
   || fail "exactly one running Caddy container is required"
 CADDY_CID="$(printf '%s\n' "$CADDY_CANDIDATES" | sed -n '1p')"
 
+capture_caddy_volume() {
+  local destination="$1" output_file="$2" mount_record mount_type volume_name
+  mount_record="$(
+    docker inspect --format \
+      '{{range .Mounts}}{{if eq .Destination "'"$destination"'"}}{{printf "%s|%s\n" .Type .Name}}{{end}}{{end}}' \
+      "$CADDY_CID"
+  )"
+  mount_type="${mount_record%%|*}"
+  volume_name="${mount_record#*|}"
+  [ "$mount_type" = "volume" ] && [ "$volume_name" != "$mount_record" ] \
+    || fail "Caddy $destination must be backed by exactly one named Docker volume"
+  case "$volume_name" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) fail "Caddy $destination has an unsafe Docker volume name" ;;
+  esac
+  docker volume inspect "$volume_name" >/dev/null 2>&1 \
+    || fail "Caddy $destination volume is unavailable"
+  printf '%s\n' "$volume_name" > "$output_file"
+}
+
+caddy_env_value() {
+  local key="$1"
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CADDY_CID" \
+    | sed -n "s/^${key}=//p" | tail -n 1 | tr -d '\r'
+}
+
+safe_domain() {
+  case "$1" in
+    ''|.*|*.|*..*|*[!A-Za-z0-9.-]*) return 1 ;;
+  esac
+  case "$1" in *.*) return 0 ;; *) return 1 ;; esac
+}
+
+literal_proxy_site() {
+  local caddyfile="$1" upstream="$2"
+  awk -v upstream="$upstream" '
+    /^[[:space:]]*https?:\/\/[A-Za-z0-9][A-Za-z0-9.-]*[[:space:]]*\{/ {
+      line=$0
+      sub(/^[[:space:]]*/, "", line)
+      scheme=line
+      sub(/:\/\/.*/, "", scheme)
+      domain=line
+      sub(/^[^:]+:\/\//, "", domain)
+      sub(/[[:space:]]*\{[[:space:]]*$/, "", domain)
+      candidate=scheme "|" domain
+      next
+    }
+    candidate != "" {
+      normalized=$0
+      gsub(/[[:space:]]+/, " ", normalized)
+      if (index(normalized, "reverse_proxy " upstream)) { print candidate; exit }
+    }
+    candidate != "" && /^[[:space:]]*\}/ { candidate="" }
+  ' "$caddyfile"
+}
+
+capture_previous_proxy_contract() {
+  local caddyfile="$1" crm_domain erp_domain literal_crm literal_erp \
+    crm_required=false erp_required=false crm_scheme=none
+  grep -Eq '^[[:space:]]*reverse_proxy[[:space:]]+crm:8080([[:space:]]|$)' "$caddyfile" \
+    && crm_required=true
+  grep -Eq '^[[:space:]]*reverse_proxy[[:space:]]+host\.docker\.internal:8069([[:space:]]|$)' "$caddyfile" \
+    && erp_required=true
+
+  crm_domain="$(caddy_env_value CRM_DOMAIN)"
+  literal_crm="$(literal_proxy_site "$caddyfile" "crm:8080")"
+  if [ -z "$crm_domain" ] && [ -n "$literal_crm" ]; then crm_domain="${literal_crm#*|}"; fi
+  if [ "$crm_required" = true ] || grep -Fq '{$CRM_DOMAIN}' "$caddyfile"; then
+    safe_domain "$crm_domain" || fail "the running Caddy CRM domain contract is unavailable"
+  elif ! safe_domain "$crm_domain"; then
+    crm_domain="none"
+  fi
+
+  if [ "$crm_required" = true ]; then
+    if grep -Fq 'http://{$CRM_DOMAIN}' "$caddyfile"; then
+      crm_scheme="http"
+    elif grep -Eq '^[[:space:]]*(https://)?\{\$CRM_DOMAIN\}[[:space:]]*\{' "$caddyfile"; then
+      crm_scheme="https"
+    elif [ -n "$literal_crm" ]; then
+      crm_scheme="${literal_crm%%|*}"
+    else
+      fail "the running Caddy CRM origin scheme cannot be preserved safely"
+    fi
+  fi
+
+  erp_domain="$(caddy_env_value ERP_DOMAIN)"
+  literal_erp="$(literal_proxy_site "$caddyfile" "host.docker.internal:8069")"
+  if [ -z "$erp_domain" ] && [ -n "$literal_erp" ]; then erp_domain="${literal_erp#*|}"; fi
+  if [ "$erp_required" = true ] || grep -Fq '{$ERP_DOMAIN}' "$caddyfile"; then
+    safe_domain "$erp_domain" || fail "the running Caddy ERP domain contract is unavailable"
+  elif ! safe_domain "$erp_domain"; then
+    erp_domain="none"
+  fi
+
+  printf '%s\n' "$crm_domain" > "$TMP_DIR/previous-crm-domain"
+  printf '%s\n' "$erp_domain" > "$TMP_DIR/previous-erp-domain"
+  printf '%s\n' "$crm_required" > "$TMP_DIR/previous-require-crm-origin"
+  printf '%s\n' "$erp_required" > "$TMP_DIR/previous-require-erp-endpoint"
+  printf '%s\n' "$crm_scheme" > "$TMP_DIR/previous-crm-origin-scheme"
+}
+
 ACTIVE_ROOT="$(cd "$(dirname "$COMPOSE_LABEL")/.." && pwd)"
 if [ -n "${CRM_ACTIVE_ENV_FILE:-}" ]; then
   case "$CRM_ACTIVE_ENV_FILE" in /*) ;; *) fail "the requested active environment path is not absolute" ;; esac
@@ -104,6 +204,9 @@ trap cleanup EXIT
 cp -- "$ACTIVE_ENV" "$TMP_DIR/env.production"
 cp -- "$COMPOSE_LABEL" "$TMP_DIR/docker-compose.yml"
 docker cp "$CADDY_CID:/etc/caddy/Caddyfile" "$TMP_DIR/Caddyfile" >/dev/null
+capture_caddy_volume "/data" "$TMP_DIR/caddy-data-volume"
+capture_caddy_volume "/config" "$TMP_DIR/caddy-config-volume"
+capture_previous_proxy_contract "$TMP_DIR/Caddyfile"
 [ -s "$TMP_DIR/env.production" ] || fail "the active environment file is empty"
 [ -s "$TMP_DIR/docker-compose.yml" ] || fail "the active Compose file is empty"
 [ -s "$TMP_DIR/Caddyfile" ] || fail "the running Caddyfile is empty"
@@ -146,7 +249,9 @@ printf '%s\n' "$ACTIVE_ENV" > "$TMP_DIR/source-env-path"
 (
   cd "$TMP_DIR"
   sha256sum Caddyfile docker-compose.yml env.production previous-image-id previous-build previous-version \
-    project-name source-compose-path source-env-path > manifest.sha256
+    project-name source-compose-path source-env-path caddy-data-volume caddy-config-volume \
+    previous-crm-domain previous-erp-domain previous-require-crm-origin previous-require-erp-endpoint \
+    previous-crm-origin-scheme > manifest.sha256
 )
 chmod 600 "$TMP_DIR"/*
 

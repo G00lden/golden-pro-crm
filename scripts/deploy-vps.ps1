@@ -6,6 +6,9 @@ param(
   [string]$AppDir = "/opt/golden-pro-crm",
   [string]$ApprovedAppBase = "",
   [string]$Domain = "crm.breexe-pro.com",
+  [string]$ErpDomain = "erp.breexe-pro.com",
+  [string]$CaddyDataVolume = "deploy_caddy_data",
+  [string]$CaddyConfigVolume = "deploy_caddy_config",
   [string]$SshKey = "",
   [switch]$SkipBootstrap,
   [switch]$SkipDns,
@@ -62,6 +65,14 @@ if ($AppDir -ne "/opt/golden-pro-crm") {
 }
 if ($Domain -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$' -or $Domain -notmatch '\.') {
   throw "Domain contains unsupported characters or is not a fully qualified name."
+}
+if ($ErpDomain -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$' -or $ErpDomain -notmatch '\.') {
+  throw "ErpDomain contains unsupported characters or is not a fully qualified name."
+}
+foreach ($volumeName in @($CaddyDataVolume, $CaddyConfigVolume)) {
+  if ($volumeName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') {
+    throw "Caddy volume names may contain only letters, digits, dot, underscore, and hyphen."
+  }
 }
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -211,7 +222,7 @@ try {
 
   Write-Host "Running one locked backup, source swap, build, health, and rollback transaction..."
   $transactionStarted = $true
-  ssh @sshOptions $sshTarget "sed -i 's/\r$//' '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; chmod 700 '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; APP_DIR='$AppDir' DEPLOY_APPROVED_APP_BASE='$ApprovedAppBase' CRM_DOMAIN='$Domain' DEPLOY_ARCHIVE='$remoteArchive' DEPLOY_ENV_FILE='$remoteEnv' DEPLOY_BACKUP_HELPER='$remoteBackup' DEPLOY_PRESERVE_HELPER='$remotePreserve' DEPLOY_ROLLBACK_HELPER='$remoteRollback' USE_EXISTING_ENV=false ALLOW_FIRST_DEPLOY='$allowFirst' DEPLOY_BOOTSTRAP='$remoteBootstrap' EXPECTED_VERSION='$releaseVersion' EXPECTED_BUILD='$buildCommit' bash '$remoteTransaction'"
+  ssh @sshOptions $sshTarget "sed -i 's/\r$//' '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; chmod 700 '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; APP_DIR='$AppDir' DEPLOY_APPROVED_APP_BASE='$ApprovedAppBase' CRM_DOMAIN='$Domain' ERP_DOMAIN='$ErpDomain' FIRST_DEPLOY_CADDY_DATA_VOLUME='$CaddyDataVolume' FIRST_DEPLOY_CADDY_CONFIG_VOLUME='$CaddyConfigVolume' DEPLOY_ARCHIVE='$remoteArchive' DEPLOY_ENV_FILE='$remoteEnv' DEPLOY_BACKUP_HELPER='$remoteBackup' DEPLOY_PRESERVE_HELPER='$remotePreserve' DEPLOY_ROLLBACK_HELPER='$remoteRollback' USE_EXISTING_ENV=false ALLOW_FIRST_DEPLOY='$allowFirst' DEPLOY_BOOTSTRAP='$remoteBootstrap' EXPECTED_VERSION='$releaseVersion' EXPECTED_BUILD='$buildCommit' bash '$remoteTransaction'"
   $transactionExit = $LASTEXITCODE
   if ($transactionExit -eq 0) {
     $transactionResolved = $true

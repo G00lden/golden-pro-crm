@@ -37,8 +37,11 @@ services:
     restart: unless-stopped
     depends_on:
       - crm
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       CRM_DOMAIN: ${CRM_DOMAIN:-crm.breexe-pro.com}
+      ERP_DOMAIN: ${ERP_DOMAIN:-erp.breexe-pro.com}
     ports:
       - "80:80"
       - "443:443"
@@ -52,4 +55,6 @@ volumes:
   crm_runtime:
   crm_wa_session:
   caddy_data:
+    name: ${CADDY_DATA_VOLUME:-deploy_caddy_data}
   caddy_config:
+    name: ${CADDY_CONFIG_VOLUME:-deploy_caddy_config}

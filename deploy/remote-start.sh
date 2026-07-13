@@ -3,10 +3,13 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/golden-pro-crm}"
 CRM_DOMAIN="${CRM_DOMAIN:-crm.breexe-pro.com}"
+ERP_DOMAIN="${ERP_DOMAIN:-erp.breexe-pro.com}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-30}"
 HEALTH_SLEEP="${HEALTH_SLEEP:-4}"
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
 EXPECTED_BUILD="${EXPECTED_BUILD:-${BUILD_COMMIT:-}}"
+CADDY_VALIDATION_DATA_VOLUME="${CADDY_VALIDATION_DATA_VOLUME:-}"
+CADDY_VALIDATION_CONFIG_VOLUME="${CADDY_VALIDATION_CONFIG_VOLUME:-}"
 ROLLBACK_DIR="${DEPLOY_ROLLBACK_DIR:-$APP_DIR/.deploy-rollback}"
 ROLLBACK_IMAGE="golden-pro-crm:rollback"
 
@@ -23,6 +26,9 @@ esac
 case "$CRM_DOMAIN" in
   *[!A-Za-z0-9.-]*|'') fail "CRM_DOMAIN is invalid" ;;
 esac
+case "$ERP_DOMAIN" in
+  *[!A-Za-z0-9.-]*|'') fail "ERP_DOMAIN is invalid" ;;
+esac
 case "$HEALTH_RETRIES:$HEALTH_SLEEP" in
   *[!0-9:]*) fail "health retry settings must be integers" ;;
 esac
@@ -34,7 +40,7 @@ cd "$APP_DIR"
 [ -s "deploy/docker-compose.yml" ] || fail "deploy/docker-compose.yml is missing"
 [ -s "deploy/Caddyfile" ] || fail "deploy/Caddyfile is missing"
 [ -s "deploy/remote-rollback.sh" ] || fail "deploy/remote-rollback.sh is missing"
-for command_name in docker curl sha256sum; do
+for command_name in docker curl grep mktemp rm sha256sum; do
   command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
 done
 
@@ -58,6 +64,21 @@ PUBLIC_CONTACT_PHONE="$(env_value VITE_PUBLIC_CONTACT_PHONE)"
   || fail "VITE_PUBLIC_CONTACT_PHONE must be a valid E.164 number"
 
 PROJECT_NAME=""
+CADDY_VALIDATION_MOUNTS=()
+validated_volume_name() {
+  local value="$1" label="$2"
+  case "$value" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) fail "the preserved Caddy $label volume name is invalid" ;;
+  esac
+  docker volume inspect "$value" >/dev/null 2>&1 \
+    || fail "the preserved Caddy $label volume is unavailable"
+  printf '%s' "$value"
+}
+preserved_volume_name() {
+  local path="$1" label="$2"
+  [ -s "$path" ] || fail "the preserved Caddy $label volume binding is missing"
+  validated_volume_name "$(<"$path")" "$label"
+}
 if [ -d "$ROLLBACK_DIR" ]; then
   [ -s "$ROLLBACK_DIR/project-name" ] || fail "the preserved Compose project name is missing"
   (
@@ -68,6 +89,23 @@ if [ -d "$ROLLBACK_DIR" ]; then
   case "$PROJECT_NAME" in
     ''|*[!A-Za-z0-9_-]*) fail "the preserved Compose project name is invalid" ;;
   esac
+  CADDY_DATA_VOLUME="$(preserved_volume_name "$ROLLBACK_DIR/caddy-data-volume" data)"
+  CADDY_CONFIG_VOLUME="$(preserved_volume_name "$ROLLBACK_DIR/caddy-config-volume" config)"
+  CADDY_VALIDATION_MOUNTS=(
+    --mount "type=volume,src=$CADDY_DATA_VOLUME,dst=/data,readonly"
+    --mount "type=volume,src=$CADDY_CONFIG_VOLUME,dst=/config,readonly"
+  )
+elif [ -n "$CADDY_VALIDATION_DATA_VOLUME" ] && [ -n "$CADDY_VALIDATION_CONFIG_VOLUME" ]; then
+  CADDY_DATA_VOLUME="$(validated_volume_name "$CADDY_VALIDATION_DATA_VOLUME" data)"
+  CADDY_CONFIG_VOLUME="$(validated_volume_name "$CADDY_VALIDATION_CONFIG_VOLUME" config)"
+  CADDY_VALIDATION_MOUNTS=(
+    --mount "type=volume,src=$CADDY_DATA_VOLUME,dst=/data,readonly"
+    --mount "type=volume,src=$CADDY_CONFIG_VOLUME,dst=/config,readonly"
+  )
+elif [ -n "$CADDY_VALIDATION_DATA_VOLUME" ] || [ -n "$CADDY_VALIDATION_CONFIG_VOLUME" ]; then
+  fail "both explicit Caddy validation volumes are required"
+else
+  fail "a first deployment requires pre-provisioned Caddy data/config volumes and the ERP certificate"
 fi
 COMPOSE=(docker compose)
 if [ -n "$PROJECT_NAME" ]; then
@@ -89,6 +127,9 @@ esac
 
 export BUILD_COMMIT="$EXPECTED_BUILD"
 export CRM_DOMAIN
+export ERP_DOMAIN
+export CADDY_DATA_VOLUME
+export CADDY_CONFIG_VOLUME
 
 OLD_CID="$("${COMPOSE[@]}" ps -q crm 2>/dev/null || true)"
 HAD_PREVIOUS=false
@@ -105,8 +146,8 @@ rollback_and_fail() {
   local reason="$1"
   echo "$reason" >&2
   if [ "$HAD_PREVIOUS" = true ]; then
-    if APP_DIR="$APP_DIR" CRM_DOMAIN="$CRM_DOMAIN" HEALTH_RETRIES="$HEALTH_RETRIES" \
-      HEALTH_SLEEP="$HEALTH_SLEEP" bash "$APP_DIR/deploy/remote-rollback.sh"; then
+    if APP_DIR="$APP_DIR" HEALTH_RETRIES="$HEALTH_RETRIES" HEALTH_SLEEP="$HEALTH_SLEEP" \
+      bash "$APP_DIR/deploy/remote-rollback.sh"; then
       echo "The previous deployment was restored after the failed release." >&2
       exit 1
     fi
@@ -118,9 +159,11 @@ rollback_and_fail() {
 }
 
 echo "Validating the new Caddy configuration before replacement..."
-if ! docker run --rm --network none \
+if ! docker run --rm --network none --cap-drop ALL --cap-add NET_BIND_SERVICE \
   -e CRM_DOMAIN="$CRM_DOMAIN" \
-  -v "$APP_DIR/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  -e ERP_DOMAIN="$ERP_DOMAIN" \
+  "${CADDY_VALIDATION_MOUNTS[@]}" \
+  --mount "type=bind,src=$APP_DIR/deploy/Caddyfile,dst=/etc/caddy/Caddyfile,readonly" \
   caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null; then
   rollback_and_fail "The new Caddy configuration is invalid."
 fi
@@ -153,7 +196,7 @@ caddy_release_matches() {
   [ -n "$cid" ] || return 1
   payload="$(
     curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
-      --resolve "$CRM_DOMAIN:443:127.0.0.1" "https://$CRM_DOMAIN/api/health" 2>/dev/null
+      --header "Host: $CRM_DOMAIN" "http://127.0.0.1/api/health" 2>/dev/null
   )" || return 1
   printf '%s' "$payload" | docker exec -i \
     -e EXPECTED_VERSION="$EXPECTED_VERSION" \
@@ -173,10 +216,23 @@ caddy_release_matches() {
     ' >/dev/null 2>&1
 }
 
+erp_login_matches() {
+  local domain="$1" response_file status=1
+  response_file="$(mktemp /tmp/golden-pro-crm-erp-health.XXXXXXXXXX)" || return 1
+  if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+    --output "$response_file" --resolve "$domain:443:127.0.0.1" \
+    "https://$domain/web/login" 2>/dev/null \
+    && grep -Eiq '<title[[:space:]]*>[[:space:]]*odoo([[:space:]<]|$)' "$response_file"; then
+    status=0
+  fi
+  rm -f -- "$response_file"
+  return "$status"
+}
+
 wait_for_release() {
   local attempt
   for attempt in $(seq 1 "$HEALTH_RETRIES"); do
-    if internal_release_matches && caddy_release_matches; then
+    if internal_release_matches && caddy_release_matches && erp_login_matches "$ERP_DOMAIN"; then
       return 0
     fi
     sleep "$HEALTH_SLEEP"
@@ -195,8 +251,8 @@ if ! "${COMPOSE[@]}" up -d --no-build --force-recreate crm caddy; then
 fi
 
 if ! wait_for_release; then
-  rollback_and_fail "The new release failed the exact internal/Caddy health contract."
+  rollback_and_fail "The new release failed the exact CRM and Odoo ERP login health contract."
 fi
 
 "${COMPOSE[@]}" ps
-echo "Golden Pro CRM $EXPECTED_VERSION is healthy internally and through Caddy at build $EXPECTED_BUILD."
+echo "Golden Pro CRM $EXPECTED_VERSION is healthy internally and through the HTTP origin at build $EXPECTED_BUILD; the Odoo ERP login page is healthy."

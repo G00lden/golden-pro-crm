@@ -25,6 +25,9 @@ const vpsDeploymentDoc = readFileSync(new URL("../docs/vps-deployment-ar.md", im
 const vpsCicdDoc = readFileSync(new URL("../docs/vps-cicd-backups-ar.md", import.meta.url), "utf8");
 const remoteStart = readFileSync(new URL("../deploy/remote-start.sh", import.meta.url), "utf8");
 const remoteRollback = readFileSync(new URL("../deploy/remote-rollback.sh", import.meta.url), "utf8");
+const remoteRollbackUrl = new URL("../deploy/remote-rollback.sh", import.meta.url);
+const caddyConfig = readFileSync(new URL("../deploy/Caddyfile", import.meta.url), "utf8");
+const composeConfig = readFileSync(new URL("../deploy/docker-compose.yml", import.meta.url), "utf8");
 
 function before(source, first, second, message) {
   const firstIndex = source.indexOf(first);
@@ -83,15 +86,24 @@ function writeExecutable(filePath, source) {
   makeExecutable(filePath);
 }
 
-function createDeployArchive(directory, remoteStartSource) {
+function writeSha256Manifest(directory, files) {
+  const entries = files.map((file) => {
+    const payload = readFileSync(path.join(directory, file));
+    const hash = crypto.createHash("sha256").update(payload).digest("hex");
+    return `${hash}  ${file}`;
+  });
+  writeFileSync(path.join(directory, "manifest.sha256"), `${entries.join("\n")}\n`, "utf8");
+}
+
+function createDeployArchive(directory, remoteStartSource, overrides = {}) {
   const payload = path.join(directory, "payload");
   const deploy = path.join(payload, "deploy");
   mkdirSync(path.join(payload, "scripts"), { recursive: true });
   mkdirSync(deploy, { recursive: true });
   writeFileSync(path.join(payload, "new-only.txt"), "new source", "utf8");
   writeFileSync(path.join(payload, "release.json"), '{"version":"1.2.3"}\n', "utf8");
-  writeFileSync(path.join(deploy, "docker-compose.yml"), "services: {}\n", "utf8");
-  writeFileSync(path.join(deploy, "Caddyfile"), "example.test\n", "utf8");
+  writeFileSync(path.join(deploy, "docker-compose.yml"), overrides.compose ?? composeConfig, "utf8");
+  writeFileSync(path.join(deploy, "Caddyfile"), overrides.caddy ?? caddyConfig, "utf8");
   writeExecutable(path.join(deploy, "remote-start.sh"), remoteStartSource);
   writeExecutable(path.join(deploy, "remote-rollback.sh"), "#!/bin/sh\nexit 99\n");
   const archive = path.join(directory, "release.tar.gz");
@@ -390,6 +402,9 @@ test("manual VPS deployment uploads immutable inputs then delegates one locked t
   assert.match(deployVps, /DEPLOY_ROLLBACK_HELPER='\$remoteRollback'/);
   assert.match(deployVps, /EXPECTED_VERSION='\$releaseVersion'/);
   assert.match(deployVps, /EXPECTED_BUILD='\$buildCommit'/);
+  assert.match(deployVps, /ERP_DOMAIN='\$ErpDomain'/);
+  assert.match(deployVps, /FIRST_DEPLOY_CADDY_DATA_VOLUME='\$CaddyDataVolume'/);
+  assert.match(deployVps, /FIRST_DEPLOY_CADDY_CONFIG_VOLUME='\$CaddyConfigVolume'/);
   for (const status of [1, 2, 75]) assert.match(deployVps, new RegExp(`transactionExit -eq ${status}`));
   assert.match(deployVps, /remoteBundleCreated.*transactionStarted.*transactionResolved/);
   assert.match(deployVps, /mktemp -d \/tmp\/golden-pro-crm-deploy\.XXXXXXXXXX/);
@@ -424,11 +439,34 @@ test("deployment transaction owns both locks and restores source as a clean rena
   assert.doesNotMatch(deployTransaction, /cp -a -- "\$APP_DIR\/\.git"/);
   assert.match(deployTransaction, /https:\/\/\$CRM_DOMAIN\/api\/health/);
   assert.match(deployTransaction, /https:\/\/\$CRM_DOMAIN\/api\/version/);
+  assert.match(deployTransaction, /staged_proxy_contract_matches/);
+  assert.match(deployTransaction, /host\.docker\.internal:host-gateway/);
+  assert.match(deployTransaction, /First deployment requires existing named Caddy data\/config volumes/);
+  assert.match(deployTransaction, /--cap-drop ALL --cap-add NET_BIND_SERVICE/);
+  before(
+    deployTransaction,
+    "staged_proxy_contract_matches",
+    'mv -- "$APP_DIR" "$PREVIOUS_SOURCE"',
+    "the CRM/ERP proxy contract must be checked before the source swap",
+  );
+  before(
+    deployTransaction,
+    "verifying first-deploy Caddy volumes",
+    'mv -- "$APP_DIR" "$PREVIOUS_SOURCE"',
+    "first-deploy Caddy prerequisites must be checked before the source swap",
+  );
 });
 
 test("deployment-state preservation captures the actual running files and rollback image atomically", () => {
   assert.match(preserveDeployState, /com\.docker\.compose\.project\.config_files/);
   assert.match(preserveDeployState, /docker cp "\$CADDY_CID:\/etc\/caddy\/Caddyfile"/);
+  assert.match(preserveDeployState, /capture_caddy_volume "\/data"/);
+  assert.match(preserveDeployState, /capture_caddy_volume "\/config"/);
+  assert.match(preserveDeployState, /\.Type \.Name/);
+  assert.match(preserveDeployState, /caddy-data-volume caddy-config-volume/);
+  assert.match(preserveDeployState, /capture_previous_proxy_contract/);
+  assert.match(preserveDeployState, /previous-crm-domain previous-erp-domain/);
+  assert.match(preserveDeployState, /previous-require-crm-origin previous-require-erp-endpoint/);
   assert.match(preserveDeployState, /ACTIVE_ROOT=.*dirname "\$COMPOSE_LABEL"/);
   assert.match(preserveDeployState, /cp -- "\$ACTIVE_ENV" "\$TMP_DIR\/env\.production"/);
   assert.match(preserveDeployState, /CRM_ACTIVE_ENV_FILE/);
@@ -440,11 +478,102 @@ test("deployment-state preservation captures the actual running files and rollba
   assert.ok(finalCleanupIndex > installIndex, "the previous snapshot must be cleaned only after replacement");
 });
 
+test("preservation derives the current VPS CRM env domain and the later hard-coded ERP block", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "crm-preserved-proxy-contract-test-"));
+  const app = path.join(directory, "app");
+  const deploy = path.join(app, "deploy");
+  const bin = path.join(directory, "bin");
+  const composePath = path.join(deploy, "docker-compose.yml");
+  const envPath = path.join(app, ".env.production");
+  const runningCaddyfile = path.join(directory, "running-Caddyfile");
+  mkdirSync(deploy, { recursive: true });
+  mkdirSync(bin);
+  writeFileSync(composePath, "services:\n  crm: {}\n  caddy: {}\n", "utf8");
+  writeFileSync(envPath, "TRUST_PROXY_HEADERS=true\n", "utf8");
+  writeFileSync(runningCaddyfile, [
+    "{ auto_https off }",
+    "http://{$CRM_DOMAIN} {",
+    "  reverse_proxy crm:8080",
+    "}",
+    "https://status.example.com {",
+    "  reverse_proxy status:9000",
+    "}",
+    "http://erp.breexe-pro.com { redir https://{host}{uri} permanent }",
+    "https://erp.breexe-pro.com {",
+    "  tls /data/caddy/certificates/erp.crt /data/caddy/certificates/erp.key",
+    "  reverse_proxy host.docker.internal:8069",
+    "}",
+    "",
+  ].join("\n"), "utf8");
+
+  writeExecutable(path.join(bin, "docker"), [
+    "#!/usr/bin/env bash",
+    "set -eu",
+    'case "${1:-}" in',
+    "  ps) printf '%s\\n' caddy-cid ;;",
+    "  inspect)",
+    '    args=" $* "',
+    '    case "$args" in',
+    '      *".State.Running"*) printf "%s\\n" true ;;',
+    '      *"project.config_files"*) printf "%s\\n" "$ACTIVE_COMPOSE" ;;',
+    '      *"com.docker.compose.project"*) printf "%s\\n" deploy ;;',
+    '      *"eq .Destination \\\"/data\\\""*) printf "%s\\n" "volume|deploy_caddy_data" ;;',
+    '      *"eq .Destination \\\"/config\\\""*) printf "%s\\n" "volume|deploy_caddy_config" ;;',
+    '      *".Config.Env"*)',
+    '        if [ "${*: -1}" = caddy-cid ]; then printf "%s\\n" "CRM_DOMAIN=crm.breexe-pro.com"; else printf "%s\\n" "BUILD_COMMIT=oldbuild123"; fi',
+    '        ;;',
+    '      *"{{.Image}}"*) printf "%s\\n" sha256:old-image ;;',
+    "    esac",
+    "    ;;",
+    "  volume) exit 0 ;;",
+    "  cp) /usr/bin/cp \"$RUNNING_CADDYFILE\" \"${3:?}\" ;;",
+    "  image) exit 0 ;;",
+    "  exec) printf '%s' 1.3.6 ;;",
+    "  *) exit 0 ;;",
+    "esac",
+    "",
+  ].join("\n"));
+
+  const env = {
+    ...process.env,
+    PATH: `${bin}${path.delimiter}${process.env.PATH || ""}`,
+    APP_DIR: toBashPath(app),
+    CRM_CID: "crm-cid",
+    CRM_ACTIVE_ENV_FILE: toBashPath(envPath),
+    ACTIVE_COMPOSE: toBashPath(composePath),
+    RUNNING_CADDYFILE: toBashPath(runningCaddyfile),
+  };
+
+  try {
+    const result = spawnSync(
+      "bash",
+      [toBashPath(fileURLToPath(new URL("./vps-preserve-deploy-state.sh", import.meta.url)))],
+      { encoding: "utf8", env },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const rollback = path.join(app, ".deploy-rollback");
+    assert.equal(readFileSync(path.join(rollback, "previous-crm-domain"), "utf8"), "crm.breexe-pro.com\n");
+    assert.equal(readFileSync(path.join(rollback, "previous-erp-domain"), "utf8"), "erp.breexe-pro.com\n");
+    assert.equal(readFileSync(path.join(rollback, "previous-require-crm-origin"), "utf8"), "true\n");
+    assert.equal(readFileSync(path.join(rollback, "previous-require-erp-endpoint"), "utf8"), "true\n");
+    assert.equal(readFileSync(path.join(rollback, "previous-crm-origin-scheme"), "utf8"), "http\n");
+    const checksum = spawnSync("bash", ["-c", 'cd "$1" && sha256sum --check --strict --status manifest.sha256', "checksum", toBashPath(rollback)], { encoding: "utf8" });
+    assert.equal(checksum.status, 0, checksum.stderr);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("remote start validates Caddy, builds first, recreates both services, and checks the exact release", () => {
   assert.match(remoteStart, /ROLLBACK_IMAGE="golden-pro-crm:rollback"/);
   assert.match(remoteStart, /TRUST_PROXY_HEADERS.*must be true/);
   assert.match(remoteStart, /VITE_PUBLIC_CONTACT_PHONE.*valid E\.164/);
   assert.match(remoteStart, /--project-name "\$PROJECT_NAME"/);
+  assert.match(remoteStart, /docker volume inspect "\$value"/);
+  assert.match(remoteStart, /type=volume,src=\$CADDY_DATA_VOLUME,dst=\/data,readonly/);
+  assert.match(remoteStart, /type=volume,src=\$CADDY_CONFIG_VOLUME,dst=\/config,readonly/);
+  assert.match(remoteStart, /--network none --cap-drop ALL --cap-add NET_BIND_SERVICE/);
+  assert.match(remoteStart, /-e ERP_DOMAIN="\$ERP_DOMAIN"/);
   const caddyValidationIndex = remoteStart.indexOf("caddy validate");
   const buildIndex = remoteStart.indexOf('"${COMPOSE[@]}" build crm');
   const replacementIndex = remoteStart.indexOf('"${COMPOSE[@]}" up -d --no-build --force-recreate crm caddy', buildIndex + 1);
@@ -457,20 +586,364 @@ test("remote start validates Caddy, builds first, recreates both services, and c
   );
   assert.match(remoteStart, /release\.version !== process\.env\.EXPECTED_VERSION/);
   assert.match(remoteStart, /payload\.commit !== process\.env\.EXPECTED_BUILD/);
-  assert.match(remoteStart, /--resolve "\$CRM_DOMAIN:443:127\.0\.0\.1"/);
+  assert.match(remoteStart, /--header "Host: \$CRM_DOMAIN" "http:\/\/127\.0\.0\.1\/api\/health"/);
+  assert.match(remoteStart, /--resolve "\$domain:443:127\.0\.0\.1"/);
+  assert.match(remoteStart, /"https:\/\/\$domain\/web\/login"/);
+  assert.ok(remoteStart.includes("grep -Eiq '<title[[:space:]]*>[[:space:]]*odoo([[:space:]<]|$)'"));
+  assert.doesNotMatch(remoteStart, /--resolve "\$CRM_DOMAIN:443:127\.0\.0\.1"/);
   assert.match(remoteStart, /if ! wait_for_release/);
   assert.match(remoteStart, /bash "\$APP_DIR\/deploy\/remote-rollback\.sh"/);
 });
 
 test("remote rollback restores image, env, Compose, and Caddy then verifies both paths", () => {
   assert.match(remoteRollback, /sha256sum --check --strict --status manifest\.sha256/);
+  assert.match(remoteRollback, /docker volume inspect "\$value"/);
+  assert.match(remoteRollback, /type=volume,src=\$CADDY_DATA_VOLUME,dst=\/data,readonly/);
+  assert.match(remoteRollback, /type=volume,src=\$CADDY_CONFIG_VOLUME,dst=\/config,readonly/);
+  assert.match(remoteRollback, /--network none --cap-drop ALL --cap-add NET_BIND_SERVICE/);
+  assert.match(remoteRollback, /PREVIOUS_CRM_DOMAIN/);
+  assert.match(remoteRollback, /PREVIOUS_ERP_DOMAIN/);
   assert.match(remoteRollback, /mv -f "\$APP_DIR\/\.env\.production\.rollback-next" "\$APP_DIR\/\.env\.production"/);
   assert.match(remoteRollback, /docker-compose\.yml\.rollback-next/);
   assert.match(remoteRollback, /Caddyfile\.rollback-next/);
   assert.match(remoteRollback, /docker image tag "\$ROLLBACK_IMAGE" "\$RUNTIME_IMAGE"/);
   assert.match(remoteRollback, /docker image tag "\$ROLLBACK_IMAGE" "deploy-crm:latest"/);
   assert.match(remoteRollback, /up -d --no-build --force-recreate crm caddy/);
-  assert.match(remoteRollback, /--resolve "\$CRM_DOMAIN:443:127\.0\.0\.1"/);
+  assert.match(remoteRollback, /--header "Host: \$PREVIOUS_CRM_DOMAIN" "http:\/\/127\.0\.0\.1\/api\/health"/);
+  assert.match(remoteRollback, /erp_login_matches "\$PREVIOUS_ERP_DOMAIN"/);
+  assert.match(remoteRollback, /--resolve "\$domain:443:127\.0\.0\.1"/);
+  assert.match(remoteRollback, /"https:\/\/\$domain\/web\/login"/);
+  assert.ok(remoteRollback.includes("grep -Eiq '<title[[:space:]]*>[[:space:]]*odoo([[:space:]<]|$)'"));
+  assert.doesNotMatch(remoteRollback, /--resolve "\$CRM_DOMAIN:443:127\.0\.0\.1"/);
+});
+
+test("ERP login probes accept an Odoo page and reject unrelated successful HTML without a pipeline", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "crm-erp-login-probe-test-"));
+  const bin = path.join(directory, "bin");
+  const curlLog = path.join(directory, "curl.log");
+  mkdirSync(bin);
+  writeExecutable(path.join(bin, "curl"), [
+    "#!/usr/bin/env bash",
+    "set -eu",
+    'printf "%s\\n" "$*" >> "$ERP_TEST_CURL_LOG"',
+    'output=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    --output) output="$2"; shift 2 ;;',
+    '    *) shift ;;',
+    '  esac',
+    'done',
+    '[ -n "$output" ] || exit 91',
+    'printf "%s" "${ERP_TEST_BODY:-}" > "$output"',
+    'exit "${ERP_TEST_CURL_STATUS:-0}"',
+    "",
+  ].join("\n"));
+
+  const probes = [
+    ["remote start", shellFunction(remoteStart, "erp_login_matches", "wait_for_release")],
+    ["remote rollback", shellFunction(remoteRollback, "erp_login_matches", "contract_matches")],
+  ];
+  const common = {
+    ...process.env,
+    PATH: `${bin}${path.delimiter}${process.env.PATH || ""}`,
+    ERP_TEST_CURL_LOG: toBashPath(curlLog),
+  };
+
+  try {
+    for (const [label, probe] of probes) {
+      assert.match(probe, /--output "\$response_file"/);
+      assert.doesNotMatch(probe, /\|\s*grep/);
+      writeFileSync(curlLog, "", "utf8");
+      const command = `${probe}\nerp_login_matches "$1"`;
+      const accepted = spawnSync(
+        "bash",
+        ["-c", command, label, "erp.breexe-pro.com"],
+        { encoding: "utf8", env: { ...common, ERP_TEST_BODY: "<html><TITLE >   oDoO</TITLE></html>" } },
+      );
+      assert.equal(accepted.status, 0, `${label}: ${accepted.stderr}`);
+      const request = readFileSync(curlLog, "utf8");
+      assert.match(request, /--resolve erp\.breexe-pro\.com:443:127\.0\.0\.1/);
+      assert.match(request, /https:\/\/erp\.breexe-pro\.com\/web\/login/);
+
+      const unrelated = spawnSync(
+        "bash",
+        ["-c", command, label, "erp.breexe-pro.com"],
+        { encoding: "utf8", env: { ...common, ERP_TEST_BODY: "<html><title>Customer portal</title></html>" } },
+      );
+      assert.equal(unrelated.status, 1, `${label} accepted a non-Odoo HTTP 200 page`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("bundled Caddy and Compose retain the VPS CRM/ERP host contract", () => {
+  assert.match(caddyConfig, /auto_https off/);
+  assert.match(caddyConfig, /http:\/\/\{\$CRM_DOMAIN\}/);
+  assert.match(caddyConfig, /https:\/\/\{\$ERP_DOMAIN\}/);
+  assert.match(caddyConfig, /\{\$ERP_DOMAIN\}\.crt[\s\S]*\{\$ERP_DOMAIN\}\.key/);
+  assert.match(caddyConfig, /reverse_proxy host\.docker\.internal:8069/);
+  assert.match(composeConfig, /extra_hosts:[\s\S]*host\.docker\.internal:host-gateway/);
+  assert.match(composeConfig, /ERP_DOMAIN: \$\{ERP_DOMAIN:-erp\.breexe-pro\.com\}/);
+  assert.match(composeConfig, /caddy_data:\/data/);
+  assert.match(composeConfig, /caddy_config:\/config/);
+  assert.match(composeConfig, /name: \$\{CADDY_DATA_VOLUME:-deploy_caddy_data\}/);
+  assert.match(composeConfig, /name: \$\{CADDY_CONFIG_VOLUME:-deploy_caddy_config\}/);
+});
+
+test("deployment rejects a release that drops the ERP host-gateway contract before swapping AppDir", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "crm-proxy-contract-test-"));
+  const app = path.join(directory, "app");
+  const bin = path.join(directory, "bin");
+  const helper = path.join(directory, "helper.sh");
+  mkdirSync(app);
+  mkdirSync(bin);
+  writeFileSync(path.join(app, "old-only.txt"), "old source", "utf8");
+  const brokenCompose = composeConfig.replace(/    extra_hosts:\r?\n      - "host\.docker\.internal:host-gateway"\r?\n/, "");
+  assert.notEqual(brokenCompose, composeConfig, "the fixture must remove host-gateway");
+  createDeployArchive(directory, "#!/bin/sh\ntouch \"$APP_DIR/remote-start-ran\"\n", { compose: brokenCompose });
+  writeExecutable(path.join(bin, "docker"), "#!/bin/sh\nexit 0\n");
+  writeExecutable(path.join(bin, "flock"), "#!/bin/sh\nexit 0\n");
+  writeExecutable(helper, "#!/bin/sh\nexit 99\n");
+  writeFileSync(path.join(directory, "env.production"), "TRUST_PROXY_HEADERS=true\nDB_PATH=.runtime/golden-crm.db\n", "utf8");
+  const command = [
+    'PATH="$1:$PATH"',
+    'DEPLOY_TRANSACTION_TESTING=true DEPLOY_TEST_LOCK_FILE="$2/deploy.lock" DEPLOY_TEST_BACKUP_LOCK_FILE="$2/backup.lock"',
+    'DEPLOY_TEST_SOURCE_RETENTION_ROOT="$2/source-trees" DEPLOY_APPROVED_APP_BASE="$2"',
+    'APP_DIR="$2/app" CRM_DOMAIN=crm.breexe-pro.com ERP_DOMAIN=erp.breexe-pro.com',
+    'DEPLOY_ARCHIVE="$2/release.tar.gz" DEPLOY_ENV_FILE="$2/env.production"',
+    'DEPLOY_BACKUP_HELPER="$2/helper.sh" DEPLOY_PRESERVE_HELPER="$2/helper.sh" DEPLOY_ROLLBACK_HELPER="$2/helper.sh"',
+    'USE_EXISTING_ENV=false ALLOW_FIRST_DEPLOY=true EXPECTED_VERSION=1.2.3 EXPECTED_BUILD=abcdef123456',
+    'HEALTH_RETRIES=1 HEALTH_SLEEP=1 bash "$3"',
+  ].join(" ");
+
+  try {
+    const result = spawnSync(
+      "bash",
+      ["-c", command, "proxy-contract-test", toBashPath(bin), toBashPath(directory), toBashPath(fileURLToPath(deployTransactionUrl))],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /would drop the required CRM\/ERP proxy or Caddy volume contract/i);
+    assert.equal(readFileSync(path.join(app, "old-only.txt"), "utf8"), "old source");
+    assert.throws(() => readFileSync(path.join(app, "new-only.txt"), "utf8"));
+    assert.throws(() => readFileSync(path.join(app, "remote-start-ran"), "utf8"));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("first deployment rejects missing volumes or ERP certificates before source replacement", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "crm-first-deploy-caddy-test-"));
+  const app = path.join(directory, "app");
+  const bin = path.join(directory, "bin");
+  const helper = path.join(directory, "helper.sh");
+  const dockerLog = path.join(directory, "docker.log");
+  mkdirSync(app);
+  mkdirSync(bin);
+  writeFileSync(path.join(app, "old-only.txt"), "old source", "utf8");
+  createDeployArchive(directory, "#!/bin/sh\ntouch \"$APP_DIR/remote-start-ran\"\n");
+  writeExecutable(path.join(bin, "docker"), [
+    "#!/usr/bin/env bash",
+    'printf "%s\\n" "$*" >> "$DOCKER_LOG"',
+    'if [ "${1:-}:${2:-}" = "volume:inspect" ]; then [ "${FIRST_DEPLOY_TEST_MODE:-}" = missing ] && exit 41; exit 0; fi',
+    'if [ "${1:-}" = run ]; then',
+    '  case " $* " in *" --cap-drop ALL --cap-add NET_BIND_SERVICE "*) ;; *) exit 42 ;; esac',
+    '  [ "${FIRST_DEPLOY_TEST_MODE:-}" = bad-cert ] && exit 43',
+    "fi",
+    "exit 0",
+    "",
+  ].join("\n"));
+  writeExecutable(path.join(bin, "flock"), "#!/bin/sh\nexit 0\n");
+  writeExecutable(helper, "#!/bin/sh\nexit 99\n");
+  writeFileSync(path.join(directory, "env.production"), "TRUST_PROXY_HEADERS=true\nDB_PATH=.runtime/golden-crm.db\n", "utf8");
+  const command = [
+    'PATH="$1:$PATH" DOCKER_LOG="$2/docker.log" FIRST_DEPLOY_TEST_MODE="$4"',
+    'DEPLOY_TRANSACTION_TESTING=true DEPLOY_TEST_LOCK_FILE="$2/deploy.lock" DEPLOY_TEST_BACKUP_LOCK_FILE="$2/backup.lock"',
+    'DEPLOY_TEST_SOURCE_RETENTION_ROOT="$2/source-trees" DEPLOY_APPROVED_APP_BASE="$2"',
+    'APP_DIR="$2/app" CRM_DOMAIN=crm.breexe-pro.com ERP_DOMAIN=erp.breexe-pro.com',
+    'DEPLOY_ARCHIVE="$2/release.tar.gz" DEPLOY_ENV_FILE="$2/env.production"',
+    'DEPLOY_BACKUP_HELPER="$2/helper.sh" DEPLOY_PRESERVE_HELPER="$2/helper.sh" DEPLOY_ROLLBACK_HELPER="$2/helper.sh"',
+    'USE_EXISTING_ENV=false ALLOW_FIRST_DEPLOY=true EXPECTED_VERSION=1.2.3 EXPECTED_BUILD=abcdef123456',
+    'HEALTH_RETRIES=1 HEALTH_SLEEP=1 bash "$3"',
+  ].join(" ");
+
+  try {
+    for (const [mode, errorPattern] of [
+      ["missing", /requires existing named Caddy data\/config volumes/i],
+      ["bad-cert", /requires a valid ERP certificate\/key/i],
+    ]) {
+      writeFileSync(dockerLog, "", "utf8");
+      const result = spawnSync(
+        "bash",
+        ["-c", command, "first-deploy-caddy-test", toBashPath(bin), toBashPath(directory), toBashPath(fileURLToPath(deployTransactionUrl)), mode],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, errorPattern);
+      assert.equal(readFileSync(path.join(app, "old-only.txt"), "utf8"), "old source");
+      assert.throws(() => readFileSync(path.join(app, "new-only.txt"), "utf8"));
+      assert.throws(() => readFileSync(path.join(app, "remote-start-ran"), "utf8"));
+    }
+    const log = readFileSync(dockerLog, "utf8");
+    assert.match(log, /volume inspect deploy_caddy_data deploy_caddy_config/);
+    assert.match(log, /--network none --cap-drop ALL --cap-add NET_BIND_SERVICE/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("rollback validates manual TLS with the preserved Caddy volumes and fails closed when one is unavailable", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "crm-caddy-rollback-test-"));
+  const app = path.join(directory, "app");
+  const rollback = path.join(app, ".deploy-rollback");
+  const deploy = path.join(app, "deploy");
+  const bin = path.join(directory, "bin");
+  const dockerLog = path.join(directory, "docker.log");
+  mkdirSync(rollback, { recursive: true });
+  mkdirSync(deploy, { recursive: true });
+  mkdirSync(bin);
+
+  const files = {
+    Caddyfile: [
+      "{ auto_https off }",
+      "http://{$CRM_DOMAIN} { reverse_proxy crm:8080 }",
+      "https://erp.breexe-pro.com {",
+      "  tls /data/caddy/certificates/erp.crt /data/caddy/certificates/erp.key",
+      "  reverse_proxy host.docker.internal:8069",
+      "}",
+      "",
+    ].join("\n"),
+    "docker-compose.yml": "services:\n  crm: {}\n  caddy: {}\n",
+    "env.production": "TRUST_PROXY_HEADERS=true\n",
+    "previous-build": "oldbuild123\n",
+    "previous-version": "1.3.6\n",
+    "project-name": "deploy\n",
+    "caddy-data-volume": "deploy_caddy_data\n",
+    "caddy-config-volume": "deploy_caddy_config\n",
+    "previous-crm-domain": "crm.breexe-pro.com\n",
+    "previous-erp-domain": "erp.breexe-pro.com\n",
+    "previous-require-crm-origin": "true\n",
+    "previous-require-erp-endpoint": "true\n",
+    "previous-crm-origin-scheme": "http\n",
+  };
+  for (const [name, payload] of Object.entries(files)) {
+    writeFileSync(path.join(rollback, name), payload, "utf8");
+  }
+  writeSha256Manifest(rollback, Object.keys(files));
+
+  writeExecutable(path.join(bin, "docker"), [
+    "#!/usr/bin/env bash",
+    "set -eu",
+    'printf "%s\\n" "$*" >> "$DOCKER_LOG"',
+    'case "${1:-}:${2:-}" in',
+    "  image:inspect|image:tag) exit 0 ;;",
+    "  volume:inspect)",
+    '    case "${3:-}" in deploy_caddy_data|deploy_caddy_config) exit 0 ;; *) exit 41 ;; esac',
+    "    ;;",
+    "  run:*)",
+    '    args=" $* "',
+    '    case "$args" in *" --network none "*) ;; *) exit 42 ;; esac',
+    '    case "$args" in *" --cap-drop ALL --cap-add NET_BIND_SERVICE "*) ;; *) exit 43 ;; esac',
+    '    case "$args" in *" --mount type=volume,src=deploy_caddy_data,dst=/data,readonly "*) ;; *) exit 44 ;; esac',
+    '    case "$args" in *" --mount type=volume,src=deploy_caddy_config,dst=/config,readonly "*) ;; *) exit 45 ;; esac',
+    '    case "$args" in *",dst=/etc/caddy/Caddyfile,readonly "*) ;; *) exit 46 ;; esac',
+    "    exit 0 ;;",
+    "  compose:*)",
+    '    case " $* " in *" ps -q crm "*) printf "%s\\n" crm-cid ;; esac',
+    "    exit 0 ;;",
+    "  inspect:--format) printf '%s\\n' healthy; exit 0 ;;",
+    "  exec:*) cat >/dev/null || true; exit 0 ;;",
+    "  *) exit 0 ;;",
+    "esac",
+    "",
+  ].join("\n"));
+  writeExecutable(path.join(bin, "curl"), [
+    "#!/usr/bin/env bash",
+    'printf "curl %s\\n" "$*" >> "$DOCKER_LOG"',
+    'if [[ " $* " == *"/web/login"* ]]; then',
+    '  output=""',
+    '  while [ "$#" -gt 0 ]; do',
+    '    case "$1" in --output) output="$2"; shift 2 ;; *) shift ;; esac',
+    '  done',
+    '  [ -n "$output" ] || exit 81',
+    '  [ "${ERP_TEST_FORCE_FAILURE:-false}" != true ] || exit 82',
+    '  body="${ERP_TEST_BODY:-}"',
+    '  [ -n "$body" ] || body="<html><title>Odoo</title></html>"',
+    '  printf "%s" "$body" > "$output"',
+    '  exit 0',
+    'fi',
+    "printf '%s\\n' '{\"status\":\"ok\",\"release\":{\"version\":\"1.3.6\"},\"commit\":\"oldbuild123\"}'",
+    "",
+  ].join("\n"));
+
+  const env = {
+    ...process.env,
+    PATH: `${bin}${path.delimiter}${process.env.PATH || ""}`,
+    APP_DIR: toBashPath(app),
+    CRM_DOMAIN: "new-crm.invalid.example",
+    ERP_DOMAIN: "new-erp.invalid.example",
+    HEALTH_RETRIES: "1",
+    HEALTH_SLEEP: "1",
+    DOCKER_LOG: toBashPath(dockerLog),
+  };
+
+  try {
+    const restored = spawnSync("bash", [toBashPath(fileURLToPath(remoteRollbackUrl))], { encoding: "utf8", env });
+    assert.equal(restored.status, 0, restored.stderr);
+    const successfulLog = readFileSync(dockerLog, "utf8");
+    assert.match(successfulLog, /--network none --cap-drop ALL --cap-add NET_BIND_SERVICE/);
+    assert.match(successfulLog, /-e CRM_DOMAIN=crm\.breexe-pro\.com -e ERP_DOMAIN=erp\.breexe-pro\.com/);
+    assert.doesNotMatch(successfulLog, /new-(?:crm|erp)\.invalid\.example/);
+    assert.match(successfulLog, /type=volume,src=deploy_caddy_data,dst=\/data,readonly/);
+    assert.match(successfulLog, /type=volume,src=deploy_caddy_config,dst=\/config,readonly/);
+    assert.match(successfulLog, /--header Host: crm\.breexe-pro\.com http:\/\/127\.0\.0\.1\/api\/health/);
+    assert.match(successfulLog, /--resolve erp\.breexe-pro\.com:443:127\.0\.0\.1 https:\/\/erp\.breexe-pro\.com\/web\/login/);
+
+    writeFileSync(dockerLog, "", "utf8");
+    const unrelatedErpPage = spawnSync(
+      "bash",
+      [toBashPath(fileURLToPath(remoteRollbackUrl))],
+      { encoding: "utf8", env: { ...env, ERP_TEST_BODY: "<html><title>Customer portal</title></html>" } },
+    );
+    assert.equal(unrelatedErpPage.status, 2, unrelatedErpPage.stderr);
+    assert.match(unrelatedErpPage.stderr, /did not recover its CRM and Odoo ERP login health contract/i);
+    assert.match(readFileSync(dockerLog, "utf8"), /https:\/\/erp\.breexe-pro\.com\/web\/login/);
+
+    writeFileSync(path.join(rollback, "Caddyfile"), [
+      "{ auto_https off }",
+      "http://{$CRM_DOMAIN} { reverse_proxy crm:8080 }",
+      "",
+    ].join("\n"), "utf8");
+    writeFileSync(path.join(rollback, "previous-crm-domain"), "legacy-crm.example.com\n", "utf8");
+    writeFileSync(path.join(rollback, "previous-erp-domain"), "none\n", "utf8");
+    writeFileSync(path.join(rollback, "previous-require-crm-origin"), "true\n", "utf8");
+    writeFileSync(path.join(rollback, "previous-require-erp-endpoint"), "false\n", "utf8");
+    writeFileSync(path.join(rollback, "previous-crm-origin-scheme"), "http\n", "utf8");
+    writeSha256Manifest(rollback, Object.keys(files));
+    writeFileSync(dockerLog, "", "utf8");
+    const legacyWithoutErp = spawnSync(
+      "bash",
+      [toBashPath(fileURLToPath(remoteRollbackUrl))],
+      { encoding: "utf8", env: { ...env, ERP_TEST_FORCE_FAILURE: "true" } },
+    );
+    assert.equal(legacyWithoutErp.status, 0, legacyWithoutErp.stderr);
+    const legacyLog = readFileSync(dockerLog, "utf8");
+    assert.match(legacyLog, /-e CRM_DOMAIN=legacy-crm\.example\.com/);
+    assert.doesNotMatch(legacyLog, /ERP_DOMAIN=|--resolve .*erp|\/web\/login|new-erp\.invalid/);
+    assert.match(legacyLog, /--header Host: legacy-crm\.example\.com http:\/\/127\.0\.0\.1\/api\/health/);
+
+    writeFileSync(path.join(rollback, "caddy-data-volume"), "missing_caddy_data\n", "utf8");
+    writeSha256Manifest(rollback, Object.keys(files));
+    writeFileSync(dockerLog, "", "utf8");
+    const rejected = spawnSync("bash", [toBashPath(fileURLToPath(remoteRollbackUrl))], { encoding: "utf8", env });
+    assert.equal(rejected.status, 2, rejected.stderr);
+    assert.match(rejected.stderr, /preserved Caddy data volume is unavailable/i);
+    const rejectedLog = readFileSync(dockerLog, "utf8");
+    assert.doesNotMatch(rejectedLog, /image tag|compose .* up /);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("GitHub Actions packages a clean archive and uses the same transaction entrypoint", () => {

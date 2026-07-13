@@ -8,6 +8,7 @@ umask 077
 APP_DIR="${APP_DIR:-/opt/golden-pro-crm}"
 DEPLOY_APPROVED_APP_BASE="${DEPLOY_APPROVED_APP_BASE:-}"
 CRM_DOMAIN="${CRM_DOMAIN:-crm.breexe-pro.com}"
+ERP_DOMAIN="${ERP_DOMAIN:-erp.breexe-pro.com}"
 DEPLOY_ARCHIVE="${DEPLOY_ARCHIVE:-}"
 DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-}"
 DEPLOY_BACKUP_HELPER="${DEPLOY_BACKUP_HELPER:-}"
@@ -20,6 +21,8 @@ EXPECTED_VERSION="${EXPECTED_VERSION:-}"
 EXPECTED_BUILD="${EXPECTED_BUILD:-}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-30}"
 HEALTH_SLEEP="${HEALTH_SLEEP:-4}"
+FIRST_DEPLOY_CADDY_DATA_VOLUME="${FIRST_DEPLOY_CADDY_DATA_VOLUME:-deploy_caddy_data}"
+FIRST_DEPLOY_CADDY_CONFIG_VOLUME="${FIRST_DEPLOY_CADDY_CONFIG_VOLUME:-deploy_caddy_config}"
 LOCK_FILE="/run/golden-pro-crm/deploy.lock"
 BACKUP_LOCK_FILE="/run/golden-pro-crm/backup-restore.lock"
 LEGACY_BACKUP_LOCK_FILE="/var/lock/golden-pro-crm-backup-restore.lock"
@@ -115,6 +118,12 @@ CANONICAL_RETENTION_ROOT="$(readlink -m -- "$SOURCE_RETENTION_ROOT")"
 [ ! -L "$SOURCE_RETENTION_ROOT" ] || fail "the source-retention root cannot be a symlink"
 case "$SOURCE_RETENTION_ROOT" in "$APP_DIR"|"$APP_DIR"/*) fail "source retention cannot be inside APP_DIR" ;; esac
 case "$CRM_DOMAIN" in ''|*[!A-Za-z0-9.-]*) fail "CRM_DOMAIN is invalid" ;; esac
+case "$ERP_DOMAIN" in ''|*[!A-Za-z0-9.-]*) fail "ERP_DOMAIN is invalid" ;; esac
+for volume_name in "$FIRST_DEPLOY_CADDY_DATA_VOLUME" "$FIRST_DEPLOY_CADDY_CONFIG_VOLUME"; do
+  case "$volume_name" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) fail "first-deploy Caddy volume names are invalid" ;;
+  esac
+done
 case "$HEALTH_RETRIES:$HEALTH_SLEEP" in *[!0-9:]*) fail "health retry settings must be integers" ;; esac
 [ "$HEALTH_RETRIES" -gt 0 ] && [ "$HEALTH_SLEEP" -gt 0 ] || fail "health retry settings must be positive"
 [[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "EXPECTED_VERSION is invalid"
@@ -320,8 +329,8 @@ restore_previous() {
 
   if [ "$PRESERVED" = true ] && [ "$RUNTIME_MUTATED" = true ] && [ -s "$TRUSTED_ROLLBACK" ]; then
     log "restoring the preserved image, volumes binding, environment, Compose, and Caddy state"
-    APP_DIR="$APP_DIR" CRM_DOMAIN="$CRM_DOMAIN" HEALTH_RETRIES="$HEALTH_RETRIES" \
-      HEALTH_SLEEP="$HEALTH_SLEEP" bash "$TRUSTED_ROLLBACK" || runtime_status=$?
+    APP_DIR="$APP_DIR" HEALTH_RETRIES="$HEALTH_RETRIES" HEALTH_SLEEP="$HEALTH_SLEEP" \
+      bash "$TRUSTED_ROLLBACK" || runtime_status=$?
   fi
 
   if [ "$source_status" -ne 0 ] || [ "$runtime_status" -ne 0 ]; then
@@ -386,6 +395,13 @@ if [ -n "$CRM_CID" ]; then
     BACKUP_LOCK_FILE="$BACKUP_LOCK_FILE" CRM_BACKUP_LOCK_FD=9 bash "$TRUSTED_BACKUP"
   log "preserving the exact running state from Compose container labels"
   APP_DIR="$APP_DIR" CRM_CID="$CRM_CID" CRM_ACTIVE_ENV_FILE="$ACTIVE_ENV" bash "$TRUSTED_PRESERVE"
+  for required_file in caddy-data-volume caddy-config-volume previous-crm-domain previous-erp-domain \
+    previous-require-crm-origin previous-require-erp-endpoint previous-crm-origin-scheme; do
+    [ -s "$APP_DIR/.deploy-rollback/$required_file" ] \
+      || restore_previous "The preserved Caddy volume binding is incomplete."
+  done
+  (cd "$APP_DIR/.deploy-rollback" && sha256sum --check --strict --status manifest.sha256) \
+    || restore_previous "The preserved deployment state failed its checksum."
   PRESERVED=true
 elif [ "$ALLOW_FIRST_DEPLOY" != "true" ]; then
   restore_previous "No running CRM deployment was found; explicit first-deploy acknowledgement is required."
@@ -420,6 +436,49 @@ rm -f -- "$STAGED_SOURCE/.env.production"
 for required_file in release.json deploy/docker-compose.yml deploy/Caddyfile deploy/remote-start.sh deploy/remote-rollback.sh; do
   [ -s "$STAGED_SOURCE/$required_file" ] || restore_previous "The staged release is missing $required_file."
 done
+
+staged_proxy_contract_matches() {
+  local caddy="$STAGED_SOURCE/deploy/Caddyfile" compose="$STAGED_SOURCE/deploy/docker-compose.yml" marker
+  for marker in \
+    'auto_https off' \
+    'http://{$CRM_DOMAIN}' \
+    'header_up X-Breexe-Client-IP {client_ip}' \
+    'reverse_proxy crm:8080' \
+    'http://{$ERP_DOMAIN}' \
+    'https://{$ERP_DOMAIN}' \
+    '/{$ERP_DOMAIN}/{$ERP_DOMAIN}.crt' \
+    '/{$ERP_DOMAIN}/{$ERP_DOMAIN}.key' \
+    'reverse_proxy host.docker.internal:8069'; do
+    grep -Fq -- "$marker" "$caddy" || return 1
+  done
+  for marker in \
+    'host.docker.internal:host-gateway' \
+    'ERP_DOMAIN: ${ERP_DOMAIN:-erp.breexe-pro.com}' \
+    'caddy_data:/data' \
+    'caddy_config:/config'; do
+    grep -Fq -- "$marker" "$compose" || return 1
+  done
+}
+staged_proxy_contract_matches \
+  || restore_previous "The staged release would drop the required CRM/ERP proxy or Caddy volume contract."
+
+START_CADDY_DATA_VOLUME=""
+START_CADDY_CONFIG_VOLUME=""
+if [ "$HAD_RUNNING" = false ]; then
+  log "verifying first-deploy Caddy volumes and the ERP certificate before source replacement"
+  docker volume inspect "$FIRST_DEPLOY_CADDY_DATA_VOLUME" "$FIRST_DEPLOY_CADDY_CONFIG_VOLUME" >/dev/null 2>&1 \
+    || restore_previous "First deployment requires existing named Caddy data/config volumes."
+  if ! docker run --rm --network none --cap-drop ALL --cap-add NET_BIND_SERVICE \
+    -e CRM_DOMAIN="$CRM_DOMAIN" -e ERP_DOMAIN="$ERP_DOMAIN" \
+    --mount "type=volume,src=$FIRST_DEPLOY_CADDY_DATA_VOLUME,dst=/data,readonly" \
+    --mount "type=volume,src=$FIRST_DEPLOY_CADDY_CONFIG_VOLUME,dst=/config,readonly" \
+    --mount "type=bind,src=$STAGED_SOURCE/deploy/Caddyfile,dst=/etc/caddy/Caddyfile,readonly" \
+    caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null; then
+    restore_previous "First deployment requires a valid ERP certificate/key in the preserved Caddy data volume."
+  fi
+  START_CADDY_DATA_VOLUME="$FIRST_DEPLOY_CADDY_DATA_VOLUME"
+  START_CADDY_CONFIG_VOLUME="$FIRST_DEPLOY_CADDY_CONFIG_VOLUME"
+fi
 STAGED_VERSION="$(sed -n 's/^.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STAGED_SOURCE/release.json" | head -n 1)"
 [ "$STAGED_VERSION" = "$EXPECTED_VERSION" ] \
   || restore_previous "The staged release version '$STAGED_VERSION' does not match EXPECTED_VERSION '$EXPECTED_VERSION'."
@@ -464,7 +523,9 @@ log "building, recreating, and checking the exact release through local Caddy"
 RUNTIME_MUTATED=true
 if ! APP_DIR="$APP_DIR" CRM_DOMAIN="$CRM_DOMAIN" EXPECTED_VERSION="$EXPECTED_VERSION" \
   EXPECTED_BUILD="$EXPECTED_BUILD" BUILD_COMMIT="$EXPECTED_BUILD" \
-  HEALTH_RETRIES="$HEALTH_RETRIES" HEALTH_SLEEP="$HEALTH_SLEEP" \
+  HEALTH_RETRIES="$HEALTH_RETRIES" HEALTH_SLEEP="$HEALTH_SLEEP" ERP_DOMAIN="$ERP_DOMAIN" \
+  CADDY_VALIDATION_DATA_VOLUME="$START_CADDY_DATA_VOLUME" \
+  CADDY_VALIDATION_CONFIG_VOLUME="$START_CADDY_CONFIG_VOLUME" \
   bash "$APP_DIR/deploy/remote-start.sh"; then
   restore_previous "The staged release failed its build or local health contract."
 fi
