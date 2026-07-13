@@ -23,6 +23,7 @@ const {
   __sallaTestables,
   getSallaOrderStatusesForUser,
   handleSallaAppWebhook,
+  importSallaProductsSnapshotForUser,
   syncSallaProductsForUser,
   updateSallaOrderForUser,
   updateSallaOrderStatusForUser,
@@ -356,4 +357,27 @@ test("product synchronization reads every advertised page with strict totals", a
   assert.equal(result.unique_fetched, total);
   assert.equal(result.complete, true);
   assert.deepEqual(requestedPages, [1, 2, 3]);
+});
+
+test("an offline product snapshot uses the canonical importer without calling Salla", async () => {
+  const uid = "owner-products-offline";
+  await linkOwner(uid);
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls += 1;
+    throw new Error("The offline importer must not call Salla.");
+  }) as typeof fetch;
+
+  const result = await importSallaProductsSnapshotForUser(uid, [
+    { id: "offline-1", name: "Filter A", sku: "FILTER-A", price: { amount: 25, currency: "SAR" } },
+    { id: "offline-2", name: "Filter B", sku: "FILTER-B", price: { amount: 35, currency: "SAR" } },
+  ], { advertisedCount: 2, advertisedPages: 1, syncedAt: "2026-07-13T13:00:00.000Z" });
+
+  assert.equal(fetchCalls, 0);
+  assert.equal(result.success, true);
+  assert.equal(result.fetched, 2);
+  assert.equal(result.complete, true);
+  const stored = await adminDb.collection("products").where("createdBy", "==", uid).get();
+  assert.equal(stored.size, 2);
+  assert.deepEqual(stored.docs.map((doc) => doc.data().store_product_id).sort(), ["offline-1", "offline-2"]);
 });
