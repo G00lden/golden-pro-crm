@@ -4,6 +4,7 @@ param(
 
   [string]$User = "root",
   [string]$AppDir = "/opt/golden-pro-crm",
+  [string]$ApprovedAppBase = "",
   [string]$Domain = "crm.breexe-pro.com",
   [string]$SshKey = "",
   [switch]$SkipBootstrap,
@@ -38,6 +39,26 @@ if ($User -notmatch '^[A-Za-z_][A-Za-z0-9._-]*$') {
 }
 if ($AppDir -notmatch '^/[A-Za-z0-9._/-]+$' -or ($AppDir -split '/') -contains '..') {
   throw "AppDir must be a safe absolute POSIX path without '..'."
+}
+if ($AppDir.Contains("//") -or ($AppDir -split '/') -contains '.' -or $AppDir.EndsWith('/')) {
+  throw "AppDir must be a canonical POSIX path."
+}
+if ($ApprovedAppBase) {
+  if ($ApprovedAppBase -notmatch '^/[A-Za-z0-9._/-]+$' -or
+      $ApprovedAppBase.Contains("//") -or
+      ($ApprovedAppBase -split '/') -contains '..' -or
+      ($ApprovedAppBase -split '/') -contains '.' -or
+      $ApprovedAppBase.EndsWith('/')) {
+    throw "ApprovedAppBase must be a safe canonical absolute POSIX path."
+  }
+}
+if ($AppDir -ne "/opt/golden-pro-crm") {
+  if (-not $ApprovedAppBase) {
+    throw "A non-default AppDir requires -ApprovedAppBase."
+  }
+  if (-not $AppDir.StartsWith("$ApprovedAppBase/", [System.StringComparison]::Ordinal)) {
+    throw "AppDir must be a child of ApprovedAppBase."
+  }
 }
 if ($Domain -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$' -or $Domain -notmatch '\.') {
   throw "Domain contains unsupported characters or is not a fully qualified name."
@@ -91,12 +112,18 @@ $publicContactPhone = [string]$productionEnv["VITE_PUBLIC_CONTACT_PHONE"]
 if ($publicContactPhone -notmatch '^\+[1-9][0-9]{7,14}$') {
   throw "VITE_PUBLIC_CONTACT_PHONE must be a valid E.164 number."
 }
+$databasePath = [string]$productionEnv["DB_PATH"]
+if ($databasePath -notin @(".runtime/golden-crm.db", "/app/.runtime/golden-crm.db")) {
+  throw "DB_PATH must resolve to /app/.runtime/golden-crm.db so backup and restore target the live database."
+}
 
 Write-Host "Running local production checks..."
 npm run doctor:prod
 Assert-NativeSuccess "Production doctor"
 npm run lint
 Assert-NativeSuccess "TypeScript lint"
+npm run test:unit
+Assert-NativeSuccess "Unit test suite"
 npm run build
 Assert-NativeSuccess "Production build"
 
@@ -141,81 +168,72 @@ if ($SshKey) {
   $sshOptions = @("-i", $SshKey)
 }
 
-# Back up the currently running deployment before uploading or extracting any
-# new source. A first deployment requires an explicit acknowledgement because
-# there is no state to protect yet.
-$deploymentState = @(
-  ssh @sshOptions $sshTarget "if command -v docker >/dev/null 2>&1 && [ -f '$AppDir/scripts/vps-backup.sh' ] && [ -f '$AppDir/deploy/docker-compose.yml' ] && [ -f '$AppDir/.env.production' ] && docker compose --env-file '$AppDir/.env.production' -f '$AppDir/deploy/docker-compose.yml' ps -q crm 2>/dev/null | grep -q .; then printf running; else printf absent; fi"
-)
-Assert-NativeSuccess "Remote deployment state probe"
-$deploymentStateText = ($deploymentState -join "").Trim()
-$hasPreservedDeployment = $deploymentStateText -eq "running"
-if ($deploymentStateText -eq "running") {
-  Write-Host "Creating a fail-closed backup of the current VPS state..."
-  ssh @sshOptions $sshTarget "cd '$AppDir' && APP_DIR='$AppDir' bash scripts/vps-backup.sh"
-  Assert-NativeSuccess "Pre-deployment VPS backup"
-
-  Write-Host "Preserving the exact running Compose, Caddy, environment, and image state..."
-  scp @sshOptions "scripts/vps-preserve-deploy-state.sh" "${sshTarget}:/tmp/golden-preserve-deploy-state.sh"
-  Assert-NativeSuccess "Deployment-state helper upload"
-  scp @sshOptions "deploy/remote-rollback.sh" "${sshTarget}:/tmp/golden-remote-rollback.sh"
-  Assert-NativeSuccess "Trusted rollback helper upload"
-  ssh @sshOptions $sshTarget "sed -i 's/\r$//' /tmp/golden-preserve-deploy-state.sh /tmp/golden-remote-rollback.sh && chmod 700 /tmp/golden-remote-rollback.sh && APP_DIR='$AppDir' bash /tmp/golden-preserve-deploy-state.sh"
-  Assert-NativeSuccess "Pre-extraction deployment-state preservation"
-} elseif (-not $AllowFirstDeployWithoutBackup) {
-  throw "No running CRM deployment was found to back up. Use -AllowFirstDeployWithoutBackup only for a verified first deployment."
-}
+# Upload immutable inputs into a unique /tmp bundle. Uploading does not mutate
+# APP_DIR. One subsequent SSH process owns the shared flock across backup,
+# preservation, clean source swap, build, public health, and any rollback.
+$remoteBundle = ""
+$remoteBundleCreated = $false
+$transactionStarted = $false
+$allowFirst = if ($AllowFirstDeployWithoutBackup) { "true" } else { "false" }
+$transactionResolved = $false
 
 try {
-  if (-not $SkipBootstrap) {
-    Write-Host "Uploading and running VPS bootstrap..."
-    scp @sshOptions "deploy/bootstrap-vps.sh" "${sshTarget}:/tmp/golden-bootstrap-vps.sh"
-    Assert-NativeSuccess "Bootstrap upload"
-    ssh @sshOptions $sshTarget "sed -i 's/\r$//' /tmp/golden-bootstrap-vps.sh && APP_DIR='$AppDir' bash /tmp/golden-bootstrap-vps.sh"
-    Assert-NativeSuccess "VPS bootstrap"
+  Write-Host "Uploading the immutable deployment bundle..."
+  $remoteBundleOutput = @(ssh @sshOptions $sshTarget "umask 077; mktemp -d /tmp/golden-pro-crm-deploy.XXXXXXXXXX")
+  Assert-NativeSuccess "Remote deployment bundle preparation"
+  $remoteBundle = ($remoteBundleOutput -join "").Trim()
+  if ($remoteBundle -notmatch '^/tmp/golden-pro-crm-deploy\.[A-Za-z0-9]+$') {
+    throw "Remote deployment bundle returned an unsafe path."
   }
-
-  Write-Host "Uploading project archive..."
-  ssh @sshOptions $sshTarget "mkdir -p '$AppDir'"
-  Assert-NativeSuccess "Remote application directory preparation"
-  scp @sshOptions $archiveRelative "${sshTarget}:/tmp/golden-pro-crm-vps.tar.gz"
+  $remoteBundleCreated = $true
+  $remoteArchive = "$remoteBundle/release.tar.gz"
+  $remoteEnv = "$remoteBundle/env.production"
+  $remoteTransaction = "$remoteBundle/vps-deploy-transaction.sh"
+  $remoteBackup = "$remoteBundle/vps-backup.sh"
+  $remotePreserve = "$remoteBundle/vps-preserve-deploy-state.sh"
+  $remoteRollback = "$remoteBundle/remote-rollback.sh"
+  $remoteBootstrapFile = "$remoteBundle/bootstrap-vps.sh"
+  $remoteBootstrap = if ($SkipBootstrap) { "" } else { $remoteBootstrapFile }
+  scp @sshOptions $archiveRelative "${sshTarget}:$remoteArchive"
   Assert-NativeSuccess "Project archive upload"
-  ssh @sshOptions $sshTarget "tar -xzf /tmp/golden-pro-crm-vps.tar.gz -C '$AppDir'"
-  Assert-NativeSuccess "Project archive extraction"
-  ssh @sshOptions $sshTarget "find '$AppDir/deploy' '$AppDir/scripts' -type f -name '*.sh' -exec sed -i 's/\r$//' {} +"
-  Assert-NativeSuccess "Linux script line-ending normalization"
+  scp @sshOptions ".env.production" "${sshTarget}:$remoteEnv"
+  Assert-NativeSuccess "Production environment bundle upload"
+  scp @sshOptions "scripts/vps-deploy-transaction.sh" "${sshTarget}:$remoteTransaction"
+  Assert-NativeSuccess "Deployment transaction helper upload"
+  scp @sshOptions "scripts/vps-backup.sh" "${sshTarget}:$remoteBackup"
+  Assert-NativeSuccess "Trusted backup helper upload"
+  scp @sshOptions "scripts/vps-preserve-deploy-state.sh" "${sshTarget}:$remotePreserve"
+  Assert-NativeSuccess "Trusted state-preservation helper upload"
+  scp @sshOptions "deploy/remote-rollback.sh" "${sshTarget}:$remoteRollback"
+  Assert-NativeSuccess "Trusted rollback helper upload"
+  scp @sshOptions "deploy/bootstrap-vps.sh" "${sshTarget}:$remoteBootstrapFile"
+  Assert-NativeSuccess "Bootstrap bundle upload"
 
-  Write-Host "Uploading .env.production separately..."
-  scp @sshOptions ".env.production" "${sshTarget}:${AppDir}/.env.production"
-  Assert-NativeSuccess "Production environment upload"
-  ssh @sshOptions $sshTarget "chmod 600 '$AppDir/.env.production'"
-  Assert-NativeSuccess "Production environment permissions"
-
-  Write-Host "Starting Docker Compose on VPS..."
-  ssh @sshOptions $sshTarget "cd '$AppDir' && EXPECTED_VERSION='$releaseVersion' EXPECTED_BUILD='$buildCommit' BUILD_COMMIT='$buildCommit' CRM_DOMAIN='$Domain' bash deploy/remote-start.sh"
-  Assert-NativeSuccess "Remote Docker deployment"
-
-  Write-Host "Verifying the public HTTPS release contract..."
-  $health = Invoke-RestMethod -Uri "https://$Domain/api/health" -TimeoutSec 30
-  if ($health.status -ne "ok" -or $health.release.version -ne $releaseVersion -or $health.commit -ne $buildCommit) {
-    throw "Public health verification did not match the expected release."
+  Write-Host "Running one locked backup, source swap, build, health, and rollback transaction..."
+  $transactionStarted = $true
+  ssh @sshOptions $sshTarget "sed -i 's/\r$//' '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; chmod 700 '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; APP_DIR='$AppDir' DEPLOY_APPROVED_APP_BASE='$ApprovedAppBase' CRM_DOMAIN='$Domain' DEPLOY_ARCHIVE='$remoteArchive' DEPLOY_ENV_FILE='$remoteEnv' DEPLOY_BACKUP_HELPER='$remoteBackup' DEPLOY_PRESERVE_HELPER='$remotePreserve' DEPLOY_ROLLBACK_HELPER='$remoteRollback' USE_EXISTING_ENV=false ALLOW_FIRST_DEPLOY='$allowFirst' DEPLOY_BOOTSTRAP='$remoteBootstrap' EXPECTED_VERSION='$releaseVersion' EXPECTED_BUILD='$buildCommit' bash '$remoteTransaction'"
+  $transactionExit = $LASTEXITCODE
+  if ($transactionExit -eq 0) {
+    $transactionResolved = $true
+  } elseif ($transactionExit -eq 1) {
+    $transactionResolved = $true
+    throw "The remote deployment failed and the previous source and runtime were restored."
+  } elseif ($transactionExit -eq 2) {
+    $transactionResolved = $true
+    throw "The remote deployment and automatic recovery both failed. Inspect the retained transaction recovery artifacts before another deploy."
+  } elseif ($transactionExit -eq 75) {
+    $transactionResolved = $true
+    throw "Another backup, restore, or deployment owns the shared lock; no deployment mutation was started."
+  } else {
+    throw "The remote outcome is ambiguous (exit $transactionExit). The unique remote bundle was retained for investigation; do not start another deploy until the shared lock state is checked."
   }
-  $version = Invoke-RestMethod -Uri "https://$Domain/api/version" -TimeoutSec 30
-  if ($version.version -ne $releaseVersion -or $version.commit -ne $buildCommit -or $version.runtime -ne "production") {
-    throw "Public version verification did not match the deployed production release."
-  }
-} catch {
-  $deploymentError = $_.Exception.Message
-  if ($hasPreservedDeployment) {
-    Write-Warning "Deployment verification or mutation failed; restoring the preserved deployment."
-    ssh @sshOptions $sshTarget "APP_DIR='$AppDir' CRM_DOMAIN='$Domain' bash /tmp/golden-remote-rollback.sh"
-    $rollbackExitCode = $LASTEXITCODE
-    if ($rollbackExitCode -ne 0) {
-      throw "Deployment failed and automatic rollback also failed (exit $rollbackExitCode). Original error: $deploymentError"
+} finally {
+  if ($remoteBundleCreated -and ((-not $transactionStarted) -or $transactionResolved)) {
+    ssh @sshOptions $sshTarget "rm -rf -- '$remoteBundle'" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "Deployment bundle cleanup failed; remove the root-only bundle manually after inspection: $remoteBundle"
     }
-    throw "Deployment failed; the previous deployment was restored. Original error: $deploymentError"
   }
-  throw "First deployment failed and no previous deployment exists to restore. Original error: $deploymentError"
 }
 
 if (-not $SkipDns) {

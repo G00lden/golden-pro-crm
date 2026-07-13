@@ -158,34 +158,24 @@ STORE_WEBHOOK_DEFAULT_TECHNICIAN_NAME=
 
 ## VPS
 
-```bash
-npm install
-npm run build
-npm start
+التشغيل المباشر عبر `npm start` غير مدعوم للإنتاج؛ لأنه يتجاوز النسخة الاحتياطية
+وقفل النشر وفحص الإصدار والتراجع. جهّز `.env.production` محليًا من المثال ثم انشر
+عبر المعاملة الوحيدة المدعومة:
+
+```powershell
+npm run deploy:vps -- -HostName YOUR_VPS_HOST -SshKey YOUR_SSH_KEY
 ```
 
-مثال بيئة VPS:
-
-```env
-PORT=3000
-APP_TIMEZONE=Asia/Riyadh
-WA_SESSION_DIR=.wa-session
-ENABLE_DAILY_CRON=true
-REMINDER_CRON_SCHEDULE=*/10 * * * *
-ALLOW_LOCAL_AUTH=false
-VITE_LOCAL_AUTH=false
-FIREBASE_SERVICE_ACCOUNT_PATH=/secure/path/service-account.json
-```
+لأول نشر موثّق فقط عندما لا توجد خدمة أو بيانات سابقة، أضف
+`-AllowFirstDeployWithoutBackup`. لا تشغّل Compose أو Caddy أو `vps-update.sh`
+مباشرة على الخادم.
 
 ## VPS + Hosting
 
 الإصدار الحالي يُنشر كاملًا على VPS عبر Docker لأنه يعتمد على SQLite وجلسة واتساب ذات تخزين دائم. مسار Cloud Run معطّل عمدًا كي لا يُنتج نسخة ناقصة أو يفقد البيانات والجلسة.
 
-```bash
-npm run doctor:prod
-npm run deploy:vps -- -HostName YOUR_VPS_HOST -SshKey YOUR_SSH_KEY
-npm run deploy:firebase
-```
+يشغّل `deploy-vps.ps1` فحص الإنتاج والبناء محليًا ثم يرسل مصدر commit نظيفًا إلى
+معاملة الخادم. نشر Firebase مستقل للواجهة/القواعد عند الحاجة ولا يستبدل خدمة VPS.
 
 خطوات النشر التفصيلية والنسخ الاحتياطي وربط سلة موثقة في `docs/vps-deployment-ar.md`.
 
@@ -194,6 +184,7 @@ npm run deploy:firebase
 ```bash
 npm run doctor
 npm run lint
+npm run test:unit
 npm run build
 npm run test:smoke
 ```

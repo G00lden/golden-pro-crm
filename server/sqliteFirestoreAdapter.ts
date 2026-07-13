@@ -46,6 +46,50 @@ function newId(collection: string) {
   return `${prefixFor(collection)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 }
 
+function normalizedCounterInput(ownerUid: string, namespace: string, minimumNext: number) {
+  const owner = String(ownerUid || "").trim();
+  const series = String(namespace || "").trim();
+  if (!owner || owner.length > 256) throw new Error("Counter owner UID is invalid.");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(series)) {
+    throw new Error("Counter namespace is invalid.");
+  }
+  if (!Number.isSafeInteger(minimumNext) || minimumNext < 1) {
+    throw new Error("Counter minimumNext must be a positive safe integer.");
+  }
+  return { owner, series, minimumNext };
+}
+
+/**
+ * Allocates one durable sequence value. BEGIN IMMEDIATE serializes independent
+ * SQLite connections before the UPSERT, while RETURNING keeps read/write in the
+ * same statement. A rolled-back document write never makes this value reusable.
+ */
+export function allocateSqliteCounter(
+  database: typeof db,
+  ownerUid: string,
+  namespace: string,
+  minimumNext = 1,
+) {
+  const input = normalizedCounterInput(ownerUid, namespace, minimumNext);
+  const allocate = database.prepare(`
+    INSERT INTO invoice_sequences (owner_uid, series, last_value, updated_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(owner_uid, series) DO UPDATE SET
+      last_value = MAX(invoice_sequences.last_value + 1, excluded.last_value),
+      updated_at = excluded.updated_at
+    RETURNING last_value
+  `);
+  const transaction = database.transaction(() => {
+    const row = allocate.get(input.owner, input.series, input.minimumNext) as { last_value?: unknown } | undefined;
+    const value = Number(row?.last_value);
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error("Allocated counter value is outside the safe integer range.");
+    }
+    return value;
+  });
+  return transaction.immediate();
+}
+
 function sqlOp(op: FilterOp): string {
   switch (op) {
     case "==": return "=";
@@ -138,6 +182,14 @@ class SqliteDocSnapshot {
       ["remote_synced_at", "remoteSyncedAt"],
       ["sync_origin", "syncOrigin"],
       ["remote_deleted_at", "remoteDeletedAt"],
+      ["document_kind", "documentKind"],
+      ["sequence_no", "sequenceNo"],
+      ["issued_at", "issuedAt"],
+      ["source_invoice_id", "sourceInvoiceId"],
+      ["adjustment_kind", "adjustmentKind"],
+      ["adjustment_scope", "adjustmentScope"],
+      ["adjustment_reason", "adjustmentReason"],
+      ["idempotency_key", "idempotencyKey"],
     ];
     for (const [col, alias] of aliases) {
       if (row[col] !== undefined && row[alias] === undefined) {
@@ -243,6 +295,14 @@ const fieldToColumn: Record<string, string> = {
   paymentIban: "payment_iban",
   paymentNote: "payment_note",
   invoiceNumber: "invoice_number",
+  documentKind: "document_kind",
+  sequenceNo: "sequence_no",
+  issuedAt: "issued_at",
+  sourceInvoiceId: "source_invoice_id",
+  adjustmentKind: "adjustment_kind",
+  adjustmentScope: "adjustment_scope",
+  adjustmentReason: "adjustment_reason",
+  idempotencyKey: "idempotency_key",
   quoteId: "quote_id",
   invoiceId: "invoice_id",
   expectedClose: "expected_close",
@@ -381,7 +441,11 @@ class SqliteDocRef {
       db.prepare(`INSERT INTO "${this.table}" (${quotedKeys}) VALUES (${placeholders})`)
         .run(...keys.map((key) => record[key]));
     } catch (error) {
-      if (String((error as { code?: unknown })?.code || "").startsWith("SQLITE_CONSTRAINT")) {
+      const code = String((error as { code?: unknown })?.code || "");
+      const message = error instanceof Error ? error.message : String(error);
+      // Preserve named trigger failures: they describe lifecycle conflicts,
+      // whereas only primary-key/unique collisions mean this document exists.
+      if (code.startsWith("SQLITE_CONSTRAINT") && /UNIQUE constraint failed|PRIMARY KEY/i.test(message)) {
         const conflict = new Error(`Document ${this.id} already exists.`) as Error & { code?: string };
         conflict.code = "ALREADY_EXISTS";
         throw conflict;
@@ -579,6 +643,9 @@ class SqliteWriteBatch {
 // ==========================================
 export function createSqliteFirestoreAdapter() {
   return {
+    async allocateCounter(ownerUid: string, namespace: string, minimumNext = 1) {
+      return allocateSqliteCounter(db, ownerUid, namespace, minimumNext);
+    },
     collection(table: string) {
       return new SqliteCollectionRef(table);
     },

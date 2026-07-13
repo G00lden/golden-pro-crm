@@ -1,9 +1,8 @@
 # Golden Pro CRM — single always-on container (frontend + backend + SQLite).
 #
-# Suitable for a VPS or any Docker host. SQLite (telephony/call data) and the
-# WhatsApp linked-device session are persisted on named volumes so they survive
-# restarts/redeploys. NOT for serverless (Cloud Run): WhatsApp + SQLite need a
-# long-lived process with a stable disk.
+# Local/single-container fallback only. Public VPS production must use
+# deploy/docker-compose.yml through scripts/deploy-vps.ps1 so Caddy owns the
+# trusted client-IP boundary. SQLite and the WhatsApp session use named volumes.
 #
 #   cp .env.production.example .env.production   # then fill secrets
 #   docker compose --env-file .env.production up -d --build
@@ -27,11 +26,14 @@ services:
     environment:
       NODE_ENV: production
       BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+      # This Compose file has no bundled trusted proxy. Override the production
+      # example so a direct client can never spoof x-breexe-client-ip.
+      TRUST_PROXY_HEADERS: "false"
       PORT: "8080"
       DB_PATH: /app/.runtime/golden-crm.db
       WA_SESSION_DIR: /app/.wa-session
     ports:
-      - "3000:8080"            # host:container — put a reverse proxy / TLS in front
+      - "127.0.0.1:3000:8080"  # loopback only; use the bundled deploy stack publicly
     volumes:
       - crm-data:/app/.runtime       # SQLite database (calls, departments, outbox)
       - crm-wa:/app/.wa-session       # WhatsApp linked-device session (scan QR once)

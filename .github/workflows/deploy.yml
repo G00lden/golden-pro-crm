@@ -1,20 +1,21 @@
 name: Deploy to VPS
 
-# Continuous deployment: on every push to main (after CI passes), SSH into the
-# VPS and run the update script, which pulls, rebuilds, health-checks, and rolls
-# back automatically if the new build is unhealthy.
+# Continuous deployment starts only after the CI workflow succeeds on main.
+# The exact tested SHA is sent as a clean archive to one locked VPS transaction.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   VPS_HOST     — server IP or hostname
-#   VPS_USER     — SSH user that owns the app dir (e.g. goldencrm or root)
+#   VPS_USER     — root (the transaction atomically renames paths under /opt)
 #   VPS_SSH_KEY  — the PRIVATE SSH key whose public half is in the VPS user's authorized_keys
+#   VPS_KNOWN_HOSTS — pinned known_hosts line obtained through a trusted channel
 #   APP_DIR      — absolute path of the cloned repo on the VPS (e.g. /opt/golden-pro-crm)
 # Optional:
 #   VPS_PORT     — SSH port (defaults to 22)
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-  workflow_dispatch: {}   # allow manual "Run workflow"
 
 concurrency:
   group: deploy-production   # never run two deploys at once
@@ -22,26 +23,96 @@ concurrency:
 
 jobs:
   deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
       - name: Deploy over SSH
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
           APP_DIR: ${{ secrets.APP_DIR }}
+          APPROVED_APP_BASE: ${{ secrets.APPROVED_APP_BASE }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
           set -euo pipefail
-          if [ -z "${VPS_HOST:-}" ] || [ -z "${VPS_USER:-}" ] || [ -z "${VPS_SSH_KEY:-}" ] || [ -z "${APP_DIR:-}" ]; then
-            echo "::notice::VPS secrets not configured yet — skipping deploy. Set VPS_HOST, VPS_USER, VPS_SSH_KEY, APP_DIR to enable (see docs/vps-cicd-backups-ar.md)."
-            exit 0
+          if [ -z "${VPS_HOST:-}" ] || [ -z "${VPS_USER:-}" ] || [ -z "${VPS_SSH_KEY:-}" ] || [ -z "${VPS_KNOWN_HOSTS:-}" ] || [ -z "${APP_DIR:-}" ]; then
+            echo "::error::VPS deployment secrets are incomplete. Set VPS_HOST, VPS_USER, VPS_SSH_KEY, VPS_KNOWN_HOSTS, and APP_DIR (see docs/vps-cicd-backups-ar.md)."
+            exit 2
+          fi
+          safe_path() {
+            [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] &&
+              [[ "$1" != *//* && "$1" != */./* && "$1" != */../* && "$1" != */. && "$1" != */.. && "$1" != */ ]]
+          }
+          safe_path "$APP_DIR" || { echo "APP_DIR is unsafe or non-canonical." >&2; exit 2; }
+          if [ -n "${APPROVED_APP_BASE:-}" ]; then
+            safe_path "$APPROVED_APP_BASE" || { echo "APPROVED_APP_BASE is unsafe." >&2; exit 2; }
+          fi
+          if [ "$APP_DIR" != /opt/golden-pro-crm ]; then
+            [ -n "${APPROVED_APP_BASE:-}" ] && safe_path "$APPROVED_APP_BASE" \
+              || { echo "A custom APP_DIR requires a safe APPROVED_APP_BASE secret." >&2; exit 2; }
+            case "$APP_DIR" in "$APPROVED_APP_BASE"/*) ;; *) echo "APP_DIR is outside APPROVED_APP_BASE." >&2; exit 2 ;; esac
           fi
           mkdir -p ~/.ssh
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_deploy
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/known_hosts
           PORT="${VPS_PORT:-22}"
-          ssh-keyscan -p "$PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          ssh -i ~/.ssh/id_deploy -p "$PORT" -o StrictHostKeyChecking=yes \
-            "$VPS_USER@$VPS_HOST" \
-            "cd '$APP_DIR' && DEPLOY_BRANCH=main bash scripts/vps-update.sh"
+          [[ "$VPS_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] \
+            || { echo "VPS_HOST is unsafe." >&2; exit 2; }
+          [ "$VPS_USER" = root ] || { echo "VPS_USER must be root for the /opt atomic transaction." >&2; exit 2; }
+          [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] \
+            || { echo "VPS_PORT is invalid." >&2; exit 2; }
+          BUILD_COMMIT="$(git rev-parse --short=12 HEAD)"
+          EXPECTED_VERSION="$(node -p 'require("./release.json").version')"
+          [[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          ARCHIVE="$RUNNER_TEMP/golden-pro-crm-release.tar.gz"
+          tar \
+            --exclude=.git --exclude=node_modules --exclude=dist --exclude=.runtime \
+            --exclude=.env --exclude='.env.*' --exclude='*.db' --exclude='*.db-*' \
+            --exclude=.wa-session --exclude=backups --exclude='*.log' \
+            -czf "$ARCHIVE" .
+
+          SSH=(ssh -i ~/.ssh/id_deploy -p "$PORT" -o StrictHostKeyChecking=yes)
+          SCP=(scp -i ~/.ssh/id_deploy -P "$PORT" -o StrictHostKeyChecking=yes)
+          TARGET="$VPS_USER@$VPS_HOST"
+          REMOTE_BUNDLE="$("${SSH[@]}" "$TARGET" 'umask 077; mktemp -d /tmp/golden-pro-crm-ci.XXXXXXXXXX')"
+          [[ "$REMOTE_BUNDLE" =~ ^/tmp/golden-pro-crm-ci\.[A-Za-z0-9]+$ ]] \
+            || { echo "Remote mktemp returned an unsafe bundle path." >&2; exit 2; }
+          transaction_started=false
+          transaction_resolved=false
+          cleanup_remote_bundle() {
+            if [ "$transaction_started" != true ] || [ "$transaction_resolved" = true ]; then
+              if ! "${SSH[@]}" "$TARGET" "rm -rf -- '$REMOTE_BUNDLE'"; then
+                echo "::warning::Deployment bundle cleanup failed; inspect and remove $REMOTE_BUNDLE manually." >&2
+              fi
+            fi
+          }
+          trap cleanup_remote_bundle EXIT
+          "${SCP[@]}" "$ARCHIVE" "$TARGET:$REMOTE_BUNDLE/release.tar.gz"
+          "${SCP[@]}" scripts/vps-update.sh "$TARGET:$REMOTE_BUNDLE/vps-update.sh"
+          "${SCP[@]}" scripts/vps-deploy-transaction.sh "$TARGET:$REMOTE_BUNDLE/vps-deploy-transaction.sh"
+          "${SCP[@]}" scripts/vps-backup.sh "$TARGET:$REMOTE_BUNDLE/vps-backup.sh"
+          "${SCP[@]}" scripts/vps-preserve-deploy-state.sh "$TARGET:$REMOTE_BUNDLE/vps-preserve-deploy-state.sh"
+          "${SCP[@]}" deploy/remote-rollback.sh "$TARGET:$REMOTE_BUNDLE/remote-rollback.sh"
+          transaction_started=true
+          set +e
+          "${SSH[@]}" "$TARGET" \
+            "sed -i 's/\r$//' '$REMOTE_BUNDLE/'*.sh && chmod 700 '$REMOTE_BUNDLE/'*.sh && APP_DIR='$APP_DIR' DEPLOY_APPROVED_APP_BASE='$APPROVED_APP_BASE' DEPLOY_ARCHIVE='$REMOTE_BUNDLE/release.tar.gz' DEPLOY_TRANSACTION_SCRIPT='$REMOTE_BUNDLE/vps-deploy-transaction.sh' DEPLOY_BACKUP_HELPER='$REMOTE_BUNDLE/vps-backup.sh' DEPLOY_PRESERVE_HELPER='$REMOTE_BUNDLE/vps-preserve-deploy-state.sh' DEPLOY_ROLLBACK_HELPER='$REMOTE_BUNDLE/remote-rollback.sh' EXPECTED_VERSION='$EXPECTED_VERSION' EXPECTED_BUILD='$BUILD_COMMIT' bash '$REMOTE_BUNDLE/vps-update.sh'"
+          transaction_status=$?
+          set -e
+          case "$transaction_status" in
+            0|1|2|75) transaction_resolved=true ;;
+            *) echo "Remote outcome $transaction_status is ambiguous; retained $REMOTE_BUNDLE for investigation." >&2 ;;
+          esac
+          exit "$transaction_status"

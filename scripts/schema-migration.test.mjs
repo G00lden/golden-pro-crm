@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const caseScript = path.join(root, "scripts", "sqlite-schema-case.ts");
+const restartCaseScript = path.join(root, "scripts", "sqlite-invoice-restart-case.ts");
 
 function runCase(scenario, production = false) {
   const directory = mkdtempSync(path.join(os.tmpdir(), `breexe-schema-${scenario}-`));
@@ -29,13 +30,13 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10307/);
+    assert.match(result.stdout, /"userVersion":10308/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("a legacy database is upgraded without changing historical values", () => {
+test("a legacy database preserves dates and identifiers while repairing invoice totals", () => {
   const { directory, result } = runCase("legacy");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -51,7 +52,20 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10307/);
+    assert.match(backups[0], /pre-schema-10308/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a previous 10307 deployment upgrades through a new backup and ledger marker", () => {
+  const { directory, result } = runCase("previous-10307", true);
+  try {
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /"userVersion":10308/);
+    const backups = readdirSync(path.join(directory, "backups"));
+    assert.equal(backups.length, 1);
+    assert.match(backups[0], /pre-schema-10308/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -109,6 +123,28 @@ test("the Supabase migration mirrors the Salla order synchronization schema", ()
   }
 });
 
+test("invoice financial backfill is gated off after the first schema startup", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "breexe-schema-restart-"));
+  const dbPath = path.join(directory, "crm.db");
+  const env = { ...process.env, DB_PATH: dbPath, NODE_ENV: "test" };
+  try {
+    const seed = spawnSync(process.execPath, ["--import", "tsx", restartCaseScript, "seed"], {
+      cwd: root,
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(seed.status, 0, seed.stderr || seed.stdout);
+    const verify = spawnSync(process.execPath, ["--import", "tsx", restartCaseScript, "verify"], {
+      cwd: root,
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("the Supabase migration preserves invoice additional fees", () => {
   const migration = readFileSync(
     path.join(root, "supabase", "migrations", "20260713030000_invoice_additional_fee.sql"),
@@ -119,6 +155,34 @@ test("the Supabase migration preserves invoice additional fees", () => {
     "additional_fee numeric",
     "additional_fee >= 0",
   ]) {
+    assert.match(migration, new RegExp(required));
+  }
+});
+
+test("the Supabase invoice migration declares conservative line guards and no timestamp assignments", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260713170000_invoice_financial_invariant.sql"),
+    "utf8",
+  );
+  assert.match(migration, /and not exists\s*\(/i);
+  assert.match(migration, /jsonb_typeof\(candidate\.value -> 'description'\) is distinct from 'string'/i);
+  assert.match(migration, /nullif\(btrim\(candidate\.value ->> 'description'\), ''\) is null/i);
+  assert.match(
+    migration,
+    /jsonb_typeof\(candidate\.value -> 'quantity'\) = 'number'[\s\S]*?candidate\.value ->> 'quantity'\)::numeric <= 0/i,
+  );
+  assert.match(
+    migration,
+    /candidate\.value -> 'unit_price'[\s\S]*?candidate\.value -> 'unitPrice'[\s\S]*?::numeric < 0/i,
+  );
+  assert.match(migration, /jsonb_array_length\(case[\s\S]*?else '\[\]'::jsonb[\s\S]*?end\) > 0/i);
+  assert.match(migration, /drop trigger if exists invoices_touch_updated_at/i);
+  assert.match(migration, /create trigger invoices_touch_updated_at/i);
+
+  const update = migration.match(/update public\.invoices as invoice\s+set([\s\S]*?)\s+from canonical/i);
+  assert.ok(update, "Supabase invoice update block is missing");
+  assert.doesNotMatch(update[1], /\b(?:issue_date|created_at|updated_at)\s*=/i);
+  for (const required of ["discount_value", "vat_excluded", "total_without_vat", "total_with_vat"]) {
     assert.match(migration, new RegExp(required));
   }
 });

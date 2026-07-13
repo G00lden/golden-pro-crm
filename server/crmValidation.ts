@@ -214,6 +214,7 @@ export const invoiceCreateSchema = z.object(invoiceShape).superRefine(invoiceDis
 export const invoiceUpdateSchema = z.object(invoiceShape).superRefine(invoiceDiscountBounds);
 export const invoiceStatusSchema = z.object({
   status: z.enum(["draft", "issued", "sent", "paid", "cancelled", "refunded"]),
+  reason: z.string().trim().max(1000).optional(),
 });
 
 export const settingsUpdateSchema = z.object({

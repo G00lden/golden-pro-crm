@@ -931,6 +931,11 @@ function QuoteForm({
     event.preventDefault();
     setSaving(true);
     try {
+      const missingDescriptionIndex = normalizedItems.findIndex((item) => !item.description.trim());
+      if (missingDescriptionIndex >= 0) {
+        (event.currentTarget as HTMLFormElement).reportValidity();
+        return;
+      }
       await onSave({
         customer_id: customerId || null,
         customer_name: customerName.trim(),
@@ -947,7 +952,7 @@ function QuoteForm({
         tax: Number(tax || 0),
         vat_percent: Number(vatPercent || 0),
         currency: "SAR",
-        items: normalizedItems.filter((item) => item.description.trim()),
+        items: normalizedItems,
         notes: notes.trim(),
         terms: terms.trim(),
         payment_method: paymentMethod,
@@ -1059,7 +1064,7 @@ function QuoteForm({
               value={item.description}
               onChange={(event) => updateItem(index, { description: event.target.value })}
               placeholder="وصف البند"
-              required={index === 0}
+              required
             />
             <input
               className="input"

@@ -3,12 +3,14 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
 import { PUBLIC_LEAD_SCHEMA_SQL } from "./publicLeadStorage";
+import { calculateDocumentTotals, normalizeVatPercent, type DiscountMode } from "../shared/financial";
+import { verifiableInvoiceItems } from "../shared/invoiceItems";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10307;
+const TARGET_SCHEMA_VERSION = 10308;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -510,6 +512,7 @@ db.exec(`
     customer_name TEXT NOT NULL DEFAULT '',
     customer_phone TEXT DEFAULT '',
     customer_city TEXT DEFAULT '',
+    customer_vat TEXT DEFAULT '',
     title TEXT DEFAULT '',
     status TEXT DEFAULT 'issued',
     issue_date TEXT DEFAULT (date('now')),
@@ -551,6 +554,14 @@ db.exec(`
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
     invoice_number TEXT NOT NULL DEFAULT '',
+    document_kind TEXT NOT NULL DEFAULT 'invoice' CHECK(document_kind IN ('invoice', 'credit_note')),
+    sequence_no INTEGER CHECK(sequence_no IS NULL OR sequence_no BETWEEN 1 AND 9007199254740991),
+    issued_at TEXT,
+    source_invoice_id TEXT,
+    adjustment_kind TEXT CHECK(adjustment_kind IS NULL OR adjustment_kind IN ('cancellation', 'refund')),
+    adjustment_scope TEXT CHECK(adjustment_scope IS NULL OR adjustment_scope IN ('full', 'partial')),
+    adjustment_reason TEXT,
+    idempotency_key TEXT CHECK(idempotency_key IS NULL OR TRIM(idempotency_key) <> ''),
     quote_id TEXT,
     customer_id TEXT,
     customer_name TEXT NOT NULL DEFAULT '',
@@ -589,6 +600,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_invoices_owner ON invoices(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(owner_uid, status, created_at DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices(owner_uid, invoice_number);
+
+  CREATE TABLE IF NOT EXISTS invoice_sequences (
+    owner_uid TEXT NOT NULL,
+    series TEXT NOT NULL,
+    last_value INTEGER NOT NULL CHECK(last_value BETWEEN 0 AND 9007199254740991),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(owner_uid, series)
+  );
 
   CREATE TABLE IF NOT EXISTS crm_deals (
     id TEXT PRIMARY KEY,
@@ -892,6 +911,9 @@ db.exec(`
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
     invoice_id TEXT,
+    idempotency_key TEXT,
+    lease_token TEXT,
+    reservation_expires_at TEXT,
     tap_charge_id TEXT,
     amount NUMERIC NOT NULL,
     currency TEXT DEFAULT 'SAR',
@@ -904,6 +926,35 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
   CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(tap_charge_id);
+`);
+
+for (const col of [
+  ["idempotency_key", "TEXT"],
+  ["lease_token", "TEXT"],
+  ["reservation_expires_at", "TEXT"],
+] as const) {
+  if (!hasColumn("payments", col[0])) {
+    db.exec(`ALTER TABLE payments ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+// Preserve the newest legacy in-flight row if an older release allowed more
+// than one pending payment for the same invoice, then enforce one reservation.
+db.exec(`
+  UPDATE payments
+  SET status = 'failed', updated_at = datetime('now')
+  WHERE status IN ('creating', 'pending')
+    AND rowid NOT IN (
+      SELECT MAX(rowid)
+      FROM payments
+      WHERE status IN ('creating', 'pending')
+      GROUP BY owner_uid, invoice_id
+    );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_owner_idempotency
+    ON payments(owner_uid, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_one_inflight_per_invoice
+    ON payments(owner_uid, invoice_id)
+    WHERE status IN ('creating', 'pending');
 `);
 
 // Public landing-page enquiries are deliberately isolated from authenticated
@@ -1057,6 +1108,7 @@ for (const col of [
 }
 
 for (const col of [
+  ["customer_vat", "TEXT DEFAULT ''"],
   ["discount_mode", "TEXT DEFAULT 'fixed'"],
   ["discount_value", "NUMERIC DEFAULT 0"],
   ["vat_percent", "NUMERIC DEFAULT 15"],
@@ -1080,6 +1132,14 @@ for (const col of [
 
 for (const col of [
   ["invoice_number", "TEXT NOT NULL DEFAULT ''"],
+  ["document_kind", "TEXT NOT NULL DEFAULT 'invoice' CHECK(document_kind IN ('invoice', 'credit_note'))"],
+  ["sequence_no", "INTEGER CHECK(sequence_no IS NULL OR sequence_no BETWEEN 1 AND 9007199254740991)"],
+  ["issued_at", "TEXT"],
+  ["source_invoice_id", "TEXT"],
+  ["adjustment_kind", "TEXT CHECK(adjustment_kind IS NULL OR adjustment_kind IN ('cancellation', 'refund'))"],
+  ["adjustment_scope", "TEXT CHECK(adjustment_scope IS NULL OR adjustment_scope IN ('full', 'partial'))"],
+  ["adjustment_reason", "TEXT"],
+  ["idempotency_key", "TEXT CHECK(idempotency_key IS NULL OR TRIM(idempotency_key) <> '')"],
   ["quote_id", "TEXT"],
   ["customer_id", "TEXT"],
   ["customer_name", "TEXT NOT NULL DEFAULT ''"],
@@ -1119,9 +1179,361 @@ for (const col of [
     db.exec(`ALTER TABLE invoices ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
+// A previous startup may already have installed the ledger triggers. Remove
+// them during the synchronous migration window so idempotent backfills can run,
+// then recreate them after reconciliation below.
+db.exec(`
+  DROP TRIGGER IF EXISTS invoices_prevent_issued_financial_update;
+  DROP TRIGGER IF EXISTS invoices_prevent_issued_delete;
+  DROP TRIGGER IF EXISTS invoices_validate_credit_note_insert;
+  DROP TRIGGER IF EXISTS invoices_prevent_status_after_credit;
+  DROP TRIGGER IF EXISTS invoices_prevent_credit_during_payment;
+  DROP TRIGGER IF EXISTS invoices_prevent_paid_during_payment;
+  DROP INDEX IF EXISTS idx_invoices_owner_sequence;
+`);
+
+function sequenceFromHistoricalInvoiceNumber(value: unknown): number | null {
+  const match = String(value ?? "").trim().match(/^(?:INV|CN)-.+-(\d+)$/i);
+  if (!match) return null;
+  const sequence = Number(match[1]);
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : null;
+}
+
+const assignHistoricalInvoiceSequence = db.prepare(
+  "UPDATE invoices SET sequence_no = ? WHERE id = ?",
+);
+db.exec(`
+  UPDATE invoices
+  SET invoice_number = 'DRAFT-' || UPPER(SUBSTR(REPLACE(id, '-', ''), 1, 20)),
+      sequence_no = NULL
+  WHERE status = 'draft'
+    AND issued_at IS NULL
+    AND invoice_number NOT LIKE 'DRAFT-%';
+`);
+const backfillHistoricalInvoiceSequences = db.transaction(() => {
+  const rows = db.prepare(
+    `SELECT id, owner_uid, invoice_number, sequence_no
+       FROM invoices
+      WHERE status <> 'draft'
+        AND TRIM(COALESCE(invoice_number, '')) <> ''
+      ORDER BY owner_uid,
+               COALESCE(NULLIF(issued_at, ''), NULLIF(created_at, ''), NULLIF(issue_date, ''), ''),
+               invoice_number,
+               id`,
+  ).all() as Array<{
+    id: string;
+    owner_uid: string;
+    invoice_number: unknown;
+    sequence_no: unknown;
+  }>;
+
+  const byOwner = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const ownerRows = byOwner.get(row.owner_uid) ?? [];
+    ownerRows.push(row);
+    byOwner.set(row.owner_uid, ownerRows);
+  }
+
+  for (const ownerRows of byOwner.values()) {
+    const groups = new Map<number, typeof ownerRows>();
+    for (const row of ownerRows) {
+      const stored = Number(row.sequence_no);
+      const sequence = Number.isSafeInteger(stored) && stored > 0
+        ? stored
+        : sequenceFromHistoricalInvoiceNumber(row.invoice_number);
+      if (sequence === null) continue;
+      const matches = groups.get(sequence) ?? [];
+      matches.push(row);
+      groups.set(sequence, matches);
+    }
+
+    // Keep the earliest historical document on its original numeric suffix.
+    // Date-based legacy numbers restarted at 001, so later collisions receive
+    // an internal sequence above every historical suffix. The visible invoice
+    // numbers, dates, and financial values remain untouched.
+    let nextSequence = Math.max(0, ...groups.keys()) + 1;
+    for (const [sequence, matches] of groups) {
+      assignHistoricalInvoiceSequence.run(sequence, matches[0].id);
+      for (const collision of matches.slice(1)) {
+        assignHistoricalInvoiceSequence.run(nextSequence, collision.id);
+        nextSequence += 1;
+      }
+    }
+  }
+});
+backfillHistoricalInvoiceSequences.immediate();
+
+db.exec(`
+  UPDATE invoices
+  SET issued_at = COALESCE(NULLIF(created_at, ''), NULLIF(issue_date, ''))
+  WHERE issued_at IS NULL
+    AND status <> 'draft'
+    AND TRIM(COALESCE(invoice_number, '')) <> '';
+`);
+
+const duplicateInvoiceSequence = db.prepare(`
+  SELECT 1
+  FROM invoices
+  WHERE sequence_no IS NOT NULL
+  GROUP BY owner_uid, sequence_no
+  HAVING COUNT(*) > 1
+  LIMIT 1
+`).get();
+if (duplicateInvoiceSequence) {
+  throw new Error("Invoice sequence migration aborted: duplicate owner sequence values require manual repair.");
+}
+
 db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_owner ON invoices(owner_uid, created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(owner_uid, status, created_at DESC)");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices(owner_uid, invoice_number)");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_sequence ON invoices(owner_uid, sequence_no) WHERE sequence_no IS NOT NULL");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_idempotency ON invoices(owner_uid, idempotency_key) WHERE idempotency_key IS NOT NULL");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_one_full_credit_per_source ON invoices(owner_uid, source_invoice_id) WHERE document_kind = 'credit_note' AND adjustment_scope = 'full'");
+db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_owner_source ON invoices(owner_uid, source_invoice_id)");
+db.exec(`
+  INSERT INTO invoice_sequences (owner_uid, series, last_value, updated_at)
+  SELECT owner_uid, 'tax_documents', MAX(sequence_no), datetime('now')
+  FROM invoices
+  WHERE sequence_no IS NOT NULL
+  GROUP BY owner_uid
+  ON CONFLICT(owner_uid, series) DO UPDATE SET
+    last_value = MAX(invoice_sequences.last_value, excluded.last_value),
+    updated_at = excluded.updated_at;
+`);
+
+type StoredInvoiceFinancialRow = {
+  id: string;
+  items: unknown;
+  subtotal: unknown;
+  discount: unknown;
+  discount_mode: unknown;
+  discount_value: unknown;
+  vat: unknown;
+  vat_percent: unknown;
+  vat_amount: unknown;
+  additional_fee: unknown;
+  total_without_vat: unknown;
+  total_with_vat: unknown;
+};
+
+function invoiceItemsForFinancialBackfill(value: unknown) {
+  return verifiableInvoiceItems(value) ?? [];
+}
+
+function storedInvoiceDiscountValue(row: StoredInvoiceFinancialRow) {
+  const explicit = Number(row.discount_value);
+  const historicalAmount = Number(row.discount);
+  if (row.discount_mode === "percent") {
+    return Number.isFinite(explicit) ? explicit : 0;
+  }
+  if (Number.isFinite(explicit) && (explicit > 0 || !Number.isFinite(historicalAmount) || historicalAmount <= 0)) {
+    return explicit;
+  }
+  return Number.isFinite(historicalAmount) ? historicalAmount : 0;
+}
+
+// Existing SQLite invoices may contain independently-written header totals.
+// Reconcile every verifiable legacy row from its line items. The operation is
+// idempotent, preserves issue/creation/update dates, and the production backup
+// above is created before this release migration is applied.
+const reconcileStoredInvoiceFinancials = db.transaction(() => {
+  const rows = db.prepare(`
+    SELECT id, items, subtotal, discount, discount_mode, discount_value, vat,
+           vat_percent, vat_amount, additional_fee, total_without_vat, total_with_vat
+      FROM invoices
+  `).all() as StoredInvoiceFinancialRow[];
+  const update = db.prepare(`
+    UPDATE invoices
+       SET subtotal = @subtotal,
+           discount = @discount,
+           discount_mode = @discount_mode,
+           discount_value = @discount_value,
+           vat = @vat,
+           vat_percent = @vat_percent,
+           vat_amount = @vat_amount,
+           additional_fee = @additional_fee,
+           total_without_vat = @total_without_vat,
+           total_with_vat = @total_with_vat
+     WHERE id = @id
+  `);
+  const numericFields = [
+    "subtotal",
+    "discount",
+    "discount_value",
+    "vat",
+    "vat_percent",
+    "vat_amount",
+    "additional_fee",
+    "total_without_vat",
+    "total_with_vat",
+  ] as const;
+
+  for (const row of rows) {
+    const items = invoiceItemsForFinancialBackfill(row.items);
+    if (!items.length) continue;
+    const discountMode: DiscountMode = row.discount_mode === "percent" ? "percent" : "fixed";
+    const totals = calculateDocumentTotals({
+      lines: items,
+      discountValue: storedInvoiceDiscountValue(row),
+      discountMode,
+      vatPercent: normalizeVatPercent(row.vat_percent),
+      additionalTax: Number(row.additional_fee),
+    });
+    const canonical = {
+      id: row.id,
+      subtotal: totals.subtotal,
+      discount: totals.discountAmount,
+      discount_mode: totals.discountMode,
+      discount_value: totals.discountValue,
+      vat: totals.vatAmount,
+      vat_percent: totals.vatPercent,
+      vat_amount: totals.vatAmount,
+      additional_fee: totals.additionalTax,
+      total_without_vat: totals.totalWithoutVat,
+      total_with_vat: totals.total,
+    };
+    const differs = String(row.discount_mode || "fixed") !== canonical.discount_mode
+      || numericFields.some((field) => {
+        const stored = Number(row[field]);
+        return !Number.isFinite(stored) || Math.abs(stored - canonical[field]) > 0.000_001;
+      });
+    if (differs) update.run(canonical);
+  }
+});
+if (schemaVersionBeforeMigration < TARGET_SCHEMA_VERSION) {
+  reconcileStoredInvoiceFinancials();
+}
+
+// Defense in depth: the HTTP layer already restricts financial edits and
+// deletes to drafts. These triggers close check/write races and protect the
+// ledger from any other SQLite caller. Operational status, paid_at and
+// updated_at remain mutable; every fiscal field is frozen after issuance.
+db.exec(`
+  DROP TRIGGER IF EXISTS invoices_prevent_issued_financial_update;
+  CREATE TRIGGER invoices_prevent_issued_financial_update
+  BEFORE UPDATE ON invoices
+  WHEN (OLD.issued_at IS NOT NULL OR OLD.document_kind = 'credit_note' OR OLD.status <> 'draft') AND (
+    NEW.owner_uid IS NOT OLD.owner_uid OR
+    NEW.invoice_number IS NOT OLD.invoice_number OR
+    NEW.document_kind IS NOT OLD.document_kind OR
+    NEW.sequence_no IS NOT OLD.sequence_no OR
+    NEW.issued_at IS NOT OLD.issued_at OR
+    NEW.source_invoice_id IS NOT OLD.source_invoice_id OR
+    NEW.adjustment_kind IS NOT OLD.adjustment_kind OR
+    NEW.adjustment_scope IS NOT OLD.adjustment_scope OR
+    NEW.adjustment_reason IS NOT OLD.adjustment_reason OR
+    NEW.idempotency_key IS NOT OLD.idempotency_key OR
+    NEW.quote_id IS NOT OLD.quote_id OR
+    NEW.customer_id IS NOT OLD.customer_id OR
+    NEW.customer_name IS NOT OLD.customer_name OR
+    NEW.customer_phone IS NOT OLD.customer_phone OR
+    NEW.customer_city IS NOT OLD.customer_city OR
+    NEW.customer_vat IS NOT OLD.customer_vat OR
+    NEW.title IS NOT OLD.title OR
+    NEW.issue_date IS NOT OLD.issue_date OR
+    NEW.due_date IS NOT OLD.due_date OR
+    NEW.payment_method IS NOT OLD.payment_method OR
+    NEW.subtotal IS NOT OLD.subtotal OR
+    NEW.discount IS NOT OLD.discount OR
+    NEW.discount_mode IS NOT OLD.discount_mode OR
+    NEW.discount_value IS NOT OLD.discount_value OR
+    NEW.vat IS NOT OLD.vat OR
+    NEW.vat_percent IS NOT OLD.vat_percent OR
+    NEW.vat_amount IS NOT OLD.vat_amount OR
+    NEW.additional_fee IS NOT OLD.additional_fee OR
+    NEW.total_without_vat IS NOT OLD.total_without_vat OR
+    NEW.total_with_vat IS NOT OLD.total_with_vat OR
+    NEW.currency IS NOT OLD.currency OR
+    NEW.items IS NOT OLD.items OR
+    NEW.notes IS NOT OLD.notes OR
+    NEW.terms IS NOT OLD.terms OR
+    NEW.seller_name IS NOT OLD.seller_name OR
+    NEW.seller_vat IS NOT OLD.seller_vat OR
+    NEW.seller_vat_number IS NOT OLD.seller_vat_number OR
+    NEW.seller_address IS NOT OLD.seller_address OR
+    NEW.invoice_type IS NOT OLD.invoice_type OR
+    NEW.qr_code IS NOT OLD.qr_code OR
+    NEW.created_at IS NOT OLD.created_at
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'ISSUED_INVOICE_IMMUTABLE');
+  END;
+
+  DROP TRIGGER IF EXISTS invoices_prevent_issued_delete;
+  CREATE TRIGGER invoices_prevent_issued_delete
+  BEFORE DELETE ON invoices
+  WHEN OLD.issued_at IS NOT NULL OR OLD.document_kind = 'credit_note' OR OLD.status <> 'draft'
+  BEGIN
+    SELECT RAISE(ABORT, 'ISSUED_INVOICE_DELETE_FORBIDDEN');
+  END;
+
+  DROP TRIGGER IF EXISTS invoices_validate_credit_note_insert;
+  CREATE TRIGGER invoices_validate_credit_note_insert
+  BEFORE INSERT ON invoices
+  WHEN NEW.document_kind = 'credit_note' AND NOT EXISTS (
+    SELECT 1
+    FROM invoices source
+    WHERE source.id = NEW.source_invoice_id
+      AND source.owner_uid = NEW.owner_uid
+      AND source.document_kind = 'invoice'
+      AND (
+        (NEW.adjustment_kind = 'cancellation' AND source.status IN ('issued', 'sent')) OR
+        (NEW.adjustment_kind = 'refund' AND source.status = 'paid')
+      )
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'CREDIT_NOTE_SOURCE_STATE_CONFLICT');
+  END;
+
+  DROP TRIGGER IF EXISTS invoices_prevent_status_after_credit;
+  CREATE TRIGGER invoices_prevent_status_after_credit
+  BEFORE UPDATE OF status ON invoices
+  WHEN NEW.document_kind = 'invoice'
+    AND NEW.status IN ('sent', 'paid')
+    AND EXISTS (
+      SELECT 1
+      FROM invoices credit
+      WHERE credit.owner_uid = OLD.owner_uid
+        AND credit.source_invoice_id = OLD.id
+        AND credit.document_kind = 'credit_note'
+        AND credit.adjustment_scope = 'full'
+    )
+  BEGIN
+    SELECT RAISE(ABORT, 'INVOICE_ALREADY_CREDITED');
+  END;
+
+  DROP TRIGGER IF EXISTS invoices_prevent_credit_during_payment;
+  CREATE TRIGGER invoices_prevent_credit_during_payment
+  BEFORE INSERT ON invoices
+  WHEN NEW.document_kind = 'credit_note' AND EXISTS (
+    SELECT 1
+    FROM payments payment
+    WHERE payment.owner_uid = NEW.owner_uid
+      AND payment.invoice_id = NEW.source_invoice_id
+      AND payment.status IN ('creating', 'pending', 'completed')
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'INVOICE_PAYMENT_REQUIRES_PROVIDER_RESOLUTION');
+  END;
+
+  DROP TRIGGER IF EXISTS invoices_prevent_paid_during_payment;
+  CREATE TRIGGER invoices_prevent_paid_during_payment
+  BEFORE UPDATE OF status ON invoices
+  WHEN NEW.document_kind = 'invoice'
+    AND NEW.status = 'paid'
+    AND OLD.status <> 'paid'
+    AND EXISTS (
+      SELECT 1
+      FROM payments payment
+      WHERE payment.owner_uid = OLD.owner_uid
+        AND payment.invoice_id = OLD.id
+        AND payment.status IN ('creating', 'pending')
+    )
+  BEGIN
+    SELECT RAISE(ABORT, 'INVOICE_PAYMENT_IN_PROGRESS');
+  END;
+`);
 
 for (const col of [
   ["store_provider", "TEXT"],
@@ -1176,6 +1588,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10305, '1.3.5');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10306, '1.3.6');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10307, '1.3.7');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10308, '1.3.7-ledger-hardening');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

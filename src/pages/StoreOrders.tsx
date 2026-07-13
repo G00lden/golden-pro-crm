@@ -25,6 +25,7 @@ import {
   type ModalState,
 } from "../shared";
 import { usePrefixedUrlState, type UrlFilterSchema } from "../filterUrlState";
+import { sallaRemoteActionsAreAvailable } from "../sallaAvailability";
 
 const STORE_ORDER_TABS = [
   ["all", "الكل"],
@@ -175,6 +176,7 @@ export default function StoreOrdersPage({
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [sallaActionError, setSallaActionError] = useState("");
   const [lastUpdated, setLastUpdated] = useState("");
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(() => new Set());
   const seenOrderIdsRef = useRef<Set<string>>(new Set());
@@ -257,7 +259,21 @@ export default function StoreOrdersPage({
     [orderQueryKey],
   );
   const sallaStatuses = useData(api.getSallaOrderStatuses);
+  const sallaRemoteActionsAvailable = sallaRemoteActionsAreAvailable({
+    loading: sallaStatuses.loading,
+    error: sallaStatuses.error,
+    available: sallaStatuses.data?.available,
+  });
+  const sallaConnectionReason = sallaStatuses.error || sallaStatuses.data?.reason || (
+    !sallaStatuses.loading && !sallaRemoteActionsAvailable
+      ? "تعذر التحقق من اتصال متجر سلة. أعد المحاولة قبل تنفيذ أي تعديل بعيد."
+      : ""
+  );
   const setOrderData = orders.setData;
+
+  useEffect(() => {
+    if (sallaRemoteActionsAvailable) setSallaActionError("");
+  }, [sallaRemoteActionsAvailable]);
 
   const openWorkflowForm = (order: api.StoreOrder, item?: api.StoreOrderItem) => {
     setModal({
@@ -320,11 +336,18 @@ export default function StoreOrdersPage({
   }, [notify]);
 
   const refreshOrders = useCallback(async (options: { sync?: boolean; background?: boolean } = {}) => {
+    if (options.sync && !sallaRemoteActionsAvailable) {
+      const message = sallaConnectionReason || "متجر سلة غير متصل. اربط المتجر قبل المزامنة.";
+      setSallaActionError(message);
+      notify(message, false);
+      return;
+    }
     if (options.sync) setSyncing(true);
     if (!options.background && !options.sync) setRefreshing(true);
 
     try {
       if (options.sync) {
+        setSallaActionError("");
         const result = await api.syncSallaOrders();
         const products = result.products;
         const productSummary = products ? ` · المنتجات ${products.imported} جديد و${products.updated} محدث` : "";
@@ -349,13 +372,15 @@ export default function StoreOrdersPage({
       }
     } catch (error) {
       if (!options.background) {
-        notify(error instanceof Error ? error.message : "تعذر تحديث طلبات المتجر", false);
+        const message = error instanceof Error ? error.message : "تعذر تحديث طلبات المتجر";
+        if (options.sync) setSallaActionError(message);
+        notify(message, false);
       }
     } finally {
       setSyncing(false);
       setRefreshing(false);
     }
-  }, [notify, orderQuery, page, refreshStats, setOrderData, updateSeenOrders, urlFilters]);
+  }, [notify, orderQuery, page, refreshStats, sallaConnectionReason, sallaRemoteActionsAvailable, setOrderData, updateSeenOrders, urlFilters]);
   const refreshOrdersRef = useRef(refreshOrders);
   const realtimeRefreshTimerRef = useRef<number | null>(null);
 
@@ -416,7 +441,7 @@ export default function StoreOrdersPage({
   const allOrders = useMemo(() => pageData?.data || [], [pageData?.data]);
   const facets = pageData?.facets;
   const activeSallaStatuses = useMemo(
-    () => (sallaStatuses.data || []).filter((status) => status.is_active !== false && status.slug),
+    () => (sallaStatuses.data?.data || []).filter((status) => status.is_active !== false && status.slug),
     [sallaStatuses.data],
   );
   const availableStatuses = useMemo(() => {
@@ -546,6 +571,10 @@ export default function StoreOrdersPage({
       void sallaStatuses.refresh();
       return;
     }
+    if (!sallaRemoteActionsAvailable) {
+      notify(sallaConnectionReason || "متجر سلة غير متصل. اربط المتجر قبل تعديل حالة الطلب.", false);
+      return;
+    }
     if (!activeSallaStatuses.length) {
       notify("لم ترجع سلة أي حالات نشطة يمكن اختيارها.", false);
       return;
@@ -570,6 +599,10 @@ export default function StoreOrdersPage({
   };
 
   const openSallaEditForm = (order: api.StoreOrder) => {
+    if (!sallaRemoteActionsAvailable) {
+      notify(sallaConnectionReason || "متجر سلة غير متصل. اربط المتجر قبل تعديل بيانات الطلب.", false);
+      return;
+    }
     setModal({
       title: `تعديل بيانات الطلب ${order.order_number || order.order_id} في سلة`,
       wide: true,
@@ -613,6 +646,10 @@ export default function StoreOrdersPage({
     if (sallaStatuses.error) {
       notify("تعذر تحميل حالات سلة. أعد المحاولة قبل تحديث الطلبات المحددة.", false);
       void sallaStatuses.refresh();
+      return;
+    }
+    if (!sallaRemoteActionsAvailable) {
+      notify(sallaConnectionReason || "متجر سلة غير متصل. اربط المتجر قبل تحديث الطلبات المحددة.", false);
       return;
     }
     if (!activeSallaStatuses.length) {
@@ -659,11 +696,36 @@ export default function StoreOrdersPage({
         subtitle="لوحة تشغيل يومية للطلبات القادمة من سلة: مراجعة، جدولة، وتحويل للفنيين"
         actions={
           <>
-            <Button loading={syncing} onClick={() => refreshOrders({ sync: true })}><RefreshCcw size={16} /> تحديث فوري</Button>
+            <Button aria-describedby="salla-remote-actions-status" disabled={!sallaRemoteActionsAvailable} loading={syncing} onClick={() => refreshOrders({ sync: true })}><RefreshCcw size={16} /> تحديث فوري</Button>
             <Button tone="muted" loading={refreshing} onClick={() => refreshOrders()}><RefreshCcw size={16} /> تحديث الجدول</Button>
           </>
         }
       />
+
+      {sallaStatuses.loading ? (
+        <p id="salla-remote-actions-status" className="note warn" role="status" aria-live="polite">
+          جارٍ التحقق من اتصال متجر سلة قبل إتاحة العمليات البعيدة.
+        </p>
+      ) : !sallaRemoteActionsAvailable ? (
+        <div
+          id="salla-remote-actions-status"
+          className="note warn"
+          role={sallaStatuses.error ? "alert" : "status"}
+          aria-live={sallaStatuses.error ? undefined : "polite"}
+        >
+          <strong>عمليات سلة البعيدة متوقفة:</strong> {sallaConnectionReason}
+          {sallaStatuses.error && (
+            <div className="form-actions">
+              <Button tone="muted" onClick={() => sallaStatuses.refresh()}>إعادة التحقق من اتصال سلة</Button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <span id="salla-remote-actions-status" className="sr-only">اتصال متجر سلة متاح والعمليات البعيدة مفعّلة.</span>
+      )}
+      {sallaActionError && (
+        <p className="note danger" role="alert" aria-live="assertive">فشلت عملية سلة: {sallaActionError}</p>
+      )}
 
       <section className="ops-strip">
         <article className="ops-card">
@@ -730,7 +792,6 @@ export default function StoreOrdersPage({
                   ref={firstFilterControlRef}
                   name="salla_status_filter"
                   value={urlFilters.status}
-                  disabled={sallaStatuses.loading && !availableStatuses.length}
                   onChange={(event) => updateOrderFilter("status", event.target.value)}
                 >
                   <option value="">كل حالات سلة</option>
@@ -904,7 +965,8 @@ export default function StoreOrdersPage({
             </span>
             <Button
               tone="muted"
-              disabled={orders.loading || sallaStatuses.loading}
+              aria-describedby="salla-remote-actions-status"
+              disabled={orders.loading || sallaStatuses.loading || !sallaRemoteActionsAvailable}
               onClick={openBulkSallaStatusForm}
             >
               <RefreshCcw size={16} aria-hidden="true" /> تحديث حالة سلة للمحدد
@@ -1003,12 +1065,13 @@ export default function StoreOrdersPage({
                         <div className="table-actions">
                           <Button
                             tone="muted"
-                            disabled={sallaStatuses.loading}
+                            aria-describedby="salla-remote-actions-status"
+                            disabled={sallaStatuses.loading || !sallaRemoteActionsAvailable}
                             onClick={() => openSallaStatusForm(order)}
                           >
                             <RefreshCcw size={16} /> حالة سلة
                           </Button>
-                          <Button tone="muted" onClick={() => openSallaEditForm(order)}>
+                          <Button tone="muted" aria-describedby="salla-remote-actions-status" disabled={!sallaRemoteActionsAvailable} onClick={() => openSallaEditForm(order)}>
                             <PencilLine size={16} /> تعديل بيانات سلة
                           </Button>
                           <Button tone="muted" onClick={() => openWorkflowForm(order)}><UserRoundCog size={16} /> إدارة</Button>

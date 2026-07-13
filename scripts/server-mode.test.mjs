@@ -35,6 +35,9 @@ test("Docker runtime commit overrides stale env-file metadata", () => {
   assert.match(compose, /VITE_PUBLIC_CONTACT_PHONE:\s*\$\{VITE_PUBLIC_CONTACT_PHONE:-\}/);
   assert.match(rootCompose, /VITE_PUBLIC_CONTACT_PHONE:\s*\$\{VITE_PUBLIC_CONTACT_PHONE:\?[^}]+\}/);
   assert.match(rootCompose, /docker compose --env-file \.env\.production up -d --build/);
+  assert.match(rootCompose, /TRUST_PROXY_HEADERS:\s*"false"/);
+  assert.match(rootCompose, /127\.0\.0\.1:3000:8080/);
+  assert.doesNotMatch(rootCompose, /-\s*"3000:8080"/);
 });
 
 test("unsupported Cloud Run deployment fails closed instead of building an incomplete image", () => {

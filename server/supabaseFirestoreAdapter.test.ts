@@ -69,6 +69,47 @@ test("Supabase adapter stops after the first short page", async () => {
   });
 });
 
+test("Supabase adapter allocates invoice counters through the atomic RPC", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.SUPABASE_URL;
+  const originalKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  let call: { url: URL; init?: RequestInit } | undefined;
+  process.env.SUPABASE_URL = "https://example.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    call = {
+      url: new URL(typeof input === "string" || input instanceof URL ? input : input.url),
+      init,
+    };
+    return new Response("42", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const value = await createSupabaseFirestoreAdapter().allocateCounter(
+      "owner-a",
+      "tax_documents",
+      40,
+    );
+    assert.equal(value, 42);
+    assert.equal(call?.url.pathname, "/rest/v1/rpc/allocate_invoice_sequence");
+    assert.equal(call?.init?.method, "POST");
+    assert.deepEqual(JSON.parse(String(call?.init?.body)), {
+      p_owner_uid: "owner-a",
+      p_series: "tax_documents",
+      p_minimum_next: 40,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = originalUrl;
+    if (originalKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = originalKey;
+  }
+});
+
 test("Supabase adapter maps Salla order-sync fields and preserves JSON payloads", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.SUPABASE_URL;

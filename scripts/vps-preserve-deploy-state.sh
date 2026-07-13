@@ -76,7 +76,14 @@ CADDY_CANDIDATES="$(
 CADDY_CID="$(printf '%s\n' "$CADDY_CANDIDATES" | sed -n '1p')"
 
 ACTIVE_ROOT="$(cd "$(dirname "$COMPOSE_LABEL")/.." && pwd)"
-if [ -f "$ACTIVE_ROOT/.env.production" ]; then
+if [ -n "${CRM_ACTIVE_ENV_FILE:-}" ]; then
+  case "$CRM_ACTIVE_ENV_FILE" in /*) ;; *) fail "the requested active environment path is not absolute" ;; esac
+  [ -f "$CRM_ACTIVE_ENV_FILE" ] && [ ! -L "$CRM_ACTIVE_ENV_FILE" ] \
+    || fail "the requested active environment is not a regular non-symlink file"
+  [ "$(readlink -m -- "$CRM_ACTIVE_ENV_FILE")" = "$CRM_ACTIVE_ENV_FILE" ] \
+    || fail "the requested active environment cannot traverse symlinks"
+  ACTIVE_ENV="$CRM_ACTIVE_ENV_FILE"
+elif [ -f "$ACTIVE_ROOT/.env.production" ]; then
   ACTIVE_ENV="$ACTIVE_ROOT/.env.production"
 elif [ -f "$APP_DIR/.env.production" ]; then
   ACTIVE_ENV="$APP_DIR/.env.production"

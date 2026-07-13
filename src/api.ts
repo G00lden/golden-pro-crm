@@ -24,9 +24,30 @@ import {
   calculateDocumentTotals,
   type DiscountMode,
 } from "../shared/financial";
-import { resolveInvoiceTaxType, type InvoiceTaxType } from "../shared/zatca";
+import { displayInvoiceItems, verifiableInvoiceItems } from "../shared/invoiceItems";
+import {
+  canApplyCorrection,
+  canApplyOperationalInvoiceStatus,
+  correctionKindForStatus,
+  deriveInvoiceStatuses,
+  invoiceIsCreditNote,
+  invoiceIsMutableDraft,
+  invoiceLedgerSign,
+  type InvoiceAdjustmentKind,
+} from "../shared/invoiceLifecycle";
+import {
+  assertValidZatcaQrInput,
+  invoiceQrTimestamp,
+  resolveInvoiceTaxType,
+  type InvoiceTaxType,
+} from "../shared/zatca";
 import { isOutboundSimulation, prepareManualOutboundAction } from "./outboundAction";
 import { visibleCatalogProductCount, visibleCatalogProducts } from "../shared/productCatalogState";
+import { singleFlightByKey } from "./singleFlight";
+import {
+  mutateLocalInvoiceLedger,
+  type LocalInvoiceLedgerLockManager,
+} from "./localInvoiceLedger";
 
 export type { DiscountMode } from "../shared/financial";
 export type { InvoiceTaxType } from "../shared/zatca";
@@ -520,6 +541,15 @@ export type SallaOrderStatus = {
   is_active?: boolean;
 };
 
+export type SallaOrderStatusesResult = {
+  data: SallaOrderStatus[];
+  available: boolean;
+  configured: boolean;
+  linked: boolean;
+  status: SallaIntegrationStatus["status"];
+  reason: string | null;
+};
+
 export type SallaOrderStatusUpdateResult = {
   success: boolean;
   changed?: boolean;
@@ -855,6 +885,15 @@ export type InvoiceItem = {
 export type Invoice = {
   id: string;
   invoice_number: string;
+  document_kind?: "invoice" | "credit_note";
+  sequence_no?: number | null;
+  issued_at?: string | null;
+  source_invoice_id?: string | null;
+  source_invoice_number?: string | null;
+  adjustment_kind?: InvoiceAdjustmentKind | null;
+  adjustment_scope?: "full" | "partial" | null;
+  adjustment_reason?: string | null;
+  idempotency_key?: string | null;
   quote_id?: string | null;
   customer_id?: string | null;
   customer_name: string;
@@ -879,6 +918,7 @@ export type Invoice = {
   total_without_vat: number;
   currency: string;
   items: InvoiceItem[];
+  financials_verifiable?: boolean;
   notes?: string;
   terms?: string;
   seller_name: string;
@@ -890,7 +930,14 @@ export type Invoice = {
   updatedAt?: string;
 };
 
-export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "invoice_type" | "subtotal" | "vat_amount" | "total_with_vat" | "total_without_vat" | "createdBy" | "createdAt" | "updatedAt" | "qr_code">> & {
+export type InvoiceInput = Partial<Omit<Invoice,
+  | "id" | "invoice_number" | "invoice_type"
+  | "document_kind" | "sequence_no" | "issued_at"
+  | "source_invoice_id" | "source_invoice_number"
+  | "adjustment_kind" | "adjustment_scope" | "adjustment_reason" | "idempotency_key"
+  | "subtotal" | "vat_amount" | "total_with_vat" | "total_without_vat"
+  | "createdBy" | "createdAt" | "updatedAt" | "qr_code"
+>> & {
   customer_name: string;
   items: InvoiceItem[];
   invoice_type?: InvoiceTaxType | "auto";
@@ -898,6 +945,7 @@ export type InvoiceInput = Partial<Omit<Invoice, "id" | "invoice_number" | "invo
 
 export type InvoiceStats = {
   total: number;
+  credit_notes?: number;
   draft: number;
   issued: number;
   sent: number;
@@ -948,11 +996,13 @@ type LocalDb = {
   reminders: Reminder[];
   quotes: Quote[];
   invoices: Invoice[];
+  sequences: { tax_documents: number };
   settings: Settings;
 };
 
-const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24, seller_name: "Breexe Pro Co.", seller_vat_number: "313049114100003", seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض" });
+const defaultSettings = (): Settings => ({ techs: 3, jobs_per_tech: 4, response_rate: 50, maxDaily: 24, seller_name: "BreeXe Pro Co.", seller_vat_number: "313049114100003", seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض" });
 const localDbKey = (uid: string) => `golden-pro-crm-local-db:${uid}`;
+const localInvoiceLedgerKey = (uid: string) => `golden-pro-crm-local-invoice-ledger:${uid}`;
 const localId = (prefix: string) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const withoutId = <T extends { id: string }>(item: T): Omit<T, "id"> => {
   const { id: _id, ...data } = item;
@@ -983,34 +1033,120 @@ function emptyLocalDb(): LocalDb {
     reminders: [],
     quotes: [],
     invoices: [],
+    sequences: { tax_documents: 0 },
     settings: defaultSettings(),
   };
 }
 
 function loadLocalDb(uid: string): LocalDb {
   if (typeof window === "undefined") return emptyLocalDb();
+  let raw: Partial<LocalDb> = {};
+  const legacyText = window.localStorage.getItem(localDbKey(uid));
+  let legacyCorrupt = false;
   try {
-    const raw = JSON.parse(window.localStorage.getItem(localDbKey(uid)) || "{}") as Partial<LocalDb>;
-    return {
-      ...emptyLocalDb(),
-      ...raw,
-      customers: raw.customers || [],
-      products: raw.products || [],
-      installations: raw.installations || [],
-      technicians: raw.technicians || [],
-      bookings: raw.bookings || [],
-      reminders: raw.reminders || [],
-      quotes: raw.quotes || [],
-      invoices: raw.invoices || [],
-      settings: { ...defaultSettings(), ...(raw.settings || {}) },
-    };
+    raw = JSON.parse(legacyText || "{}") as Partial<LocalDb>;
   } catch {
-    return emptyLocalDb();
+    legacyCorrupt = legacyText !== null;
+    raw = {};
   }
+
+  if (raw.invoices !== undefined && !Array.isArray(raw.invoices)) legacyCorrupt = true;
+  let invoices = Array.isArray(raw.invoices) ? raw.invoices : [];
+  let storedSequence = Number(raw.sequences?.tax_documents || 0);
+  const ledgerText = window.localStorage.getItem(localInvoiceLedgerKey(uid));
+  if (ledgerText !== null) {
+    try {
+      const ledger = JSON.parse(ledgerText) as Pick<LocalDb, "invoices" | "sequences">;
+      if (!Array.isArray(ledger.invoices)) throw new Error("missing invoices");
+      if (!Number.isSafeInteger(Number(ledger.sequences?.tax_documents)) || Number(ledger.sequences.tax_documents) < 0) {
+        throw new Error("invalid sequence");
+      }
+      invoices = ledger.invoices;
+      storedSequence = Number(ledger.sequences.tax_documents);
+    } catch {
+      throw new Error("تعذر قراءة سجل الفواتير المحلي المحمي؛ أُوقفت الكتابة حتى لا يعاد استخدام رقم ضريبي.");
+    }
+  } else if (legacyCorrupt) {
+    throw new Error("تعذر ترحيل سجل الفواتير المحلي القديم بأمان؛ أُوقفت الكتابة حتى لا يعاد استخدام رقم ضريبي.");
+  }
+  if (!Number.isSafeInteger(storedSequence) || storedSequence < 0) {
+    throw new Error("عداد مستندات الفواتير المحلي غير صالح؛ أُوقفت الكتابة لحماية التسلسل.");
+  }
+  const taxDocumentSequence = Math.max(
+    storedSequence,
+    invoices.reduce((max, invoice) => Math.max(
+      max,
+      sequenceOf(invoice.invoice_number),
+      Number.isSafeInteger(Number(invoice.sequence_no)) ? Number(invoice.sequence_no) : 0,
+    ), 0),
+  );
+  return {
+    ...emptyLocalDb(),
+    ...raw,
+    customers: raw.customers || [],
+    products: raw.products || [],
+    installations: raw.installations || [],
+    technicians: raw.technicians || [],
+    bookings: raw.bookings || [],
+    reminders: raw.reminders || [],
+    quotes: raw.quotes || [],
+    invoices,
+    sequences: { tax_documents: taxDocumentSequence },
+    settings: { ...defaultSettings(), ...(raw.settings || {}) },
+  };
 }
 
 function saveLocalDb(uid: string, data: LocalDb) {
-  window.localStorage.setItem(localDbKey(uid), JSON.stringify(data));
+  // The invoice ledger has a dedicated key. Preserve its legacy copy here so
+  // an unrelated stale write cannot replace invoices or lower their counter.
+  let legacyInvoices: Invoice[] = [];
+  let legacySequences: LocalDb["sequences"] = { tax_documents: 0 };
+  try {
+    const persisted = JSON.parse(window.localStorage.getItem(localDbKey(uid)) || "{}") as Partial<LocalDb>;
+    legacyInvoices = Array.isArray(persisted.invoices) ? persisted.invoices : [];
+    const sequence = Number(persisted.sequences?.tax_documents || 0);
+    if (Number.isSafeInteger(sequence) && sequence >= 0) {
+      legacySequences = { tax_documents: sequence };
+    }
+  } catch {
+    // A malformed legacy snapshot has no authority over the dedicated ledger.
+  }
+  window.localStorage.setItem(localDbKey(uid), JSON.stringify({
+    ...data,
+    invoices: legacyInvoices,
+    sequences: legacySequences,
+  }));
+}
+
+function saveLocalInvoiceLedger(uid: string, data: LocalDb) {
+  window.localStorage.setItem(localInvoiceLedgerKey(uid), JSON.stringify({
+    invoices: data.invoices,
+    sequences: data.sequences,
+  }));
+}
+
+async function withLocalInvoiceLedgerLock<T>(
+  uid: string,
+  mutate: (data: LocalDb, allocateSequence: () => number) => T | Promise<T>,
+) {
+  const locks = typeof navigator === "undefined"
+    ? undefined
+    : (navigator as Navigator & {
+        locks?: LocalInvoiceLedgerLockManager;
+      }).locks;
+  if (!locks) {
+    throw new Error("الكتابة في سجل الفواتير المحلي متوقفة لأن هذا المتصفح لا يدعم القفل الذري. استخدم متصفحًا يدعم Web Locks أو استخدم الخادم.");
+  }
+  return mutateLocalInvoiceLedger({
+    locks,
+    lockName: `golden-pro-crm:invoice-ledger:${uid}`,
+    load: () => loadLocalDb(uid),
+    save: (data) => saveLocalInvoiceLedger(uid, data),
+    invoices: (data) => data.invoices,
+    getSequence: (data) => data.sequences.tax_documents,
+    setSequence: (data, value) => { data.sequences.tax_documents = value; },
+    mutate,
+  });
 }
 
 function localInstallationWithDays(item: Installation): Installation {
@@ -1857,9 +1993,9 @@ export const deleteCustomer = (id: string) => {
 // Extract the trailing sequence from a formatted number like "INV-20260706-014".
 function sequenceOf(value: unknown): number {
   const str = String(value ?? "");
-  const tail = str.includes("-") ? str.slice(str.lastIndexOf("-") + 1) : str;
-  const n = parseInt(tail, 10);
-  return Number.isFinite(n) ? n : 0;
+  const match = str.match(/^(?:INV|CN|QT)-.+-(\d+)$/i);
+  const n = match ? Number(match[1]) : 0;
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
 }
 
 // One past the highest number already issued, so a deletion never lets a
@@ -2213,28 +2349,14 @@ export const sendQuoteWhatsApp = async (quote: Quote, message: string) => {
 
 /* ── Invoice helpers ───────────────────────────────────── */
 
-function invoiceNumber(seed = Date.now(), index = 1) {
+function invoiceNumber(seed: string | number | Date = Date.now(), index = 1) {
   const d = new Date(seed);
   const ymd = d.toISOString().slice(0, 10).replace(/-/g, "");
   return `INV-${ymd}-${String(index).padStart(3, "0")}`;
 }
 
 function normalizeInvoiceItems(items: InvoiceItem[] = []) {
-  return items
-    .map((item) => {
-      const quantity = Math.max(0, Number(item.quantity || 0));
-      const unitPrice = Math.max(0, Number(item.unit_price || 0));
-      return {
-        product_id: item.product_id || null,
-        product_sku: String(item.product_sku || "").trim(),
-        description: String(item.description || "").trim(),
-        quantity,
-        unit_price: unitPrice,
-        total: quantity * unitPrice,
-        vat_excluded: item.vat_excluded !== undefined ? item.vat_excluded : true,
-      };
-    })
-    .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
+  return displayInvoiceItems(items);
 }
 
 // Treat an explicit 0 (zero-rated) as a valid VAT rate. Only an unset value
@@ -2267,6 +2389,67 @@ function invoiceTotals(
   };
 }
 
+function creditNoteNumber(seed: string | number | Date = Date.now(), index = 1) {
+  const d = new Date(seed);
+  const ymd = d.toISOString().slice(0, 10).replace(/-/g, "");
+  return `CN-${ymd}-${String(index).padStart(3, "0")}`;
+}
+
+function draftInvoiceNumber() {
+  return `DRAFT-${localId("invoice").replace(/[^A-Za-z0-9]/g, "").slice(-12).toUpperCase()}`;
+}
+
+function invoiceDiscountValue(invoice: Pick<Invoice, "discount" | "discount_value" | "discount_mode">) {
+  const explicit = Number(invoice.discount_value);
+  const historicalAmount = Number(invoice.discount);
+  if (invoice.discount_mode === "percent") {
+    return Number.isFinite(explicit) ? explicit : 0;
+  }
+  if (Number.isFinite(explicit) && (explicit > 0 || !Number.isFinite(historicalAmount) || historicalAmount <= 0)) {
+    return explicit;
+  }
+  return Number.isFinite(historicalAmount) ? historicalAmount : 0;
+}
+
+/**
+ * Treat line items as the financial source of truth. This repairs legacy
+ * local/Firestore records at the adapter boundary before totals reach the UI,
+ * statistics, printable header, or QR payload.
+ */
+function normalizeInvoiceRecord(invoice: Invoice): Invoice {
+  const normalizedKind: Invoice = {
+    ...invoice,
+    document_kind: invoiceIsCreditNote(invoice) ? "credit_note" : "invoice",
+  };
+  if (normalizedKind.financials_verifiable === false) return normalizedKind;
+  const items = verifiableInvoiceItems(normalizedKind.items);
+  if (!items) return { ...normalizedKind, financials_verifiable: false };
+  const totals = invoiceTotals(
+    items,
+    invoiceDiscountValue(normalizedKind),
+    normalizedKind.vat_percent,
+    normalizedKind.discount_mode === "percent" ? "percent" : "fixed",
+    normalizedKind.additional_fee,
+  );
+  return { ...normalizedKind, items, ...totals, financials_verifiable: true };
+}
+
+function assertInvoiceSaveable(invoice: Pick<
+  Invoice,
+  "items" | "issue_date" | "createdAt" | "seller_name" | "seller_vat_number" | "total_with_vat" | "vat_amount"
+>) {
+  if (!verifiableInvoiceItems(invoice.items)) {
+    throw new Error("كل بند في الفاتورة يحتاج وصفًا وكمية أكبر من صفر وسعرًا غير سالب.");
+  }
+  assertValidZatcaQrInput({
+    sellerName: invoice.seller_name,
+    vatNumber: invoice.seller_vat_number,
+    timestamp: invoiceQrTimestamp({ issueDate: invoice.issue_date, createdAt: invoice.createdAt }),
+    total: invoice.total_with_vat,
+    vatTotal: invoice.vat_amount,
+  });
+}
+
 function filterInvoices(invoices: Invoice[], filter: { search?: string; status?: string } = {}) {
   const search = String(filter.search || "").trim();
   return invoices
@@ -2279,29 +2462,43 @@ function filterInvoices(invoices: Invoice[], filter: { search?: string; status?:
 }
 
 function invoiceStats(invoices: Invoice[]): InvoiceStats {
+  const sourceInvoices = invoices.filter((item) => !invoiceIsCreditNote(item));
   return {
     total: invoices.length,
-    draft: invoices.filter((item) => item.status === "draft").length,
-    issued: invoices.filter((item) => item.status === "issued").length,
-    sent: invoices.filter((item) => item.status === "sent").length,
-    paid: invoices.filter((item) => item.status === "paid").length,
-    cancelled: invoices.filter((item) => item.status === "cancelled").length,
-    refunded: invoices.filter((item) => item.status === "refunded").length,
-    total_value: invoices.reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
-    paid_value: invoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+    credit_notes: invoices.length - sourceInvoices.length,
+    draft: sourceInvoices.filter((item) => item.status === "draft").length,
+    issued: sourceInvoices.filter((item) => item.status === "issued").length,
+    sent: sourceInvoices.filter((item) => item.status === "sent").length,
+    paid: sourceInvoices.filter((item) => item.status === "paid").length,
+    cancelled: sourceInvoices.filter((item) => item.status === "cancelled").length,
+    refunded: sourceInvoices.filter((item) => item.status === "refunded").length,
+    total_value: invoices.reduce((sum, item) => sum + invoiceLedgerSign(item) * Number(item.total_with_vat || 0), 0),
+    paid_value: sourceInvoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
   };
 }
 
 function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings, existing?: Invoice): Invoice {
-  const items = normalizeInvoiceItems(data.items);
+  const items = verifiableInvoiceItems(data.items);
+  if (!items) {
+    throw new Error("كل بند في الفاتورة يحتاج وصفًا وكمية أكبر من صفر وسعرًا غير سالب.");
+  }
   const discountMode: DiscountMode = (data.discount_mode ?? existing?.discount_mode) === "percent" ? "percent" : "fixed";
   const discountValue = data.discount_value ?? data.discount ?? existing?.discount_value ?? existing?.discount ?? 0;
   const additionalFee = data.additional_fee ?? existing?.additional_fee ?? 0;
   const totals = invoiceTotals(items, discountValue, data.vat_percent ?? existing?.vat_percent, discountMode, additionalFee);
   const now = nowIso();
-  return {
+  const invoice: Invoice = {
     id: existing?.id || localId("inv"),
     invoice_number: existing?.invoice_number || "",
+    document_kind: existing?.document_kind || "invoice",
+    sequence_no: existing?.sequence_no ?? null,
+    issued_at: existing?.issued_at ?? null,
+    source_invoice_id: existing?.source_invoice_id ?? null,
+    source_invoice_number: existing?.source_invoice_number ?? null,
+    adjustment_kind: existing?.adjustment_kind ?? null,
+    adjustment_scope: existing?.adjustment_scope ?? null,
+    adjustment_reason: existing?.adjustment_reason ?? null,
+    idempotency_key: existing?.idempotency_key ?? null,
     quote_id: data.quote_id ?? existing?.quote_id ?? null,
     customer_id: data.customer_id || existing?.customer_id || null,
     customer_name: String(data.customer_name || existing?.customer_name || "").trim(),
@@ -2332,6 +2529,8 @@ function localInvoicePayload(data: InvoiceInput, uid: string, settings: Settings
     updatedAt: now,
     ...totals,
   };
+  assertInvoiceSaveable(invoice);
+  return invoice;
 }
 
 /* ── Invoice API ───────────────────────────────────────── */
@@ -2341,184 +2540,211 @@ export const getInvoices = async (filter: { search?: string; status?: string } =
   if (!user) return { data: [], total: 0, stats: invoiceStats([]) };
   const uid = user.uid;
   if (user.local) {
-    const all = loadLocalDb(uid).invoices;
+    const localDb = loadLocalDb(uid);
+    const normalized = localDb.invoices.map(normalizeInvoiceRecord);
+    const all = deriveInvoiceStatuses(normalized);
     const data = filterInvoices(all, filter);
     return { data, total: data.length, stats: invoiceStats(all) };
   }
-  if (serverDataEnabled()) {
-    const params = new URLSearchParams();
-    if (filter.search) params.set("search", filter.search);
-    if (filter.status && filter.status !== "all") params.set("status", filter.status);
-    return apiFetch<InvoiceListResponse>(`/api/invoices${params.toString() ? `?${params}` : ""}`);
-  }
-  const snap = await getDocs(query(collection(db, "invoices"), where("createdBy", "==", uid), orderBy("createdAt", "desc"), limit(300)));
-  const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Invoice);
-  const data = filterInvoices(all, filter);
-  return { data, total: data.length, stats: invoiceStats(all) };
+  const params = new URLSearchParams();
+  if (filter.search) params.set("search", filter.search);
+  if (filter.status && filter.status !== "all") params.set("status", filter.status);
+  const response = await apiFetch<InvoiceListResponse>(`/api/invoices${params.toString() ? `?${params}` : ""}`);
+  return { ...response, data: response.data.map(normalizeInvoiceRecord) };
 };
 
 export const createInvoice = async (data: InvoiceInput) => {
   const user = getUserOrThrow();
   const uid = user.uid;
   if (user.local) {
-    const localDb = loadLocalDb(uid);
-    let invoice = localInvoicePayload(data, uid, localDb.settings);
-    invoice.invoice_number = invoiceNumber(Date.now(), nextNumberIndex(localDb.invoices, "invoice_number"));
-    localDb.invoices.unshift(invoice);
-    saveLocalDb(uid, localDb);
-    return invoice.id;
+    const requestedStatus = data.status || "issued";
+    if (requestedStatus !== "draft" && requestedStatus !== "issued") {
+      throw new Error("عند الإنشاء اختر مسودة أو مصدرة فقط.");
+    }
+    if (requestedStatus === "draft") {
+      return withLocalInvoiceLedgerLock(uid, (localDb) => {
+        const invoice = localInvoicePayload({ ...data, status: "draft" }, uid, localDb.settings);
+        invoice.invoice_number = draftInvoiceNumber();
+        invoice.document_kind = "invoice";
+        invoice.sequence_no = null;
+        invoice.issued_at = null;
+        invoice.idempotency_key = `invoice:${crypto.randomUUID()}`;
+        localDb.invoices.unshift(invoice);
+        return invoice.id;
+      });
+    }
+    return withLocalInvoiceLedgerLock(uid, (localDb, allocateSequence) => {
+      const sequence = allocateSequence();
+      const issuedAt = nowIso();
+      const invoice = localInvoicePayload({ ...data, status: "issued" }, uid, localDb.settings);
+      invoice.invoice_number = invoiceNumber(issuedAt, sequence);
+      invoice.document_kind = "invoice";
+      invoice.sequence_no = sequence;
+      invoice.issued_at = issuedAt;
+      invoice.idempotency_key = `invoice:${crypto.randomUUID()}`;
+      localDb.invoices.unshift(invoice);
+      return invoice.id;
+    });
   }
-  if (serverDataEnabled()) {
-    return apiFetch<{ id: string }>("/api/invoices", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }).then((result) => result.id);
-  }
-  const existing = await getInvoices();
-  const id = doc(collection(db, "invoices")).id;
-  const payload = localInvoicePayload(data, uid, defaultSettings());
-  payload.id = id;
-  payload.invoice_number = invoiceNumber(Date.now(), nextNumberIndex(existing.data, "invoice_number"));
-  await wrap(() => setDoc(doc(db, "invoices", id), withoutId(payload)), OperationType.CREATE, `invoices/${id}`);
-  return id;
+  const idempotencyKey = `invoice:${crypto.randomUUID()}`;
+  return apiFetch<{ id: string }>("/api/invoices", {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(data),
+  }).then((result) => result.id);
 };
 
 export const updateInvoice = async (id: string, data: InvoiceInput) => {
   const user = getUserOrThrow();
   if (user.local) {
-    const localDb = loadLocalDb(user.uid);
-    localDb.invoices = localDb.invoices.map((item) =>
-      item.id === id ? localInvoicePayload(data, user.uid, localDb.settings, item) : item,
-    );
-    saveLocalDb(user.uid, localDb);
-    return;
+    const requestedStatus = data.status || "draft";
+    if (requestedStatus !== "draft" && requestedStatus !== "issued") {
+      throw new Error("يمكن إبقاء المسودة أو إصدارها فقط من نموذج التحرير.");
+    }
+    if (requestedStatus === "issued") {
+      return withLocalInvoiceLedgerLock(user.uid, (localDb, allocateSequence) => {
+        const current = localDb.invoices.find((item) => item.id === id);
+        if (!current) throw new Error("الفاتورة غير موجودة.");
+        if (!invoiceIsMutableDraft(current)) throw new Error("الفاتورة المصدرة سجل مالي ثابت؛ يمكن تعديل المسودة فقط.");
+        const sequence = allocateSequence();
+        const issuedAt = nowIso();
+        const updated = localInvoicePayload({ ...data, status: "issued" }, user.uid, localDb.settings, current);
+        updated.invoice_number = invoiceNumber(issuedAt, sequence);
+        updated.sequence_no = sequence;
+        updated.issued_at = issuedAt;
+        localDb.invoices = localDb.invoices.map((item) => item.id === id ? updated : item);
+      });
+    }
+    return withLocalInvoiceLedgerLock(user.uid, (localDb) => {
+      const current = localDb.invoices.find((item) => item.id === id);
+      if (!current) throw new Error("الفاتورة غير موجودة.");
+      if (!invoiceIsMutableDraft(current)) throw new Error("الفاتورة المصدرة سجل مالي ثابت؛ يمكن تعديل المسودة فقط.");
+      localDb.invoices = localDb.invoices.map((item) =>
+        item.id === id ? localInvoicePayload({ ...data, status: "draft" }, user.uid, localDb.settings, item) : item,
+      );
+    });
   }
-  if (serverDataEnabled()) {
-    return apiFetch(`/api/invoices/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }).then(() => undefined);
-  }
-  const items = normalizeInvoiceItems(data.items);
-  return wrap(
-    () => updateDoc(doc(db, "invoices", id), {
-      customer_id: data.customer_id || null,
-      customer_name: String(data.customer_name || "").trim(),
-      customer_phone: String(data.customer_phone || "").trim(),
-      customer_city: String(data.customer_city || "").trim(),
-      title: String(data.title || "").trim(),
-      status: data.status || "issued",
-      issue_date: data.issue_date || today(),
-      due_date: data.due_date || null,
-      payment_method: data.payment_method || "",
-      currency: data.currency || "SAR",
-      items,
-      notes: String(data.notes || "").trim(),
-      terms: String(data.terms || "").trim(),
-      seller_name: String(data.seller_name || "").trim(),
-      seller_vat_number: String(data.seller_vat_number || "").trim(),
-      seller_address: String(data.seller_address || "").trim(),
-      invoice_type: resolveInvoiceTaxType({
-        requested: data.invoice_type,
-        buyerVat: data.customer_vat,
-        taxableAmount: invoiceTotals(
-          items,
-          data.discount_value ?? data.discount,
-          data.vat_percent,
-          data.discount_mode,
-          data.additional_fee,
-        ).total_without_vat,
-      }),
-      customer_vat: String(data.customer_vat || "").trim(),
-      ...invoiceTotals(
-        items,
-        data.discount_value ?? data.discount,
-        data.vat_percent,
-        data.discount_mode,
-        data.additional_fee,
-      ),
-      updatedAt: nowIso(),
-    }),
-    OperationType.UPDATE,
-    `invoices/${id}`,
-  );
+  return apiFetch(`/api/invoices/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  }).then(() => undefined);
 };
 
-export const setInvoiceStatus = async (id: string, status: InvoiceStatus) => {
+export const setInvoiceStatus = async (id: string, status: InvoiceStatus, reason = "") => {
   const user = getUserOrThrow();
   const now = nowIso();
   if (user.local) {
-    const localDb = loadLocalDb(user.uid);
-    localDb.invoices = localDb.invoices.map((item) =>
-      item.id === id
-        ? {
-            ...item,
-            status,
-            paid_at: status === "paid" ? item.paid_at || now : item.paid_at || null,
-            updatedAt: now,
-          }
-        : item,
-    );
-    saveLocalDb(user.uid, localDb);
-    return;
+    const correctionKind = correctionKindForStatus(status);
+    if (correctionKind) {
+      const correctionReason = reason.trim();
+      if (correctionReason.length < 3) throw new Error("سبب الإلغاء أو الاسترداد مطلوب لإنشاء الإشعار الدائن.");
+      return withLocalInvoiceLedgerLock(user.uid, (localDb, allocateSequence) => {
+        const source = localDb.invoices.find((item) => item.id === id);
+        if (!source) throw new Error("الفاتورة غير موجودة.");
+        const existingCredit = localDb.invoices.find((item) =>
+          invoiceIsCreditNote(item)
+          && item.source_invoice_id === id
+          && item.adjustment_kind === correctionKind
+        );
+        if (existingCredit) return;
+        if (!canApplyCorrection(source, correctionKind)) {
+          throw new Error(correctionKind === "refund"
+            ? "الاسترداد يتطلب فاتورة مدفوعة."
+            : "الإلغاء يتطلب فاتورة مصدرة أو مرسلة.");
+        }
+        const sequence = allocateSequence();
+        const issuedAt = nowIso();
+        const correctionLabel = correctionKind === "refund" ? "استرداد كامل" : "إلغاء كامل";
+        const creditNote: Invoice = {
+          ...source,
+          id: localId("credit"),
+          invoice_number: creditNoteNumber(issuedAt, sequence),
+          document_kind: "credit_note",
+          sequence_no: sequence,
+          issued_at: issuedAt,
+          source_invoice_id: source.id,
+          source_invoice_number: source.invoice_number,
+          adjustment_kind: correctionKind,
+          adjustment_scope: "full",
+          adjustment_reason: correctionReason,
+          idempotency_key: `credit:${source.id}:${correctionKind}`,
+          title: `إشعار دائن - ${correctionLabel} للفاتورة ${source.invoice_number}`,
+          status: "issued",
+          issue_date: today(),
+          due_date: null,
+          paid_at: null,
+          notes: correctionReason,
+          createdAt: issuedAt,
+          updatedAt: issuedAt,
+        };
+        assertInvoiceSaveable(creditNote);
+        localDb.invoices.unshift(creditNote);
+      });
+    }
+    return withLocalInvoiceLedgerLock(user.uid, (localDb, allocateSequence) => {
+      const current = localDb.invoices.find((item) => item.id === id);
+      if (!current) throw new Error("الفاتورة غير موجودة.");
+      if (current.status === status) return;
+      if (!canApplyOperationalInvoiceStatus(current, status)) {
+        throw new Error("انتقال حالة الفاتورة غير مسموح. استخدم الإشعار الدائن للإلغاء أو الاسترداد.");
+      }
+      if (status === "issued") {
+        const lockedCurrent = localDb.invoices.find((item) => item.id === id);
+        if (!lockedCurrent || !invoiceIsMutableDraft(lockedCurrent)) {
+          throw new Error("لا يمكن إصدار هذا السجل لأنه ليس مسودة قابلة للإصدار.");
+        }
+        const issuedAt = nowIso();
+        const sequence = allocateSequence();
+        lockedCurrent.status = "issued";
+        lockedCurrent.invoice_number = invoiceNumber(issuedAt, sequence);
+        lockedCurrent.sequence_no = sequence;
+        lockedCurrent.issued_at = issuedAt;
+        lockedCurrent.updatedAt = issuedAt;
+        return;
+      }
+      localDb.invoices = localDb.invoices.map((item) => item.id === id ? {
+        ...item,
+        status,
+        paid_at: status === "paid" ? item.paid_at || now : item.paid_at || null,
+        updatedAt: now,
+      } : item);
+    });
   }
-  if (serverDataEnabled()) {
-    return apiFetch(`/api/invoices/${id}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status }),
-    }).then(() => undefined);
-  }
-  const snap = await getDoc(doc(db, "invoices", id));
-  const prevPaidAt = (snap.exists() ? (snap.data() as Invoice).paid_at : null) ?? null;
-  return wrap(
-    () => updateDoc(doc(db, "invoices", id), {
-      status,
-      // Preserve the original payment time; only stamp it the first time paid.
-      paid_at: prevPaidAt || (status === "paid" ? now : null),
-      updatedAt: now,
-    }),
-    OperationType.UPDATE,
-    `invoices/${id}`,
-  );
+  return apiFetch(`/api/invoices/${id}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status, reason: reason.trim() || undefined }),
+  }).then(() => undefined);
 };
 
-export const deleteInvoice = (id: string) => {
+export const deleteInvoice = async (id: string) => {
   const user = getUserOrThrow();
   if (user.local) {
-    const localDb = loadLocalDb(user.uid);
-    localDb.invoices = localDb.invoices.filter((item) => item.id !== id);
-    saveLocalDb(user.uid, localDb);
-    return Promise.resolve();
+    return withLocalInvoiceLedgerLock(user.uid, (localDb) => {
+      const current = localDb.invoices.find((item) => item.id === id);
+      if (!current) throw new Error("الفاتورة غير موجودة.");
+      if (!invoiceIsMutableDraft(current)) throw new Error("لا يمكن حذف فاتورة مصدرة أو إشعار دائن؛ الحذف متاح للمسودة فقط.");
+      localDb.invoices = localDb.invoices.filter((item) => item.id !== id);
+    });
   }
-  if (serverDataEnabled()) {
-    return apiFetch(`/api/invoices/${id}`, { method: "DELETE" }).then(() => undefined);
-  }
-  return wrap(() => deleteDoc(doc(db, "invoices", id)), OperationType.DELETE, `invoices/${id}`);
+  return apiFetch(`/api/invoices/${id}`, { method: "DELETE" }).then(() => undefined);
 };
 
 export const convertQuoteToInvoice = async (quoteId: string) => {
   const user = getUserOrThrow();
   const uid = user.uid;
 
-  if (!user.local && serverDataEnabled()) {
+  if (!user.local) {
     return apiFetch<{ id: string }>(`/api/quotes/${quoteId}/convert-to-invoice`, {
       method: "POST",
     }).then((result) => result.id);
   }
 
   let quote: Quote | null = null;
-  if (user.local) {
-    const localDb = loadLocalDb(uid);
-    quote = localDb.quotes.find((q) => q.id === quoteId) || null;
-  } else {
-    const snap = await getDoc(doc(db, "quotes", quoteId));
-    if (snap.exists()) quote = { id: snap.id, ...snap.data() } as Quote;
-  }
+  const localDb = loadLocalDb(uid);
+  quote = localDb.quotes.find((q) => q.id === quoteId) || null;
   if (!quote) throw new Error("عرض السعر غير موجود");
 
-  const settings = user.local
-    ? loadLocalDb(uid).settings
-    : defaultSettings();
+  const settings = localDb.settings;
 
   const invoiceInput: InvoiceInput = {
     quote_id: quote.id,
@@ -2556,31 +2782,11 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
   return createInvoice(invoiceInput);
 };
 
-export const generateInvoiceQRCode = (invoice: Invoice): string => {
-  const source = invoice.createdAt || `${invoice.issue_date}T00:00:00Z`;
-  const parsed = new Date(source);
-  const timestamp = (Number.isNaN(parsed.getTime()) ? new Date(`${invoice.issue_date}T00:00:00Z`) : parsed).toISOString().replace(/\.\d{3}Z$/, "Z");
-  const total = invoice.total_with_vat.toFixed(2);
-  const vatAmount = invoice.vat_amount.toFixed(2);
-
-  const tlvData: Array<[number, string]> = [
-    [1, invoice.seller_name],
-    [2, invoice.seller_vat_number],
-    [3, timestamp],
-    [4, total],
-    [5, vatAmount],
-  ];
-
-  const encoder = new TextEncoder();
-  const bytes: number[] = [];
-
-  for (const [tag, value] of tlvData) {
-    const valueBytes = Array.from(encoder.encode(String(value)));
-    bytes.push(tag, valueBytes.length);
-    bytes.push(...valueBytes);
-  }
-
-  return btoa(String.fromCharCode(...bytes));
+type InvoiceWhatsAppResponse = {
+  success: boolean;
+  dry_run?: boolean;
+  result: unknown;
+  invoice?: Invoice | null;
 };
 
 export const sendInvoiceWhatsApp = async (invoice: Invoice, message: string) => {
@@ -2592,7 +2798,7 @@ export const sendInvoiceWhatsApp = async (invoice: Invoice, message: string) => 
     invoice_number: invoice.invoice_number,
   };
   if (serverDataEnabled() && !user?.local) {
-    const response = await apiFetch<{ success: boolean; dry_run?: boolean; result: unknown }>(`/api/invoices/${invoice.id}/send-whatsapp`, {
+    const response = await apiFetch<InvoiceWhatsAppResponse>(`/api/invoices/${invoice.id}/send-whatsapp`, {
       method: "POST",
       body: JSON.stringify({
         phone: invoice.customer_phone,
@@ -2603,7 +2809,7 @@ export const sendInvoiceWhatsApp = async (invoice: Invoice, message: string) => 
     });
     return { ...response, dry_run: isOutboundSimulation(response.result, outbound.dryRun) };
   }
-  const response = await apiFetch<{ success: boolean; dry_run?: boolean; result: unknown }>("/api/whatsapp/send-test", {
+  const response = await apiFetch<InvoiceWhatsAppResponse>("/api/whatsapp/send-test", {
     method: "POST",
     body: JSON.stringify({
       phone: invoice.customer_phone,
@@ -3386,6 +3592,14 @@ function buildDemoDataSet(uid: string, count = 10) {
   const demoInvoice: Invoice = {
     id: localId("inv"),
     invoice_number: invoiceNumber(Date.now(), 1),
+    document_kind: "invoice",
+    sequence_no: 1,
+    issued_at: now,
+    source_invoice_id: null,
+    adjustment_kind: null,
+    adjustment_scope: null,
+    adjustment_reason: null,
+    idempotency_key: `demo:${uid}:invoice`,
     quote_id: null,
     customer_id: customers[0]?.id || null,
     customer_name: customers[0]?.name || "عميل تجربة",
@@ -3409,9 +3623,9 @@ function buildDemoDataSet(uid: string, count = 10) {
     total_with_vat: 920,
     total_without_vat: 800,
     notes: "",
-    terms: "فاتورة ضريبية مبسطة - متوافقة مع ZATCA",
-    seller_name: "Breexe Pro Co.",
-    seller_vat_number: "300000000000003",
+    terms: "",
+    seller_name: "BreeXe Pro Co.",
+    seller_vat_number: "313049114100003",
     seller_address: "الرياض، المملكة العربية السعودية",
     qr_code: "",
     createdBy: uid,
@@ -3435,14 +3649,29 @@ export const seedDemoData = async (count = 10) => {
   const demo = buildDemoDataSet(uid, count);
 
   if (user.local) {
-    const localDb = loadLocalDb(uid);
-    localDb.products.push(...demo.products);
-    localDb.technicians.push(...demo.technicians);
-    localDb.customers.push(...demo.customers);
-    localDb.installations.push(...demo.installations);
-    localDb.bookings.push(...demo.bookings);
-    if (demo.invoices) localDb.invoices.push(...demo.invoices);
-    saveLocalDb(uid, localDb);
+    await withLocalInvoiceLedgerLock(uid, (localDb, allocateSequence) => {
+      localDb.products.push(...demo.products);
+      localDb.technicians.push(...demo.technicians);
+      localDb.customers.push(...demo.customers);
+      localDb.installations.push(...demo.installations);
+      localDb.bookings.push(...demo.bookings);
+      for (const invoice of demo.invoices || []) {
+        const sequence = allocateSequence();
+        const issuedAt = nowIso();
+        localDb.invoices.push({
+          ...invoice,
+          invoice_number: invoiceNumber(issuedAt, sequence),
+          sequence_no: sequence,
+          issued_at: issuedAt,
+          idempotency_key: `demo:${uid}:invoice:${invoice.id}`,
+          createdAt: issuedAt,
+          updatedAt: issuedAt,
+        });
+      }
+      // Persist the non-ledger demo collections separately; the helper writes
+      // the dedicated invoice ledger after validating the mutation.
+      saveLocalDb(uid, localDb);
+    });
   } else {
     if (serverDataEnabled()) {
       return apiFetch<{
@@ -3666,12 +3895,35 @@ export const getStoreOrders = async (params: StoreOrderListParams = {}): Promise
   };
 };
 
-export const getSallaOrderStatuses = async (): Promise<SallaOrderStatus[]> => {
+const loadSallaOrderStatuses = singleFlightByKey(async (_ownerUid: string): Promise<SallaOrderStatusesResult> => {
   const response = await apiFetch<
-    SallaOrderStatus[] | { data?: SallaOrderStatus[]; statuses?: SallaOrderStatus[] }
+    SallaOrderStatus[] | Partial<SallaOrderStatusesResult> & { statuses?: SallaOrderStatus[] }
   >("/api/integrations/salla/order-statuses");
-  if (Array.isArray(response)) return response;
-  return response.data || response.statuses || [];
+  if (Array.isArray(response)) {
+    return {
+      data: response,
+      available: true,
+      configured: true,
+      linked: true,
+      status: "connected",
+      reason: null,
+    };
+  }
+  const data = response.data || response.statuses || [];
+  const hasAvailabilityContract = typeof response.available === "boolean";
+  return {
+    data,
+    available: hasAvailabilityContract ? response.available === true : data.length > 0,
+    configured: hasAvailabilityContract ? response.configured === true : data.length > 0,
+    linked: hasAvailabilityContract ? response.linked === true : data.length > 0,
+    status: response.status || (data.length ? "connected" : "error"),
+    reason: response.reason || null,
+  };
+});
+
+export const getSallaOrderStatuses = () => {
+  const ownerUid = String(getCurrentAppUser()?.uid || "anonymous");
+  return loadSallaOrderStatuses(ownerUid);
 };
 
 export const updateSallaOrderStatus = async (
@@ -4464,6 +4716,7 @@ export const getGatewayStatus = () => apiFetch<GatewayStatus>("/api/gateway/stat
 export interface PaymentResponse {
   id: string;
   invoice_id: string;
+  tap_charge_id?: string | null;
   amount: number;
   currency: string;
   status: string;
@@ -4471,21 +4724,55 @@ export interface PaymentResponse {
   created_at: string;
 }
 
-export const createPayment = async (invoiceId: string) => {
+export interface PaymentStatusResponse {
+  payment_id: string;
+  invoice_id?: string;
+  tap_charge_id?: string | null;
+  amount?: number;
+  currency?: string;
+  status: "creating" | "pending" | "completed" | "failed" | "cancelled";
+  tap_status?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PaymentCapabilities {
+  available: boolean;
+  configured: boolean;
+  provider_supported: boolean;
+  reason: string | null;
+}
+
+export const getPaymentCapabilities = () =>
+  apiFetch<PaymentCapabilities>("/api/payments/capabilities");
+
+export const getPaymentStatus = (paymentId: string, tapChargeId?: string) => {
+  const query = tapChargeId ? `?tap_id=${encodeURIComponent(tapChargeId)}` : "";
+  return apiFetch<PaymentStatusResponse>(`/api/payments/${encodeURIComponent(paymentId)}/status${query}`);
+};
+
+export const createPayment = async (
+  invoiceId: string,
+  idempotencyKey = `payment:${invoiceId}:${crypto.randomUUID()}`,
+) => {
   const user = getUserOrThrow();
   const uid = user.uid;
   if (user.local) {
     return apiFetch<PaymentResponse>("/api/payments/create", {
       method: "POST",
       body: JSON.stringify({ invoice_id: invoiceId }),
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
     });
   }
   const token = await user.getIdToken();
   return apiFetch<PaymentResponse>("/api/payments/create", {
     method: "POST",
     body: JSON.stringify({ invoice_id: invoiceId }),
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
   });
 };
 

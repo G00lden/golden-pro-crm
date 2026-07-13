@@ -15,57 +15,64 @@
 | بيانات CRM (عملاء/منتجات) | Supabase/Firestore (حسب `DATA_PROVIDER`) | خدمة خارجية تضبط مفاتيحها |
 | جلسة واتساب | Baileys linked-device | volume ثابت (`/app/.wa-session`) |
 
-## الأسرع: Docker Compose (موصى به لأي VPS)
+## المسار المدعوم: معاملة النشر المقفلة على VPS
 
-```bash
+```powershell
 # 1) جهّز ملف الإنتاج
-cp .env.production.example .env.production
+Copy-Item .env.production.example .env.production
 #    املأ الأسرار: GATEWAY_TOKEN, TELEPHONY_WEBHOOK_SECRET, PUBLIC_BASE_URL=https://نطاقك,
 #    SUPABASE_*، FIREBASE_*، OUTBOUND_MODE=production (عند الجاهزية) ...
 #    توليد سر: openssl rand -hex 24
 
-# 2) شغّل (يبني الصورة + يقلع)
-docker compose --env-file .env.production up -d --build
+# 2) انشر من جهاز الإدارة عبر المعاملة المقفلة
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-vps.ps1 `
+  -HostName "SERVER_IP" -SshKey "C:\path\to\key.pem" -SkipDns
 
-# 3) تابع السجل واطلب الـ QR من اللوحة لربط واتساب
-docker compose --env-file .env.production logs -f
+# لأول نشر فقط، وبعد التأكد أنه لا توجد خدمة أو بيانات سابقة:
+# أضف -AllowFirstDeployWithoutBackup
+
 ```
-- البيانات وجلسة واتساب محفوظة على volumes (`crm-data`, `crm-wa`) وتبقى عبر إعادة التشغيل/النشر.
-- المنفذ: `3000:8080` (المضيف:الحاوية). ضع **reverse proxy + HTTPS** أمامها (انظر أدناه).
+
+بعد نجاح المعاملة يمكن على الخادم استخدام أوامر القراءة فقط:
+
+```bash
+cd /opt/golden-pro-crm
+docker compose --env-file .env.production -f deploy/docker-compose.yml ps
+docker compose --env-file .env.production -f deploy/docker-compose.yml logs -f crm
+```
+- البيانات والجلسة محفوظة في volumes المنطقية `crm_data` و`crm_runtime` و`crm_wa_session`، وتبقى عبر إعادة التشغيل والنشر.
+- خدمة CRM مربوطة محليًا فقط على `127.0.0.1:3000`، وCaddy المضمّن هو منفذ HTTPS العام الوحيد.
 
 ## الواجهة العكسية + HTTPS (لازمة للوصول العام)
 
-واتساب/المزوّد/الجوال يحتاجون عنوان **HTTPS** عاماً. على VPS استخدم Caddy (الأبسط):
-
-```
-# /etc/caddy/Caddyfile
-crm.YOURDOMAIN.com {
-    reverse_proxy 127.0.0.1:3000
-}
-```
-ثم اضبط `PUBLIC_BASE_URL=https://crm.YOURDOMAIN.com` في `.env.production`.
+واتساب والمزوّد والجوال يحتاجون عنوان **HTTPS** عامًا. معاملة النشر تشغّل Caddy
+المضمّن في `deploy/docker-compose.yml` وتتحقق من `deploy/Caddyfile` ومن المسارين
+المحلي والعام قبل اعتماد الإصدار. اضبط `CRM_DOMAIN` و`PUBLIC_BASE_URL` في ملف
+`.env.production` المحلي ثم أعد النشر بالمعاملة. لا تعدّل `/etc/caddy/Caddyfile`
+ولا تشغّل Caddy آخر على الخادم؛ فهذا يسبب تعارض المنافذ ويتجاوز الاسترجاع.
 
 > بديل سريع بدون VPS للتجربة: نفق Cloudflare (`scripts/run-cloudflare-tunnel.ps1`)
 > يعطيك عنوان HTTPS عام يشير لجهازك المحلي — مفيد للاختبار، ليس للإنتاج الدائم.
 
-## بدون Docker (تشغيل مباشر على VPS/جهاز)
+## التشغيل بدون Docker
 
-> `npm start` يخدم `dist` فقط. لا تستخدم `npm run dev` خلف Cloudflare أو أي نطاق عام.
-
-```bash
-npm ci
-npm run build
-NODE_ENV=production ENV_FILE=.env.production PORT=3000 npm start
-# أبقِها دائمة عبر pm2 أو systemd، وثبّت DB_PATH على مسار ثابت يُنسخ احتياطياً.
-```
+التشغيل المباشر غير مدعوم للإنتاج على VPS؛ لأنه يتجاوز معاملة النسخ الاحتياطي والقفل
+وفحص الإصدار والتراجع. استخدمه للتطوير المحلي المعزول فقط عبر `npm run dev`، وكل
+تشغيل عام أو دائم يجب أن يمر عبر `scripts/deploy-vps.ps1` كما في الأعلى.
 
 ## فحص الجاهزية
 
 ```bash
 npm run preflight:prod      # يفحص متغيرات/أسرار الإنتاج
-npm run lint && npm run build && npm run test:smoke
+npm run lint && npm run test:unit && npm run build && npm run test:smoke
 curl https://نطاقك/api/health        # يجب 200 و status: ok
 ```
+
+نشر VPS المضمّن يستخدم SQLite ويثبت `DB_PATH=/app/.runtime/golden-crm.db`. إذا
+اختير Supabase في نشر آخر، يجب تطبيق جميع الملفات تحت `supabase/migrations/`
+أولاً ثم تشغيل `npm run db:verify`. يفحص الأمر أعمدة سجل الفواتير وجدول العداد
+ووجود `allocate_invoice_sequence` قراءةً فقط؛ غياب أي منها يمنع تبديل التطبيق
+إلى Supabase لأن إصدار الفواتير يعتمد على الحجز الذري لهذا الإجراء.
 
 ## بعد النشر (تشغيل فعلي)
 
@@ -76,7 +83,8 @@ curl https://نطاقك/api/health        # يجب 200 و status: ok
 
 ## نسخ احتياطي
 
-انسخ دورياً الـ volumes: `crm-data` (قاعدة SQLite) و`crm-wa` (جلسة واتساب).
+استخدم مساعد النسخ المقفّل؛ فهو يكتشف حاوية Compose الفعلية وينسخ قاعدة SQLite
+وجلسة واتساب والبيئة وحالة النشر بدل الاعتماد على أسماء volumes يدوية.
 ```bash
-docker run --rm -v golden-pro-crm_crm-data:/d -v "$PWD":/b alpine tar czf /b/crm-data-backup.tgz -C /d .
+APP_DIR=/opt/golden-pro-crm bash scripts/vps-backup.sh
 ```

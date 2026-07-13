@@ -28,25 +28,67 @@ function httpError(status: number, message: string) {
   return err;
 }
 
+export function toSallaDependencyError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return httpError(424, message || "تعذر تحميل حالات الطلب من سلة.");
+}
+
 export function registerSallaRoutes(app: Express) {
   app.get(
     "/api/integrations/salla/order-statuses",
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      const statuses = await getSallaOrderStatusesForUser(userReq.user.uid);
-      res.json({
-        data: statuses.map((status) => ({
-          id: status.id,
-          name: status.name,
-          slug: status.slug,
-          sort: status.sort,
-          type: status.type,
-          original: status.original,
-          parent: status.parent,
-          message: status.message,
-          is_active: status.isActive,
-        })),
-      });
+      const integration = await getSallaStatus(userReq.user.uid, req);
+      const availability = {
+        configured: integration.configured,
+        linked: integration.linked,
+        status: integration.status,
+      };
+
+      if (!integration.configured) {
+        res.json({
+          data: [],
+          available: false,
+          ...availability,
+          reason: "تكامل سلة غير مهيأ على الخادم. أكمل إعداد مفاتيح التطبيق من الإعدادات أولًا.",
+        });
+        return;
+      }
+
+      if (!integration.linked || integration.status !== "connected") {
+        res.json({
+          data: [],
+          available: false,
+          ...availability,
+          reason: "متجر سلة غير متصل بهذا الحساب. اربط المتجر من الإعدادات قبل المزامنة أو تعديل الطلبات.",
+        });
+        return;
+      }
+
+      try {
+        const statuses = await getSallaOrderStatusesForUser(userReq.user.uid);
+        res.json({
+          data: statuses.map((status) => ({
+            id: status.id,
+            name: status.name,
+            slug: status.slug,
+            sort: status.sort,
+            type: status.type,
+            original: status.original,
+            parent: status.parent,
+            message: status.message,
+            is_active: status.isActive,
+          })),
+          available: true,
+          ...availability,
+          reason: null,
+        });
+      } catch (error) {
+        // Every failure in this block originated while reading the external
+        // Salla dependency. Preserve the message, but never expose an upstream
+        // 401/403 as if the CRM itself rejected the signed-in user.
+        throw toSallaDependencyError(error);
+      }
     }),
   );
 

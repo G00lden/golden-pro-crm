@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -311,18 +312,23 @@ export function Button({
   type = "button",
   disabled,
   loading,
-  onClick,
+  className,
+  ...buttonProps
 }: {
   children: ReactNode;
   tone?: "primary" | "muted" | "danger" | "success";
-  type?: "button" | "submit";
-  disabled?: boolean;
   loading?: boolean;
-  onClick?: () => void;
-}) {
+} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children">) {
   return (
-    <button className={`btn ${tone}`} type={type} disabled={disabled || loading} aria-busy={loading || undefined} onClick={onClick}>
-      {loading ? <RefreshCcw size={15} className="spin" aria-hidden="true" /> : children}
+    <button
+      {...buttonProps}
+      className={`btn ${tone}${className ? ` ${className}` : ""}`}
+      type={type}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
+    >
+      {loading && <RefreshCcw size={15} className="spin" aria-hidden="true" />}
+      {children}
     </button>
   );
 }

@@ -100,7 +100,9 @@ test("all reminder UI callers branch on simulation before claiming a real send",
 });
 
 test("documents and WhatsApp console expose simulation without changing sent state", () => {
-  assert.match(invoicesSource, /if \(!dryRun && \(invoice\.status === "draft" \|\| invoice\.status === "issued"\)\)/);
+  assert.match(invoicesSource, /!dryRun[\s\S]*?!invoiceIsCreditNote\(invoice\)[\s\S]*?invoice\.status === "issued"[\s\S]*?returnedInvoice\?\.status !== "sent"/);
+  assert.match(invoicesSource, /invoice\?: api\.Invoice \| null/);
+  assert.match(invoicesSource, /invoice\.status !== "draft"/);
   assert.match(invoicesSource, /لم تُرسل للعميل ولم تتغير حالتها/);
   assert.match(quotesSource, /محاكاة إرسال عرض السعر فقط؛ لم تُرسل رسالة/);
   assert.match(consoleSource, /result\.simulated === true \|\| result\.dry_run === true/);
@@ -118,4 +120,28 @@ test("documents and WhatsApp console expose simulation without changing sent sta
   assert.match(storeOrdersSource, /const notificationSent = Boolean\(result\.notification\?\.success && !notificationSimulated\)/);
   assert.match(consoleSource, /تمت محاكاة الرسالة بأمان؛ لم تُرسل رسالة فعلية/);
   assert.match(storeOrdersSource, /محاكاة فقط: لم تُرسل رسالة فعلية للفني/);
+});
+
+test("invoice payment UI prevents duplicate requests and supplies an idempotency key", () => {
+  assert.match(invoicesSource, /payingInvoiceIdsRef\.current\.has\(invoice\.id\)/);
+  assert.match(invoicesSource, /aria-busy=\{payingInvoiceId === invoice\.id \|\| undefined\}/);
+  assert.match(invoicesSource, /disabled=\{payingInvoiceId === invoice\.id \|\|/);
+  assert.match(invoicesSource, /id="invoice-payment-unavailable-reason" role="status"/);
+  assert.match(invoicesSource, /<span>\{paymentUnavailableMessage\}<\/span>/);
+  assert.match(invoicesSource, /aria-describedby=\{paymentCapabilities\.data && !paymentCapabilities\.data\.available/);
+  assert.match(invoicesSource, /بوابة الدفع غير مهيأة حاليًا\. تواصل مع مسؤول النظام لتفعيلها\./);
+  assert.match(invoicesSource, /api\.createPayment\(invoice\.id, idempotencyKey\)/);
+  const paymentApi = apiSource.slice(apiSource.indexOf("export const createPayment"));
+  assert.match(paymentApi, /"Idempotency-Key": idempotencyKey/g);
+});
+
+test("invoice payment redirect reconciles tap_id through the server and cleans the URL", () => {
+  assert.match(apiSource, /export const getPaymentStatus = \(paymentId: string, tapChargeId\?: string\)/);
+  assert.match(apiSource, /\?tap_id=\$\{encodeURIComponent\(tapChargeId\)\}/);
+  assert.match(invoicesSource, /searchParams\.get\("payment_id"\)/);
+  assert.match(invoicesSource, /searchParams\.get\("tap_id"\)/);
+  assert.match(invoicesSource, /api\.getPaymentStatus\(paymentId, tapChargeId\)/);
+  assert.match(invoicesSource, /result\.status === "completed"[\s\S]*?await refreshAll\(\)/);
+  assert.match(invoicesSource, /searchParams\.delete\("payment_id"\)[\s\S]*?searchParams\.delete\("tap_id"\)/);
+  assert.match(invoicesSource, /window\.history\.replaceState/);
 });

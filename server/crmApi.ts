@@ -37,9 +37,12 @@ import {
   validateInstallments,
   type DiscountMode,
 } from "../shared/financial";
+import { displayInvoiceItems, verifiableInvoiceItems } from "../shared/invoiceItems";
 import { productIsMerged, visibleCatalogProductCount, visibleCatalogProducts } from "../shared/productCatalogState";
 import {
+  cleanInvoiceTerms,
   generateZatcaQrBase64,
+  invoiceQrTimestamp as resolveInvoiceQrTimestamp,
   resolveInvoiceTaxType,
   zatcaQrFields,
   type InvoiceTaxType,
@@ -59,6 +62,20 @@ import {
   sortCustomerRecords,
 } from "./customerPagination";
 import { invalidateStoreProductCatalogIndex } from "./storeWebhook";
+import { allocateInvoiceSequence } from "./invoiceSequence";
+import { createAtomicInvoiceDocumentWithDatabase } from "./invoiceDocumentWriter";
+import { compareAndSetDocument } from "./atomicDocumentUpdate";
+import {
+  canApplyCorrection,
+  canApplyOperationalInvoiceStatus,
+  correctionKindForStatus,
+  deriveInvoiceStatuses,
+  invoiceIsCreditNote,
+  invoiceIsMutableDraft,
+  invoiceLedgerSign,
+  type InvoiceAdjustmentKind,
+  type InvoiceStatus,
+} from "../shared/invoiceLifecycle";
 
 const ownedRepository = createOwnedRepository(adminDb as unknown as FirestoreLikeStore);
 const {
@@ -153,7 +170,7 @@ const defaultSettings = {
   jobs_per_tech: 4,
   response_rate: 50,
   maxDaily: 24,
-  seller_name: "Breexe Pro Co.",
+  seller_name: "BreeXe Pro Co.",
   seller_vat_number: "313049114100003",
   seller_address: "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض",
 };
@@ -281,9 +298,9 @@ const quoteStatuses = new Set(["draft", "issued", "confirmed", "declined", "expi
 // Extract the trailing sequence from a formatted number like "INV-20260706-014".
 function sequenceOf(value: unknown): number {
   const str = String(value ?? "");
-  const tail = str.includes("-") ? str.slice(str.lastIndexOf("-") + 1) : str;
-  const n = parseInt(tail, 10);
-  return Number.isFinite(n) ? n : 0;
+  const match = str.match(/^(?:INV|CN|QT)-.+-(\d+)$/i);
+  const n = match ? Number(match[1]) : 0;
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
 }
 
 // Next sequence index: one past the highest number already issued for this owner.
@@ -981,12 +998,20 @@ export function registerCrmApiRoutes(app: express.Express) {
 
 /* ── Invoice Routes (Firestore) ────────────────────────────────── */
 
-type InvoiceStatus = "draft" | "issued" | "sent" | "paid" | "cancelled" | "refunded";
 const invoiceStatuses = new Set(["draft", "issued", "sent", "paid", "cancelled", "refunded"]);
 
-function invoiceNumber(seed = Date.now(), index = 1) {
+function invoiceNumber(seed: string | number | Date = Date.now(), index = 1) {
   const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
   return `INV-${ymd}-${String(index).padStart(3, "0")}`;
+}
+
+function creditNoteNumber(seed: string | number | Date = Date.now(), index = 1) {
+  const ymd = new Date(seed).toISOString().slice(0, 10).replace(/-/g, "");
+  return `CN-${ymd}-${String(index).padStart(3, "0")}`;
+}
+
+function draftInvoiceNumber() {
+  return `DRAFT-${crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`;
 }
 
 function escapeHtml(value: unknown) {
@@ -1040,29 +1065,50 @@ function invoiceShareUrl(req: express.Request, invoice: Record<string, any>) {
 }
 
 function invoiceQrTimestamp(invoice: Record<string, any>) {
-  const source = invoice.createdAt || invoice.created_at || (invoice.issue_date ? `${invoice.issue_date}T00:00:00Z` : new Date().toISOString());
-  const parsed = new Date(source);
-  return (Number.isNaN(parsed.getTime()) ? new Date() : parsed).toISOString().replace(/\.\d{3}Z$/, "Z");
+  return resolveInvoiceQrTimestamp({
+    issueDate: invoice.issue_date,
+    createdAt: invoice.createdAt || invoice.created_at,
+  });
+}
+
+function verifiedInvoiceQr(invoice: Record<string, any>, status = 422) {
+  try {
+    if (!Array.isArray(invoice.items) || invoice.items.length === 0) {
+      throw new Error("لا يمكن التحقق من إجماليات الفاتورة من دون بند واحد على الأقل.");
+    }
+    if (invoice.financials_verifiable === false) {
+      throw new Error("بنود الفاتورة الأصلية غير قابلة للتحقق المالي؛ يجب تصحيحها قبل إنشاء رمز QR.");
+    }
+    const items = verifiableInvoiceItems(invoice.items);
+    if (!items) {
+      throw new Error("بنود الفاتورة مفقودة أو غير قابلة للتحقق المالي؛ صحّح الوصف والكمية والسعر لكل بند.");
+    }
+    if (!items.length) {
+      throw new Error("لا يمكن التحقق من إجماليات الفاتورة من دون بند واحد على الأقل.");
+    }
+    const totals = invoiceTotals(
+      items,
+      invoiceDiscountValue(invoice),
+      invoice.vat_percent,
+      invoice.discount_mode === "percent" ? "percent" : "fixed",
+      invoice.additional_fee,
+    );
+    const input = {
+      sellerName: String(invoice.seller_name || "").trim(),
+      vatNumber: String(invoice.seller_vat_number || invoice.seller_vat || "").trim(),
+      timestamp: invoiceQrTimestamp(invoice),
+      total: totals.total_with_vat,
+      vatTotal: totals.vat_amount,
+    };
+    return { input, qr: generateZatcaQrBase64(input) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "بيانات QR غير صالحة.";
+    throw Object.assign(new Error(`تعذر إنشاء رمز QR للفاتورة: ${message}`), { status });
+  }
 }
 
 function normalizeInvoiceItems(items: unknown) {
-  const raw = Array.isArray(items) ? items : [];
-  return raw
-    .map((item) => {
-      const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
-      const qty = Math.max(0, Number(row.quantity || 0));
-      const up = Math.max(0, Number(row.unit_price || row.unitPrice || 0));
-      return {
-        product_id: row.product_id || row.productId || null,
-        product_sku: String(row.product_sku || row.productSku || "").trim(),
-        description: String(row.description || "").trim(),
-        quantity: qty,
-        unit_price: up,
-        total: qty * up,
-        vat_excluded: row.vat_excluded !== false,
-      };
-    })
-    .filter((item) => item.description || item.quantity > 0 || item.unit_price > 0);
+  return displayInvoiceItems(items);
 }
 
 // Resolve a VAT percentage while treating an explicit 0 (zero-rated) as valid.
@@ -1096,49 +1142,366 @@ function invoiceTotals(
   };
 }
 
+function invoiceDiscountValue(invoice: Record<string, any>) {
+  const explicit = Number(invoice.discount_value);
+  const historicalAmount = Number(invoice.discount);
+  if (invoice.discount_mode === "percent") {
+    return Number.isFinite(explicit) ? explicit : 0;
+  }
+  if (Number.isFinite(explicit) && (explicit > 0 || !Number.isFinite(historicalAmount) || historicalAmount <= 0)) {
+    return explicit;
+  }
+  return Number.isFinite(historicalAmount) ? historicalAmount : 0;
+}
+
 function normalizeInvoice(row: Record<string, any>): Record<string, any> {
-  const items = normalizeInvoiceItems(row.items);
+  const verifiableItems = verifiableInvoiceItems(row.items);
+  const items = verifiableItems ?? normalizeInvoiceItems(row.items);
   const discountMode: DiscountMode = row.discount_mode === "percent" ? "percent" : "fixed";
   const totals = invoiceTotals(
-    items,
-    row.discount_value ?? row.discount,
+    verifiableItems ?? [],
+    invoiceDiscountValue(row),
     row.vat_percent,
     discountMode,
     row.additional_fee,
   );
-  const vatAmount = Number(row.vat_amount ?? row.vat ?? totals.vat_amount);
-  const totalWithoutVat = Number(row.total_without_vat ?? totals.total_without_vat);
+  const hasVerifiableLines = verifiableItems !== null;
+  const vatAmount = hasVerifiableLines
+    ? totals.vat_amount
+    : Number(row.vat_amount ?? row.vat ?? 0);
+  const totalWithoutVat = hasVerifiableLines
+    ? totals.total_without_vat
+    : Number(row.total_without_vat ?? 0);
   const sellerVatNumber = String(row.seller_vat_number || row.seller_vat || "").trim();
   const invoiceType = resolveInvoiceTaxType({
     requested: row.invoice_type as InvoiceTaxTypeInput,
     buyerVat: row.customer_vat,
-    taxableAmount: Number(row.total_without_vat ?? totals.total_without_vat),
+    taxableAmount: totalWithoutVat,
   });
   return {
     ...row,
+    document_kind: invoiceIsCreditNote(row) ? "credit_note" : "invoice",
+    sequence_no: row.sequence_no ?? row.sequenceNo ?? null,
+    issued_at: row.issued_at ?? row.issuedAt ?? null,
+    source_invoice_id: row.source_invoice_id ?? row.sourceInvoiceId ?? null,
+    adjustment_kind: row.adjustment_kind ?? row.adjustmentKind ?? null,
+    adjustment_scope: row.adjustment_scope ?? row.adjustmentScope ?? null,
+    adjustment_reason: row.adjustment_reason ?? row.adjustmentReason ?? null,
+    idempotency_key: row.idempotency_key ?? row.idempotencyKey ?? null,
     currency: row.currency || "SAR",
     status: invoiceStatuses.has(row.status) ? row.status : "draft",
     items,
-    subtotal: Number(row.subtotal ?? totals.subtotal),
-    discount: Number(row.discount ?? totals.discount),
-    discount_mode: discountMode,
-    discount_value: Number(row.discount_value ?? row.discount ?? totals.discount_value),
+    subtotal: hasVerifiableLines ? totals.subtotal : Number(row.subtotal ?? 0),
+    discount: hasVerifiableLines ? totals.discount : Number(row.discount ?? 0),
+    discount_mode: hasVerifiableLines ? totals.discount_mode : discountMode,
+    discount_value: hasVerifiableLines ? totals.discount_value : invoiceDiscountValue(row),
     vat: vatAmount,
-    vat_percent: Number(row.vat_percent ?? totals.vat_percent),
+    vat_percent: hasVerifiableLines ? totals.vat_percent : Number(row.vat_percent ?? 15),
     vat_amount: vatAmount,
-    additional_fee: Number(row.additional_fee ?? totals.additional_fee),
+    additional_fee: hasVerifiableLines ? totals.additional_fee : Number(row.additional_fee ?? 0),
     total_without_vat: totalWithoutVat,
-    total_with_vat: Number(row.total_with_vat ?? totals.total_with_vat),
+    total_with_vat: hasVerifiableLines ? totals.total_with_vat : Number(row.total_with_vat ?? 0),
     seller_vat: String(row.seller_vat || sellerVatNumber).trim(),
     seller_vat_number: sellerVatNumber,
     invoice_type: invoiceType,
+    financials_verifiable: hasVerifiableLines,
   };
+}
+
+function normalizeInvoiceLedger(rows: Array<Record<string, any>>) {
+  const normalized = rows.map(normalizeInvoice);
+  const sourceNumbers = new Map(
+    normalized
+      .filter((invoice) => !invoiceIsCreditNote(invoice))
+      .map((invoice) => [String(invoice.id), String(invoice.invoice_number || "")]),
+  );
+  return deriveInvoiceStatuses(normalized.map((invoice) => invoiceIsCreditNote(invoice) ? {
+    ...invoice,
+    source_invoice_number: sourceNumbers.get(String(invoice.source_invoice_id || "")) || "",
+  } : invoice));
+}
+
+async function listInvoiceLedger(uid: string) {
+  return normalizeInvoiceLedger(await listOwned("invoices", uid, undefined, 10_000));
+}
+
+async function getInvoiceLedgerRecord(uid: string, id: string) {
+  return (await listInvoiceLedger(uid)).find((invoice) => invoice.id === id) || null;
+}
+
+function correctionDocumentId(uid: string, sourceInvoiceId: string, kind: InvoiceAdjustmentKind) {
+  return `credit_${crypto.createHash("sha256").update(`${uid}\0${sourceInvoiceId}\0${kind}`).digest("hex").slice(0, 32)}`;
+}
+
+function isAlreadyExistsError(error: unknown) {
+  const code = String((error as { code?: unknown })?.code || "");
+  const message = error instanceof Error ? error.message : String(error);
+  return code === "ALREADY_EXISTS" || code === "6" || /already exists|duplicate key|unique constraint/i.test(message);
+}
+
+function invoiceLedgerConflict(message: string) {
+  const error = new Error(message) as Error & { status?: number };
+  error.status = 409;
+  return error;
+}
+
+function assertCorrectionAllowed(source: Record<string, any>, kind: InvoiceAdjustmentKind) {
+  if (canApplyCorrection(source, kind)) return;
+  const required = kind === "refund" ? "مدفوعة" : "مصدرة أو مرسلة";
+  throw invoiceLedgerConflict(`لا يمكن إنشاء الإشعار الدائن: يجب أن تكون الفاتورة ${required}.`);
+}
+
+function atomicFieldsMatch(current: Record<string, unknown>, expected: Record<string, unknown>) {
+  return Object.entries(expected).every(([key, value]) => {
+    const actual = current[key];
+    if (value === null || value === undefined) return actual === null || actual === undefined;
+    return actual === value;
+  });
+}
+
+type InvoiceDocumentRef = {
+  get: () => Promise<DocSnapshot>;
+  create: (data: Record<string, unknown>) => Promise<unknown>;
+  delete: () => Promise<unknown>;
+  compareAndSet?: (expected: Record<string, unknown>, data: Record<string, unknown>) => Promise<boolean>;
+};
+
+type InvoiceTransaction = {
+  get: (document: unknown) => Promise<DocSnapshot>;
+  create: (document: unknown, data: Record<string, unknown>) => void;
+  update: (document: unknown, data: Record<string, unknown>) => void;
+  delete: (document: unknown) => void;
+};
+
+function correctionRefs(uid: string, sourceInvoiceId: string) {
+  return {
+    cancellation: adminDb.collection("invoices").doc(correctionDocumentId(uid, sourceInvoiceId, "cancellation")),
+    refund: adminDb.collection("invoices").doc(correctionDocumentId(uid, sourceInvoiceId, "refund")),
+  };
+}
+
+/**
+ * A fiscal status change and a full credit note must serialize against the same
+ * three documents in native Firestore. SQLite and Supabase enforce the same
+ * invariant with database triggers behind compareAndSet().
+ */
+async function compareAndSetInvoiceOperationalStatus(
+  uid: string,
+  source: Record<string, any>,
+  update: Record<string, unknown>,
+) {
+  const sourceId = String(source.id);
+  const sourceRef = adminDb.collection("invoices").doc(sourceId) as unknown as InvoiceDocumentRef;
+  const expected = {
+    status: source.status,
+    issued_at: source.issued_at ?? null,
+    sequence_no: source.sequence_no ?? null,
+  };
+
+  // Adapter-backed stores provide a conditional SQL update. Their ledger
+  // triggers atomically reject status changes once a full credit exists.
+  if (typeof sourceRef.compareAndSet === "function") {
+    try {
+      return await compareAndSetDocument(sourceRef, expected, update);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/INVOICE_PAYMENT_IN_PROGRESS/i.test(message)) {
+        throw invoiceLedgerConflict("يوجد طلب دفع إلكتروني قيد التنفيذ؛ انتظر نتيجة بوابة الدفع قبل تأكيد الدفع يدويًا.");
+      }
+      if (/INVOICE_ALREADY_CREDITED|CREDIT_NOTE_SOURCE_STATE_CONFLICT/i.test(message)) return false;
+      throw error;
+    }
+  }
+
+  const firestore = adminDb as unknown as {
+    runTransaction?: <T>(callback: (transaction: InvoiceTransaction) => Promise<T>) => Promise<T>;
+  };
+  if (typeof firestore.runTransaction !== "function") {
+    throw new Error("The configured database does not support atomic invoice lifecycle updates.");
+  }
+
+  const refs = correctionRefs(uid, sourceId);
+  return firestore.runTransaction(async (transaction) => {
+    // Firestore requires every read before the first write. Reading both
+    // deterministic credit-note ids makes status-vs-credit races conflict.
+    const liveSourceSnapshot = await transaction.get(sourceRef);
+    const cancellationSnapshot = await transaction.get(refs.cancellation);
+    const refundSnapshot = await transaction.get(refs.refund);
+    if (!liveSourceSnapshot.exists) return false;
+    const liveSource = docData(liveSourceSnapshot);
+    if (String(liveSource.createdBy || "") !== uid || !atomicFieldsMatch(liveSource, expected)) return false;
+    if (cancellationSnapshot.exists || refundSnapshot.exists) return false;
+    transaction.update(sourceRef, update);
+    return true;
+  });
+}
+
+async function compareAndDeleteInvoiceDraft(uid: string, source: Record<string, any>) {
+  const ref = adminDb.collection("invoices").doc(String(source.id)) as unknown as InvoiceDocumentRef;
+  if (typeof ref.compareAndSet === "function") {
+    const snapshot = await ref.get();
+    if (!snapshot.exists) return false;
+    const live = docData(snapshot);
+    if (String(live.createdBy ?? live.owner_uid ?? "") !== uid || !invoiceIsMutableDraft(live)) return false;
+    try {
+      await ref.delete();
+      return true;
+    } catch (error) {
+      if (/ISSUED_INVOICE_DELETE_FORBIDDEN|immutable|forbidden/i.test(
+        error instanceof Error ? error.message : String(error),
+      )) return false;
+      throw error;
+    }
+  }
+
+  const firestore = adminDb as unknown as {
+    runTransaction?: <T>(callback: (transaction: InvoiceTransaction) => Promise<T>) => Promise<T>;
+  };
+  if (typeof firestore.runTransaction !== "function") {
+    throw new Error("The configured database does not support atomic invoice deletion.");
+  }
+  return firestore.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    if (!snapshot.exists) return false;
+    const live = docData(snapshot);
+    if (String(live.createdBy || "") !== uid || !invoiceIsMutableDraft(live)) return false;
+    if (!atomicFieldsMatch(live, {
+      status: source.status,
+      issued_at: source.issued_at ?? null,
+      sequence_no: source.sequence_no ?? null,
+    })) return false;
+    transaction.delete(ref);
+    return true;
+  });
+}
+
+async function createFullInvoiceCreditNote(
+  uid: string,
+  source: Record<string, any>,
+  kind: InvoiceAdjustmentKind,
+  reason: string,
+) {
+  const id = correctionDocumentId(uid, String(source.id), kind);
+  const ref = adminDb.collection("invoices").doc(id) as unknown as InvoiceDocumentRef;
+  const existing = await ref.get();
+  if (existing.exists) return normalizeInvoice(docData(existing));
+
+  assertCorrectionAllowed(source, kind);
+
+  const all = await listOwned("invoices", uid, undefined, 10_000);
+  const minimumNext = nextSequence(all, "invoice_number");
+  const sequence = await allocateInvoiceSequence(uid, minimumNext);
+  const issuedAt = nowIso();
+  const sourceNumber = String(source.invoice_number || "").trim();
+  const correctionLabel = kind === "refund" ? "استرداد كامل" : "إلغاء كامل";
+  const payload = clean({
+    invoice_number: creditNoteNumber(issuedAt, sequence),
+    document_kind: "credit_note",
+    sequence_no: sequence,
+    issued_at: issuedAt,
+    source_invoice_id: String(source.id),
+    adjustment_kind: kind,
+    adjustment_scope: "full",
+    adjustment_reason: reason,
+    idempotency_key: `credit:${source.id}:${kind}`,
+    quote_id: source.quote_id || null,
+    customer_id: source.customer_id || null,
+    customer_name: source.customer_name || "",
+    customer_phone: source.customer_phone || "",
+    customer_city: source.customer_city || "",
+    customer_vat: source.customer_vat || "",
+    title: `إشعار دائن - ${correctionLabel} للفاتورة ${sourceNumber}`,
+    invoice_type: source.invoice_type,
+    status: "issued",
+    issue_date: todayInTimeZone(),
+    due_date: null,
+    paid_at: null,
+    payment_method: source.payment_method || "",
+    currency: source.currency || "SAR",
+    items: source.items,
+    notes: reason,
+    terms: source.terms || "",
+    subtotal: source.subtotal,
+    discount: source.discount,
+    discount_mode: source.discount_mode,
+    discount_value: source.discount_value,
+    vat: source.vat_amount,
+    vat_percent: source.vat_percent,
+    vat_amount: source.vat_amount,
+    additional_fee: source.additional_fee,
+    total_without_vat: source.total_without_vat,
+    total_with_vat: source.total_with_vat,
+    seller_name: source.seller_name,
+    seller_vat: source.seller_vat || source.seller_vat_number,
+    seller_vat_number: source.seller_vat_number,
+    seller_address: source.seller_address,
+    createdBy: uid,
+    createdAt: issuedAt,
+    updatedAt: issuedAt,
+  });
+  verifiedInvoiceQr(payload, 400);
+
+  const firestore = adminDb as unknown as {
+    runTransaction?: <T>(callback: (transaction: InvoiceTransaction) => Promise<T>) => Promise<T>;
+  };
+  if (typeof ref.compareAndSet !== "function" && typeof firestore.runTransaction === "function") {
+    const sourceId = String(source.id);
+    const sourceRef = adminDb.collection("invoices").doc(sourceId);
+    const refs = correctionRefs(uid, sourceId);
+    return firestore.runTransaction(async (transaction) => {
+      const liveSourceSnapshot = await transaction.get(sourceRef);
+      const cancellationSnapshot = await transaction.get(refs.cancellation);
+      const refundSnapshot = await transaction.get(refs.refund);
+      const targetSnapshot = kind === "refund" ? refundSnapshot : cancellationSnapshot;
+      const otherSnapshot = kind === "refund" ? cancellationSnapshot : refundSnapshot;
+
+      if (targetSnapshot.exists) return normalizeInvoice(docData(targetSnapshot));
+      if (otherSnapshot.exists) {
+        throw invoiceLedgerConflict("سبق إنشاء إشعار دائن كامل لهذه الفاتورة.");
+      }
+      if (!liveSourceSnapshot.exists) {
+        throw invoiceLedgerConflict("تغيرت الفاتورة أو حُذفت قبل إنشاء الإشعار الدائن.");
+      }
+      const liveSource = normalizeInvoice(docData(liveSourceSnapshot));
+      if (String(liveSource.createdBy || "") !== uid) {
+        throw invoiceLedgerConflict("لا تملك صلاحية إنشاء إشعار دائن لهذه الفاتورة.");
+      }
+      assertCorrectionAllowed(liveSource, kind);
+      transaction.create(ref, payload);
+      return normalizeInvoice({ id, ...payload });
+    });
+  }
+
+  try {
+    await ref.create(payload);
+    return normalizeInvoice({ id, ...payload });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/INVOICE_PAYMENT_REQUIRES_PROVIDER_RESOLUTION|INVOICE_PAYMENT_IN_PROGRESS/i.test(message)) {
+      throw invoiceLedgerConflict("لا يمكن إنشاء إشعار دائن بينما توجد عملية Tap قيد التنفيذ أو مكتملة؛ عالجها أو استردها في بوابة الدفع أولًا.");
+    }
+    if (!isAlreadyExistsError(error) && !/CREDIT_NOTE_SOURCE_STATE_CONFLICT|INVOICE_ALREADY_CREDITED/i.test(message)) {
+      throw error;
+    }
+    const duplicate = await ref.get();
+    if (!duplicate.exists) {
+      throw invoiceLedgerConflict("تغيرت حالة الفاتورة بالتزامن أو سبق إنشاء إشعار دائن كامل لها.");
+    }
+    return normalizeInvoice(docData(duplicate));
+  }
 }
 
 function invoiceKindLabels(type: InvoiceTaxType) {
   return type === "tax"
     ? { ar: "فاتورة ضريبية", en: "Tax Invoice" }
     : { ar: "فاتورة ضريبية مبسطة", en: "Simplified Tax Invoice" };
+}
+
+function invoiceDocumentLabels(invoice: Record<string, any>) {
+  if (invoiceIsCreditNote(invoice)) {
+    return { ar: "إشعار دائن ضريبي", en: "Tax Credit Note" };
+  }
+  return invoiceKindLabels(invoice.invoice_type);
 }
 
 function invoiceBreakdown(invoice: Record<string, any>) {
@@ -1152,18 +1515,16 @@ function invoiceBreakdown(invoice: Record<string, any>) {
 }
 
 async function publicInvoiceHtml(invoice: Record<string, any>) {
-  const timestamp = invoiceQrTimestamp(invoice);
-  const sellerName = invoice.seller_name || "Breexe Pro Co.";
+  const sellerName = invoice.seller_name || "BreeXe Pro Co.";
+  const sellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
   const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
   const sellerCr = invoice.seller_cr || invoice.seller_cr_number || "7016449519";
   const sellerPhone = invoice.seller_phone || "+966533971168";
-  const kind = invoiceKindLabels(invoice.invoice_type);
-  const qrBase64 = generateZatcaQrBase64({
-    sellerName,
-    vatNumber: sellerVat,
-    timestamp,
-    total: Number(invoice.total_with_vat || 0),
-    vatTotal: Number(invoice.vat_amount || invoice.vat || 0),
+  const kind = invoiceDocumentLabels(invoice);
+  const { qr: qrBase64 } = verifiedInvoiceQr({
+    ...invoice,
+    seller_name: sellerName,
+    seller_vat_number: sellerVat,
   });
   const qrSrc = await QRCode.toDataURL(qrBase64, {
     errorCorrectionLevel: "M",
@@ -1172,6 +1533,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     color: { dark: "#000000", light: "#ffffff" },
   });
   const currency = String(invoice.currency || "SAR");
+  const visibleTerms = cleanInvoiceTerms(invoice.terms);
   const breakdown = invoiceBreakdown(invoice);
   const rows = (Array.isArray(invoice.items) ? invoice.items : []).map((item: Record<string, any>, index: number) => {
     const line = breakdown.lines[index];
@@ -1179,14 +1541,14 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const unitNet = quantity ? line.netBeforeDiscount / quantity : 0;
     const sku = item.product_sku ? `<small style="display:block;opacity:.6;font-size:.85em;direction:ltr">${escapeHtml(item.product_sku)}</small>` : "";
     return `<tr>
-      <td>${index + 1}</td>
-      <td>${escapeHtml(item.description)}${sku}</td>
-      <td>${quantity}</td>
-      <td>${escapeHtml(formatMoney(unitNet, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.discount, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.taxableAmount, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.vat, currency))}</td>
-      <td>${escapeHtml(formatMoney(line.gross, currency))}</td>
+      <td data-label="البند">${index + 1}</td>
+      <td class="description" data-label="البيان">${escapeHtml(item.description)}${sku}</td>
+      <td data-label="الكمية">${quantity}</td>
+      <td data-label="سعر الوحدة قبل الضريبة">${escapeHtml(formatMoney(unitNet, currency))}</td>
+      <td data-label="خصم البند">${escapeHtml(formatMoney(line.discount, currency))}</td>
+      <td data-label="الخاضع بعد الخصم">${escapeHtml(formatMoney(line.taxableAmount, currency))}</td>
+      <td data-label="الضريبة">${escapeHtml(formatMoney(line.vat, currency))}</td>
+      <td data-label="الإجمالي شامل الضريبة">${escapeHtml(formatMoney(line.gross, currency))}</td>
     </tr>`;
   }).join("");
   return `<!doctype html>
@@ -1200,19 +1562,29 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     * { box-sizing: border-box; }
     body { margin: 0; background: #eef2f5; color: #17212b; font-family: Arial, Tahoma, sans-serif; }
     .doc { width: 210mm; min-height: 297mm; margin: 0 auto; padding: 12mm; background: #fff; }
-    .head { display: flex; justify-content: space-between; gap: 16px; align-items: start; padding-bottom: 12px; border-bottom: 3px solid #d6a84f; }
-    .brand strong { display: block; font-size: 21px; color: #0f3f54; }
-    .brand span, .title span, .box span { color: #64748b; font-size: 11px; font-weight: 800; }
-    .title { text-align: left; }
-    .title h1 { margin: 4px 0; color: #0f3f54; font-size: 24px; }
+    .head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(170px, auto); gap: 14px; align-items: stretch; padding: 14px; border-radius: 12px; background: linear-gradient(135deg, #0b355c, #10212c); color: #fff; }
+    .brand { display: grid; grid-template-columns: 194px minmax(0, 1fr); gap: 14px; align-items: center; min-width: 0; }
+    .brand-logo { display: block; width: 194px; height: 61px; padding: 5px 7px; border-radius: 8px; background: #fff; object-fit: contain; }
+    .brand-copy { min-width: 0; }
+    .brand-copy strong { display: block; font-size: 12px; line-height: 1.55; }
+    .brand-copy small { display: block; margin-top: 3px; color: rgba(255,255,255,.78); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+    .title { display: grid; align-content: center; gap: 5px; min-width: 170px; padding: 12px; border: 1px solid rgba(214,168,79,.45); border-radius: 10px; text-align: center; }
+    .title span { color: #d6a84f; font-size: 12px; font-weight: 900; }
+    .title h1 { margin: 0; color: #fff; font-size: 20px; }
+    .title strong { color: #fff; font-size: 13px; }
+    .box span { color: #64748b; font-size: 10px; font-weight: 900; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 14px 0; }
-    .box { border: 1px solid #d7e0ea; border-radius: 8px; padding: 8px; min-height: 58px; }
-    .box strong { display: block; margin-top: 4px; color: #10212c; font-size: 13px; }
-    .parties { display: grid; grid-template-columns: 1fr 1fr 150px; gap: 10px; margin-bottom: 14px; }
-    .party, .qr { border: 1px solid #d7e0ea; border-radius: 10px; padding: 10px; }
-    .party h2 { margin: 0 0 8px; color: #0f6a86; font-size: 14px; }
-    .party p { margin: 5px 0; color: #334155; font-size: 12px; }
-    .qr { display: grid; place-items: center; }
+    .box { border: 1px solid #d7e0ea; border-radius: 10px; padding: 8px 9px; background: #f8fafc; }
+    .box strong { display: block; margin-top: 4px; color: #10212c; font-size: 12px; }
+    .parties { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: stretch; margin-bottom: 12px; }
+    .party, .qr { border: 1px solid #d7e0ea; border-radius: 10px; background: #f8fafc; }
+    .party { padding: 10px 12px; }
+    .party h2 { margin: 0 0 7px; color: #0b355c; font-size: 12px; }
+    .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
+    .facts div { min-width: 0; padding: 6px 8px; border-radius: 7px; background: #fff; }
+    .facts dt { color: #64748b; font-size: 9px; font-weight: 900; }
+    .facts dd { margin: 2px 0 0; color: #172033; font-size: 11px; font-weight: 800; line-height: 1.45; overflow-wrap: anywhere; }
+    .qr { display: grid; min-width: 114px; place-items: center; padding: 8px; }
     table { width: 100%; table-layout: fixed; border-collapse: collapse; margin-bottom: 12px; }
     th { padding: 8px 5px; background: #0f6a86; color: #fff; font-size: 9px; }
     td { padding: 7px 5px; border-bottom: 1px solid #e2e8f0; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; break-inside: avoid; }
@@ -1224,18 +1596,34 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     .totals p { display: flex; justify-content: space-between; margin: 0; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
     .totals p:last-child { border-bottom: 0; background: #12314a; color: #fff; font-weight: 900; }
     .terms { margin-top: 14px; padding: 10px; border: 1px solid #d7e0ea; border-radius: 10px; color: #475569; font-size: 11px; white-space: pre-line; }
+    @media screen and (max-width: 820px) {
+      .doc { width: 100%; min-height: 0; padding: 18px; }
+      .head, .grid, .parties { grid-template-columns: 1fr; }
+      .brand { grid-template-columns: 1fr; }
+      .brand-logo { width: min(220px, 100%); height: auto; }
+      .facts { grid-template-columns: 1fr; }
+      .qr { justify-self: center; }
+      table, tbody { display: block; }
+      thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }
+      tbody tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px; border: 1px solid #d7e0ea; border-radius: 10px; background: #f8fafc; }
+      tbody tr + tr { margin-top: 8px; }
+      td, td:nth-child(2) { display: grid; min-width: 0; gap: 3px; padding: 7px; border: 0; text-align: start; white-space: normal; }
+      td::before { content: attr(data-label); color: #64748b; font-size: 9px; font-weight: 900; }
+      td.description { grid-column: 1 / -1; }
+      .totals { width: 100%; }
+    }
     @media print { body { background: #fff; } .doc { margin: 0; box-shadow: none; } }
   </style>
 </head>
 <body>
   <main class="doc">
     <header class="head">
-      <div class="brand" style="display:flex;gap:12px;align-items:flex-start">
-        <img src="/brand/icon-256.png" alt="Breexe Pro" width="58" height="58" style="object-fit:contain;border-radius:10px;flex-shrink:0" />
-        <div>
-          <strong>${escapeHtml(sellerName)}</strong>
-          <span>شركة بريكس برو شخص واحد ذات مسؤولية محدودة</span>
-          <p>${escapeHtml(invoice.seller_address || "")}</p>
+      <div class="brand">
+        <img class="brand-logo" src="/brand/logo-full.png" alt="BreeXe Pro" width="194" height="61" />
+        <div class="brand-copy">
+          <strong>${sellerLegalName}</strong>
+          <small>${escapeHtml(invoice.seller_address || "الرياض، المملكة العربية السعودية")}</small>
+          <small><bdi dir="ltr">${escapeHtml(sellerPhone)}</bdi></small>
         </div>
       </div>
       <div class="title">
@@ -1246,28 +1634,22 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       </div>
     </header>
     <section class="grid">
-      <div class="box"><span>رقم الفاتورة</span><strong>${escapeHtml(invoice.invoice_number || "")}</strong></div>
       <div class="box"><span>تاريخ الإصدار</span><strong>${escapeHtml(invoice.issue_date || "")}</strong></div>
       <div class="box"><span>الرقم الضريبي للبائع</span><strong>${escapeHtml(sellerVat)}</strong></div>
+      <div class="box"><span>السجل التجاري</span><strong>${escapeHtml(sellerCr)}</strong></div>
       <div class="box"><span>الحالة</span><strong>${escapeHtml(invoice.status || "")}</strong></div>
     </section>
     <section class="parties">
       <article class="party">
-        <h2>بيانات البائع</h2>
-        <p>الاسم: ${escapeHtml(sellerName)}</p>
-        <p>الرقم الضريبي: ${escapeHtml(sellerVat)}</p>
-        <p>السجل التجاري: ${escapeHtml(sellerCr)}</p>
-        <p>الجوال: ${escapeHtml(sellerPhone)}</p>
-        <p>العنوان: ${escapeHtml(invoice.seller_address || "-")}</p>
-      </article>
-      <article class="party">
         <h2>بيانات العميل</h2>
-        <p>الاسم: ${escapeHtml(invoice.customer_name || "-")}</p>
-        <p>الجوال: ${escapeHtml(invoice.customer_phone || "-")}</p>
-        <p>المدينة: ${escapeHtml(invoice.customer_city || "-")}</p>
-        <p>الرقم الضريبي: ${escapeHtml(invoice.customer_vat || "-")}</p>
+        <dl class="facts">
+          <div><dt>الاسم</dt><dd>${escapeHtml(invoice.customer_name || "-")}</dd></div>
+          <div><dt>الجوال</dt><dd><bdi dir="ltr">${escapeHtml(invoice.customer_phone || "-")}</bdi></dd></div>
+          <div><dt>المدينة</dt><dd>${escapeHtml(invoice.customer_city || "-")}</dd></div>
+          <div><dt>الرقم الضريبي</dt><dd>${escapeHtml(invoice.customer_vat || "-")}</dd></div>
+        </dl>
       </article>
-      <aside class="qr"><img src="${qrSrc}" width="132" height="132" alt="ZATCA QR" /></aside>
+      <aside class="qr" aria-label="رمز الفاتورة الضريبية"><img src="${qrSrc}" width="96" height="96" alt="رمز الفاتورة الضريبية" /></aside>
     </section>
     <table>
       <thead><tr><th>#</th><th>البيان</th><th>الكمية</th><th>سعر الوحدة قبل الضريبة</th><th>خصم البند</th><th>الخاضع بعد الخصم</th><th>VAT</th><th>الإجمالي شامل الضريبة</th></tr></thead>
@@ -1281,7 +1663,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       ${Number(invoice.additional_fee || 0) > 0 ? `<p><span>رسوم إضافية</span><strong>${escapeHtml(formatMoney(invoice.additional_fee, currency))}</strong></p>` : ""}
       <p><span>الإجمالي شامل الضريبة</span><strong>${escapeHtml(formatMoney(invoice.total_with_vat, currency))}</strong></p>
     </section>
-    ${invoice.terms ? `<section class="terms">${escapeHtml(invoice.terms)}</section>` : ""}
+    ${visibleTerms ? `<section class="terms">${escapeHtml(visibleTerms)}</section>` : ""}
   </main>
 </body>
 </html>`;
@@ -1293,54 +1675,69 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       res.status(404).type("text/plain").send("Invoice not found.");
       return;
     }
-    const invoice = normalizeInvoice(docData(snap));
-    const ownerUid = String(invoice.createdBy || invoice.owner_uid || "");
+    const rawInvoice = docData(snap);
+    const ownerUid = String(rawInvoice.createdBy || rawInvoice.owner_uid || "");
     if (!ownerUid || !validInvoiceShareToken(req.params.id, ownerUid, String(req.query.token || ""))) {
       res.status(403).type("text/plain").send("Invalid invoice link.");
       return;
     }
-    res.type("html").send(await publicInvoiceHtml(invoice));
+    if (invoiceIsMutableDraft(rawInvoice)) {
+      res.status(409).type("text/plain").send("Draft invoices cannot be shared as issued tax documents.");
+      return;
+    }
+    res.type("html").send(await publicInvoiceHtml(normalizeInvoice(rawInvoice)));
   }));
 
   app.get("/api/invoices", asyncRoute(async (req, res) => {
     const search = String(req.query.search || "").trim();
     const status = String(req.query.status || "").trim();
-    const all = (await listOwned("invoices", userId(req), undefined, 1000))
-      .map(normalizeInvoice)
+    const all = (await listInvoiceLedger(userId(req)))
       .sort((a, b) => String(b.createdAt || b.created_at).localeCompare(String(a.createdAt || a.created_at)));
+    const sourceInvoices = all.filter((item) => !invoiceIsCreditNote(item));
     const data = all.filter((item) => {
       const statusOk = !status || status === "all" || item.status === status;
       if (!statusOk) return false;
       if (!search) return true;
-      return `${item.invoice_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""}`.includes(search);
+      return `${item.invoice_number || ""} ${item.source_invoice_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""}`.includes(search);
     });
     const stats = {
       total: all.length,
-      draft: all.filter((item) => item.status === "draft").length,
-      issued: all.filter((item) => item.status === "issued").length,
-      sent: all.filter((item) => item.status === "sent").length,
-      paid: all.filter((item) => item.status === "paid").length,
-      cancelled: all.filter((item) => item.status === "cancelled").length,
-      refunded: all.filter((item) => item.status === "refunded").length,
-      total_value: all.reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
-      paid_value: all.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
+      credit_notes: all.length - sourceInvoices.length,
+      draft: sourceInvoices.filter((item) => item.status === "draft").length,
+      issued: sourceInvoices.filter((item) => item.status === "issued").length,
+      sent: sourceInvoices.filter((item) => item.status === "sent").length,
+      paid: sourceInvoices.filter((item) => item.status === "paid").length,
+      cancelled: sourceInvoices.filter((item) => item.status === "cancelled").length,
+      refunded: sourceInvoices.filter((item) => item.status === "refunded").length,
+      total_value: all.reduce((sum, item) => sum + invoiceLedgerSign(item) * Number(item.total_with_vat || 0), 0),
+      paid_value: sourceInvoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
     };
     res.json({ data, total: data.length, stats });
   }));
 
   app.post("/api/invoices", validate(invoiceCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
-    const items = normalizeInvoiceItems(req.body?.items);
+    const items = verifiableInvoiceItems(req.body?.items);
     const customerName = String(req.body?.customer_name || "").trim();
     if (!customerName) {
       res.status(400).json({ error: "اسم العميل مطلوب." });
       return;
     }
-    if (!items.length) {
+    if (!items) {
       res.status(400).json({ error: "مطلوب بند واحد على الأقل في الفاتورة." });
       return;
     }
-    const all = await listOwned("invoices", uid, undefined, 10000);
+    const requestedStatus = String(req.body?.status || "issued") as InvoiceStatus;
+    if (requestedStatus !== "draft" && requestedStatus !== "issued") {
+      res.status(400).json({ error: "عند الإنشاء اختر مسودة أو مصدرة فقط؛ الإرسال والدفع والإلغاء لها إجراءات مستقلة." });
+      return;
+    }
+    const suppliedIdempotencyKey = String(req.get("Idempotency-Key") || "").trim();
+    if (suppliedIdempotencyKey && !/^[A-Za-z0-9:_-]{8,160}$/.test(suppliedIdempotencyKey)) {
+      res.status(400).json({ error: "مفتاح منع التكرار غير صالح." });
+      return;
+    }
+    const idempotencyKey = suppliedIdempotencyKey || `invoice:${crypto.randomUUID()}`;
     const settings = await getSettings(uid);
     const discountMode: DiscountMode = req.body?.discount_mode === "percent" ? "percent" : "fixed";
     const totals = invoiceTotals(
@@ -1356,49 +1753,71 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       taxableAmount: totals.total_without_vat,
     });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
-    const payload = clean({
-      invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
-      quote_id: req.body?.quote_id || null,
-      customer_id: req.body?.customer_id || null,
-      customer_name: customerName,
-      customer_phone: String(req.body?.customer_phone || "").trim(),
-      customer_city: String(req.body?.customer_city || "").trim(),
-      customer_vat: String(req.body?.customer_vat || "").trim(),
-      title: String(req.body?.title || "").trim(),
-      invoice_type: invoiceType,
-      status: invoiceStatuses.has(req.body?.status) ? req.body.status : "issued",
-      issue_date: req.body?.issue_date || todayInTimeZone(),
-      due_date: req.body?.due_date || null,
-      payment_method: String(req.body?.payment_method || "").trim(),
-      currency: req.body?.currency || "SAR",
-      items,
-      notes: String(req.body?.notes || "").trim(),
-      terms: String(req.body?.terms || "").trim(),
-      ...totals,
-      seller_name: String(req.body?.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
-      seller_vat: sellerVatNumber,
-      seller_vat_number: sellerVatNumber,
-      seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
-      paid_at: null,
+    const result = await createAtomicInvoiceDocumentWithDatabase(adminDb as any, {
+      ownerUid: uid,
+      idempotencyKey,
+      issued: requestedStatus === "issued",
+      build: ({ sequence, issuedAt }) => {
+        const payload = clean({
+          invoice_number: issuedAt && sequence ? invoiceNumber(issuedAt, sequence) : draftInvoiceNumber(),
+          document_kind: "invoice",
+          sequence_no: sequence,
+          issued_at: issuedAt,
+          source_invoice_id: null,
+          adjustment_kind: null,
+          adjustment_scope: null,
+          adjustment_reason: null,
+          quote_id: req.body?.quote_id || null,
+          customer_id: req.body?.customer_id || null,
+          customer_name: customerName,
+          customer_phone: String(req.body?.customer_phone || "").trim(),
+          customer_city: String(req.body?.customer_city || "").trim(),
+          customer_vat: String(req.body?.customer_vat || "").trim(),
+          title: String(req.body?.title || "").trim(),
+          invoice_type: invoiceType,
+          status: requestedStatus,
+          issue_date: req.body?.issue_date || todayInTimeZone(),
+          due_date: req.body?.due_date || null,
+          payment_method: String(req.body?.payment_method || "").trim(),
+          currency: req.body?.currency || "SAR",
+          items,
+          notes: String(req.body?.notes || "").trim(),
+          terms: String(req.body?.terms || "").trim(),
+          ...totals,
+          seller_name: String(req.body?.seller_name || settings.seller_name || "BreeXe Pro Co.").trim(),
+          seller_vat: sellerVatNumber,
+          seller_vat_number: sellerVatNumber,
+          seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
+          paid_at: null,
+        });
+        verifiedInvoiceQr(payload, 400);
+        return payload;
+      },
     });
-    const id = await createOwned("invoices", uid, payload);
-    const invoice = await getOwned("invoices", id, uid);
-    res.status(201).json({ id, invoice: invoice ? normalizeInvoice(invoice) : null });
+    res.status(result.created ? 201 : 200).json({
+      id: result.id,
+      invoice: normalizeInvoice(result.data),
+      idempotent_replay: !result.created,
+    });
   }));
 
   app.get("/api/invoices/:id", asyncRoute(async (req, res) => {
-    const existing = await getOwned("invoices", req.params.id, userId(req));
+    const existing = await getInvoiceLedgerRecord(userId(req), req.params.id);
     if (!existing) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
       return;
     }
-    res.json(normalizeInvoice(existing));
+    res.json(existing);
   }));
 
   app.get("/api/invoices/:id/share-link", asyncRoute(async (req, res) => {
     const existing = await getOwned("invoices", req.params.id, userId(req));
     if (!existing) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    if (invoiceIsMutableDraft(existing)) {
+      res.status(409).json({ error: "أصدر المسودة أولًا قبل إنشاء رابط مشاركة ضريبي." });
       return;
     }
     const invoice = normalizeInvoice(existing);
@@ -1412,7 +1831,20 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
       return;
     }
-    const items = req.body?.items ? normalizeInvoiceItems(req.body.items) : normalizeInvoiceItems(existing.items);
+    if (!invoiceIsMutableDraft(existing)) {
+      res.status(409).json({ error: "الفاتورة المصدرة سجل مالي ثابت؛ يمكن تعديل أو حذف المسودة فقط. أنشئ إشعارًا دائنًا للإلغاء أو الاسترداد." });
+      return;
+    }
+    const requestedStatus = String(req.body?.status || "draft") as InvoiceStatus;
+    if (requestedStatus !== "draft" && requestedStatus !== "issued") {
+      res.status(400).json({ error: "يمكن إبقاء المسودة أو إصدارها فقط من نموذج التحرير." });
+      return;
+    }
+    const items = verifiableInvoiceItems(req.body?.items ?? existing.items);
+    if (!items) {
+      res.status(400).json({ error: "كل بند في الفاتورة يحتاج وصفًا وكمية أكبر من صفر وسعرًا غير سالب." });
+      return;
+    }
     const settings = await getSettings(uid);
     const discountMode: DiscountMode = (req.body?.discount_mode ?? existing.discount_mode) === "percent" ? "percent" : "fixed";
     const discountValue = req.body?.discount_value ?? req.body?.discount ?? existing.discount_value ?? existing.discount;
@@ -1431,7 +1863,15 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       taxableAmount: totals.total_without_vat,
     });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || existing.seller_vat_number || existing.seller_vat || settings.seller_vat_number || "313049114100003").trim();
+    const issuedAt = requestedStatus === "issued" ? nowIso() : null;
+    const all = issuedAt ? await listOwned("invoices", uid, undefined, 10_000) : [];
+    const sequence = issuedAt
+      ? await allocateInvoiceSequence(uid, nextSequence(all, "invoice_number"))
+      : null;
     const payload = clean({
+      invoice_number: issuedAt && sequence ? invoiceNumber(issuedAt, sequence) : existing.invoice_number,
+      sequence_no: sequence,
+      issued_at: issuedAt,
       customer_id: req.body?.customer_id ?? existing.customer_id,
       customer_name: String(req.body?.customer_name || existing.customer_name || "").trim(),
       customer_phone: String(req.body?.customer_phone || existing.customer_phone || "").trim(),
@@ -1439,7 +1879,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       customer_vat: customerVat,
       title: String(req.body?.title || existing.title || "").trim(),
       invoice_type: invoiceType,
-      status: invoiceStatuses.has(req.body?.status) ? req.body.status : existing.status,
+      status: requestedStatus,
       issue_date: req.body?.issue_date || existing.issue_date,
       due_date: req.body?.due_date ?? existing.due_date ?? null,
       payment_method: String(req.body?.payment_method || existing.payment_method || "").trim(),
@@ -1448,14 +1888,24 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       notes: String(req.body?.notes ?? existing.notes ?? "").trim(),
       terms: String(req.body?.terms ?? existing.terms ?? "").trim(),
       ...totals,
-      seller_name: String(req.body?.seller_name || existing.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
+      seller_name: String(req.body?.seller_name || existing.seller_name || settings.seller_name || "BreeXe Pro Co.").trim(),
       seller_vat: sellerVatNumber,
       seller_vat_number: sellerVatNumber,
       seller_address: String(req.body?.seller_address || existing.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
+      updatedAt: nowIso(),
     });
-    await updateOwned("invoices", req.params.id, uid, payload);
-    const invoice = await getOwned("invoices", req.params.id, uid);
-    res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
+    verifiedInvoiceQr({ ...existing, ...payload }, 400);
+    const updated = await compareAndSetDocument(
+      adminDb.collection("invoices").doc(req.params.id),
+      { status: "draft", issued_at: null, sequence_no: null },
+      payload,
+    );
+    if (!updated) {
+      res.status(409).json({ error: "تغيرت المسودة أثناء الحفظ؛ أعد تحميل الصفحة قبل المحاولة مجددًا." });
+      return;
+    }
+    const invoice = await getInvoiceLedgerRecord(uid, req.params.id);
+    res.json({ invoice });
   }));
 
   app.post("/api/invoices/:id/status", validateParams(crmIdParamsSchema), validate(invoiceStatusSchema), asyncRoute(async (req, res) => {
@@ -1470,22 +1920,80 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
       return;
     }
-    const update = clean({
-      status,
-      // Keep the original payment time; only stamp it the first time it's paid.
-      paid_at: current.paid_at || (status === "paid" ? nowIso() : undefined),
-    });
-    if (!(await updateOwned("invoices", req.params.id, uid, update))) {
-      res.status(404).json({ error: "الفاتورة غير موجودة." });
+    const currentInvoice = normalizeInvoice(current);
+    const correctionKind = correctionKindForStatus(status);
+    if (correctionKind) {
+      const reason = String(req.body?.reason || "").trim();
+      if (reason.length < 3) {
+        res.status(400).json({ error: "سبب الإلغاء أو الاسترداد مطلوب لإنشاء الإشعار الدائن." });
+        return;
+      }
+      const creditNote = await createFullInvoiceCreditNote(uid, currentInvoice, correctionKind, reason);
+      const invoice = await getInvoiceLedgerRecord(uid, req.params.id);
+      res.json({ invoice, credit_note: creditNote });
       return;
     }
-    const invoice = await getOwned("invoices", req.params.id, uid);
-    res.json({ invoice: invoice ? normalizeInvoice(invoice) : null });
+
+    const effectiveInvoice = await getInvoiceLedgerRecord(uid, req.params.id);
+    if (effectiveInvoice && (effectiveInvoice.status === "cancelled" || effectiveInvoice.status === "refunded")) {
+      res.status(409).json({ error: "الفاتورة مرتبطة بإشعار دائن كامل ولا يمكن تغيير حالتها التشغيلية." });
+      return;
+    }
+
+    if (!canApplyOperationalInvoiceStatus(currentInvoice, status)) {
+      res.status(409).json({ error: "انتقال حالة الفاتورة غير مسموح. استخدم الإشعار الدائن للإلغاء أو الاسترداد." });
+      return;
+    }
+    if (String(currentInvoice.status || "draft") === status) {
+      res.json({ invoice: await getInvoiceLedgerRecord(uid, req.params.id) });
+      return;
+    }
+
+    let issuance: Record<string, unknown> = {};
+    if (status === "issued") {
+      if (!invoiceIsMutableDraft(currentInvoice)) {
+        res.status(409).json({ error: "لا يمكن إصدار هذا السجل لأنه ليس مسودة قابلة للإصدار." });
+        return;
+      }
+      verifiedInvoiceQr(currentInvoice, 400);
+      const all = await listOwned("invoices", uid, undefined, 10_000);
+      const issuedAt = nowIso();
+      const sequence = await allocateInvoiceSequence(uid, nextSequence(all, "invoice_number"));
+      issuance = {
+        invoice_number: invoiceNumber(issuedAt, sequence),
+        sequence_no: sequence,
+        issued_at: issuedAt,
+      };
+    }
+    const update = clean({
+      status,
+      ...issuance,
+      // Keep the original payment time; only stamp it the first time it's paid.
+      paid_at: currentInvoice.paid_at || (status === "paid" ? nowIso() : undefined),
+      updatedAt: nowIso(),
+    });
+    const changed = await compareAndSetInvoiceOperationalStatus(uid, currentInvoice, update);
+    if (!changed) {
+      res.status(409).json({ error: "تغيرت حالة الفاتورة بالتزامن؛ أعد تحميل الصفحة قبل المحاولة مجددًا." });
+      return;
+    }
+    const invoice = await getInvoiceLedgerRecord(uid, req.params.id);
+    res.json({ invoice });
   }));
 
   app.delete("/api/invoices/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
-    if (!(await deleteOwned("invoices", req.params.id, userId(req)))) {
+    const uid = userId(req);
+    const existing = await getOwned("invoices", req.params.id, uid);
+    if (!existing) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    if (!invoiceIsMutableDraft(existing)) {
+      res.status(409).json({ error: "لا يمكن حذف فاتورة مصدرة أو إشعار دائن؛ الحذف متاح للمسودة فقط." });
+      return;
+    }
+    if (!(await compareAndDeleteInvoiceDraft(uid, normalizeInvoice({ id: req.params.id, ...existing })))) {
+      res.status(409).json({ error: "أُصدرت الفاتورة أثناء طلب الحذف؛ بقي السجل محفوظًا." });
       return;
     }
     res.json({ success: true });
@@ -1496,6 +2004,10 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const existing = await getOwned("invoices", req.params.id, uid);
     if (!existing) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
+      return;
+    }
+    if (invoiceIsMutableDraft(existing)) {
+      res.status(409).json({ error: "أصدر المسودة أولًا قبل إرسالها كفاتورة ضريبية." });
       return;
     }
     const invoice = normalizeInvoice(existing);
@@ -1511,7 +2023,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       (item: Record<string, any>, index: number) => `- ${item.description} × ${item.quantity}: ${Number(breakdown.lines[index]?.gross || 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`,
     );
     const message = [
-      `${invoiceKindLabels(invoice.invoice_type).ar} - Breexe Pro Co.`,
+      `${invoiceDocumentLabels(invoice).ar} - BreeXe Pro Co.`,
       `${invoice.invoice_number}`,
       `العميل: ${invoice.customer_name}`,
       "",
@@ -1559,11 +2071,11 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       },
     });
     const dryRun = Boolean((result as { dryRun?: boolean })?.dryRun);
-    if (!dryRun && (invoice.status === "draft" || invoice.status === "issued")) {
-      await updateOwned("invoices", req.params.id, uid, { status: "sent" });
+    if (!dryRun && !invoiceIsCreditNote(invoice) && invoice.status === "issued") {
+      await compareAndSetInvoiceOperationalStatus(uid, invoice, { status: "sent", updatedAt: nowIso() });
     }
-    const updatedInvoice = await getOwned("invoices", req.params.id, uid);
-    res.json({ success: true, dry_run: dryRun, result, invoice: updatedInvoice ? normalizeInvoice(updatedInvoice) : null });
+    const updatedInvoice = await getInvoiceLedgerRecord(uid, req.params.id);
+    res.json({ success: true, dry_run: dryRun, result, invoice: updatedInvoice });
   }));
 
   app.get("/api/invoices/:id/qr", asyncRoute(async (req, res) => {
@@ -1572,18 +2084,18 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       res.status(404).json({ error: "الفاتورة غير موجودة." });
       return;
     }
-    const invoice = normalizeInvoice(existing);
-    const timestamp = invoiceQrTimestamp(invoice);
-    const sellerName = invoice.seller_name || "Breexe Pro Co.";
-    const sellerVat = invoice.seller_vat || invoice.seller_vat_number || "313049114100003";
-    const total = Number(invoice.total_with_vat || 0);
-    const vatTotal = Number(invoice.vat_amount || invoice.vat || 0);
-    const qrInput = { sellerName, vatNumber: sellerVat, timestamp, total, vatTotal };
-    const qr = generateZatcaQrBase64(qrInput);
+    if (invoiceIsMutableDraft(existing)) {
+      res.status(409).json({ error: "المسودة لا تحمل رمز فاتورة ضريبية نهائيًا؛ أصدرها أولًا." });
+      return;
+    }
+    const { input: qrInput, qr } = verifiedInvoiceQr(existing);
     res.json({
       qr_base64: qr,
       format: "TLV_BASE64",
-      phase: "ZATCA phase 1 QR fields",
+      phase: "ZATCA Phase 1 basic TLV fields (tags 1-5)",
+      compliance_level: "phase1_basic_tlv",
+      phase2_integrated: false,
+      warning: "لا يشمل هذا الرمز توقيع XML أو الربط والإرسال المطلوبين للمرحلة الثانية.",
       fields: zatcaQrFields(qrInput),
     });
   }));
@@ -1595,10 +2107,14 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       res.status(404).json({ error: "عرض السعر غير موجود." });
       return;
     }
+    const items = verifiableInvoiceItems(existing.items);
+    if (!items) {
+      res.status(400).json({ error: "لا يمكن تحويل عرض السعر: صحّح الوصف والكمية والسعر في جميع البنود أولًا." });
+      return;
+    }
     const quote = normalizeQuote(existing);
-    const all = await listOwned("invoices", uid, undefined, 10000);
+    const idempotencyKey = `quote:${req.params.id}`;
     const settings = await getSettings(uid);
-    const items = normalizeInvoiceItems(quote.items || []);
     const totals = invoiceTotals(
       items,
       quote.discount_value ?? quote.discount,
@@ -1612,31 +2128,51 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       taxableAmount: totals.total_without_vat,
     });
     const sellerVatNumber = String(req.body?.seller_vat_number || req.body?.seller_vat || settings.seller_vat_number || "313049114100003").trim();
-    const payload = clean({
-      invoice_number: invoiceNumber(Date.now(), nextSequence(all, "invoice_number")),
-      quote_id: req.params.id,
-      customer_id: quote.customer_id || null,
-      customer_name: quote.customer_name || "",
-      customer_phone: quote.customer_phone || "",
-      customer_city: quote.customer_city || "",
-      customer_vat: quote.customer_vat || "",
-      title: quote.title || "",
-      invoice_type: invoiceType,
-      status: "issued",
-      issue_date: todayInTimeZone(),
-      payment_method: quote.payment_method || "",
-      currency: quote.currency || "SAR",
-      items,
-      notes: quote.notes || "",
-      terms: quote.terms || "",
-      ...totals,
-      seller_name: String(req.body?.seller_name || settings.seller_name || "Breexe Pro Co.").trim(),
-      seller_vat: sellerVatNumber,
-      seller_vat_number: sellerVatNumber,
-      seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
+    const result = await createAtomicInvoiceDocumentWithDatabase(adminDb as any, {
+      ownerUid: uid,
+      idempotencyKey,
+      issued: true,
+      legacyIdentity: { field: "quote_id", value: req.params.id },
+      build: ({ sequence, issuedAt }) => {
+        if (!sequence || !issuedAt) throw new Error("تعذر حجز رقم الفاتورة الضريبية.");
+        const payload = clean({
+          invoice_number: invoiceNumber(issuedAt, sequence),
+          document_kind: "invoice",
+          sequence_no: sequence,
+          issued_at: issuedAt,
+          source_invoice_id: null,
+          adjustment_kind: null,
+          adjustment_scope: null,
+          adjustment_reason: null,
+          quote_id: req.params.id,
+          customer_id: quote.customer_id || null,
+          customer_name: quote.customer_name || "",
+          customer_phone: quote.customer_phone || "",
+          customer_city: quote.customer_city || "",
+          customer_vat: quote.customer_vat || "",
+          title: quote.title || "",
+          invoice_type: invoiceType,
+          status: "issued",
+          issue_date: todayInTimeZone(),
+          payment_method: quote.payment_method || "",
+          currency: quote.currency || "SAR",
+          items,
+          notes: quote.notes || "",
+          terms: quote.terms || "",
+          ...totals,
+          seller_name: String(req.body?.seller_name || settings.seller_name || "BreeXe Pro Co.").trim(),
+          seller_vat: sellerVatNumber,
+          seller_vat_number: sellerVatNumber,
+          seller_address: String(req.body?.seller_address || settings.seller_address || "شركة بريكس برو شخص واحد ذات مسؤولية محدودة - الرياض").trim(),
+        });
+        verifiedInvoiceQr(payload, 400);
+        return payload;
+      },
     });
-    const id = await createOwned("invoices", uid, payload);
-    const invoice = await getOwned("invoices", id, uid);
-    res.status(201).json({ id, invoice: invoice ? normalizeInvoice(invoice) : null });
+    res.status(result.created ? 201 : 200).json({
+      id: result.id,
+      invoice: normalizeInvoice(result.data),
+      idempotent_replay: !result.created,
+    });
   }));
 }

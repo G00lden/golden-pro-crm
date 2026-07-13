@@ -44,6 +44,9 @@ npm run build
 .\scripts\deploy-vps.ps1 -HostName "SERVER_IP" -SshKey "C:\path\to\key.pem"
 ```
 
+في أول نشر فقط، وبعد التحقق أن الخادم لا يحتوي خدمة CRM أو بيانات سابقة، أضف
+`-AllowFirstDeployWithoutBackup`. لا تستخدم هذا الخيار لتجاوز فشل اكتشاف نشر قائم.
+
 السكربت يقوم بـ:
 
 - تثبيت Docker وDocker Compose على Ubuntu.
@@ -89,10 +92,12 @@ https://crm.breexe-pro.com/api/integrations/salla/callback
 
 ```bash
 cd /opt/golden-pro-crm
-docker compose -f deploy/docker-compose.yml ps
-docker compose -f deploy/docker-compose.yml logs -f --tail=100
-docker compose -f deploy/docker-compose.yml restart
+docker compose --env-file .env.production -f deploy/docker-compose.yml ps
+docker compose --env-file .env.production -f deploy/docker-compose.yml logs -f --tail=100
 ```
+
+أي إعادة بناء أو إعادة تشغيل أو تحديث تمر عبر `scripts/deploy-vps.ps1` من جهاز
+الإدارة؛ أوامر Compose المباشرة أعلاه للمشاهدة فقط لأنها لا تنفذ النسخ والقفل والتراجع.
 
 ## 7. الأمان قبل الإطلاق
 

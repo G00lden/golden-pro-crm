@@ -13,6 +13,11 @@ const requiredTables = [
   { name: "store_orders", select: "id" },
   { name: "store_webhook_events", select: "id" },
   { name: "technician_notifications", select: "id" },
+  {
+    name: "invoices",
+    select: "id,document_kind,sequence_no,issued_at,source_invoice_id,adjustment_kind,adjustment_scope,adjustment_reason,idempotency_key",
+  },
+  { name: "invoice_sequences", select: "owner_uid,series,last_value" },
 ];
 
 function fail(message) {
@@ -79,22 +84,41 @@ async function main() {
     }
   }
 
+  const { response: schemaResponse, body: schema } = await rest("", key);
+  if (
+    schemaResponse.ok
+    && schema
+    && typeof schema === "object"
+    && schema.paths
+    && schema.paths["/rpc/allocate_invoice_sequence"]
+  ) {
+    pass("RPC allocate_invoice_sequence is exposed to the server role");
+  } else {
+    fail("RPC allocate_invoice_sequence is missing; apply supabase/migrations before switching the release.");
+  }
+
   if (!anon) {
     warn("Publishable/anon key is missing; skipped browser-key RLS smoke check.");
     return;
   }
 
-  for (const table of ["customers", "store_orders", "technician_notifications"]) {
-    const { response, body } = await rest(`${table}?select=id&limit=0`, anon);
+  for (const table of [
+    { name: "customers", select: "id" },
+    { name: "store_orders", select: "id" },
+    { name: "technician_notifications", select: "id" },
+    { name: "invoices", select: "id" },
+    { name: "invoice_sequences", select: "owner_uid" },
+  ]) {
+    const { response, body } = await rest(`${table.name}?select=${table.select}&limit=1`, anon);
     if (!response.ok) {
-      pass(`Browser key cannot freely read ${table} (${response.status})`);
+      pass(`Browser key cannot freely read ${table.name} (${response.status})`);
       continue;
     }
     if (Array.isArray(body) && body.length === 0) {
-      pass(`Browser key returned no unauthenticated rows from ${table}`);
+      pass(`Browser key returned no unauthenticated rows from ${table.name}`);
       continue;
     }
-    fail(`Browser key can read rows from ${table}; verify RLS policies immediately.`);
+    fail(`Browser key can read rows from ${table.name}; verify RLS policies immediately.`);
   }
 }
 

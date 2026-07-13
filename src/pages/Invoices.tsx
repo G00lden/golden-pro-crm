@@ -25,7 +25,14 @@ import { createPortal, flushSync } from "react-dom";
 import * as api from "../api";
 import { useDialogAccessibility } from "../dialogAccessibility";
 import { calculateDocumentLineAmounts, calculateDocumentTotals } from "../../shared/financial";
-import { generateZatcaQrBase64, resolveInvoiceTaxType } from "../../shared/zatca";
+import { verifiableInvoiceItems } from "../../shared/invoiceItems";
+import { invoiceIsCreditNote, invoiceIsMutableDraft } from "../../shared/invoiceLifecycle";
+import {
+  cleanInvoiceTerms,
+  generateZatcaQrBase64,
+  invoiceQrTimestamp,
+  resolveInvoiceTaxType,
+} from "../../shared/zatca";
 
 type Notifier = (message: string, ok?: boolean) => void;
 
@@ -47,11 +54,14 @@ const money = (value?: number, currency = "SAR") =>
 
 const productPrice = (product?: api.Product) => Number(product?.sale_price ?? product?.price ?? 0);
 const sellerLegalName = "شركة بريكس برو شخص واحد ذات مسؤولية محدودة";
-const sellerEnglishName = "Breexe Pro Co.";
+const sellerEnglishName = "BreeXe Pro Co.";
 const sellerCrNumber = "7016449519";
 const sellerPhone = "+966533971168";
 
 const invoiceKind = (invoice: api.Invoice) => {
+  if (invoiceIsCreditNote(invoice)) {
+    return { type: invoice.invoice_type || "simplified", ar: "إشعار دائن ضريبي", en: "Tax Credit Note" };
+  }
   const type = resolveInvoiceTaxType({
     requested: invoice.invoice_type,
     buyerVat: invoice.customer_vat,
@@ -100,38 +110,61 @@ const escapeHtml = (value: string) =>
 
 /* ── ZATCA QR Code Generation (TLV format) ─────────────── */
 
-function invoiceTimestamp(invoice: api.Invoice): string {
-  const source = invoice.createdAt || `${invoice.issue_date}T00:00:00Z`;
-  const parsed = new Date(source);
-  if (Number.isNaN(parsed.getTime())) return `${invoice.issue_date}T00:00:00Z`;
-  return parsed.toISOString().replace(/\.\d{3}Z$/, "Z");
+function generateZATCAQR(invoice: api.Invoice): string {
+  if (invoiceIsMutableDraft(invoice)) {
+    throw new Error("المسودة غير مصدرة ولا تحمل رمز فاتورة ضريبية نهائيًا.");
+  }
+  if (invoice.financials_verifiable === false) {
+    throw new Error("لا يمكن إنشاء رمز QR قبل تصحيح بنود الفاتورة التاريخية غير القابلة للتحقق.");
+  }
+  const verifiableItems = verifiableInvoiceItems(invoice.items);
+  if (!verifiableItems) {
+    throw new Error("لا يمكن إنشاء رمز QR: صحّح الوصف والكمية والسعر في جميع بنود الفاتورة.");
+  }
+  if (!Array.isArray(invoice.items) || !invoice.items.length) {
+    throw new Error("لا يمكن إنشاء رمز QR قبل وجود بند واحد على الأقل في الفاتورة.");
+  }
+  const explicitDiscount = Number(invoice.discount_value);
+  const historicalDiscount = Number(invoice.discount);
+  const discountValue = invoice.discount_mode === "percent"
+    ? (Number.isFinite(explicitDiscount) ? explicitDiscount : 0)
+    : Number.isFinite(explicitDiscount) && (explicitDiscount > 0 || historicalDiscount <= 0)
+      ? explicitDiscount
+      : historicalDiscount;
+  const totals = calculateDocumentTotals({
+    lines: verifiableItems,
+    discountValue,
+    discountMode: invoice.discount_mode === "percent" ? "percent" : "fixed",
+    vatPercent: invoice.vat_percent,
+    additionalTax: invoice.additional_fee,
+  });
+  return generateZatcaQrBase64({
+    sellerName: invoice.seller_name || sellerEnglishName,
+    vatNumber: invoice.seller_vat_number,
+    timestamp: invoiceQrTimestamp({ issueDate: invoice.issue_date, createdAt: invoice.createdAt }),
+    total: totals.total,
+    vatTotal: totals.vatAmount,
+  });
 }
 
-function generateZATCAQR(invoice: api.Invoice): string {
-  try {
-    return generateZatcaQrBase64({
-      sellerName: invoice.seller_name || sellerEnglishName,
-      vatNumber: invoice.seller_vat_number,
-      timestamp: invoiceTimestamp(invoice),
-      total: invoice.total_with_vat,
-      vatTotal: invoice.vat_amount,
-    });
-  } catch {
-    return "";
-  }
+function qrErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "تعذر إنشاء رمز QR للفاتورة.";
 }
 
 /* ── QR Code component ─────────────────────────────────── */
 
-function QRCodeDisplay({ data, size = 80 }: { data: string; size?: number }) {
+function QRCodeDisplay({ data, error, size = 80 }: { data: string; error?: string; size?: number }) {
   const [src, setSrc] = useState("");
+  const [renderError, setRenderError] = useState("");
 
   useEffect(() => {
     let active = true;
     if (!data) {
       setSrc("");
+      setRenderError(error || "تعذر إنشاء رمز QR للفاتورة.");
       return () => { active = false; };
     }
+    setRenderError("");
     QRCode.toDataURL(data, {
       errorCorrectionLevel: "M",
       margin: 1,
@@ -140,16 +173,31 @@ function QRCodeDisplay({ data, size = 80 }: { data: string; size?: number }) {
     }).then((value) => {
       if (active) setSrc(value);
     }).catch(() => {
-      if (active) setSrc("");
+      if (active) {
+        setSrc("");
+        setRenderError("تعذر رسم رمز QR للفاتورة.");
+      }
     });
     return () => {
       active = false;
     };
-  }, [data, size]);
+  }, [data, error, size]);
 
-  return src
-    ? <img src={src} width={size} height={size} className="zatca-qr-code" alt="ZATCA QR code" />
-    : <div className="zatca-qr-code qr-fallback" style={{ width: size, height: size }}>QR</div>;
+  return (
+    <div className="zatca-qr-slot">
+      {data && src
+        ? <img src={src} width={size} height={size} className="zatca-qr-code" alt="رمز الفاتورة الضريبية" />
+        : (
+          <div
+            className="zatca-qr-error"
+            role={error || renderError ? "alert" : "status"}
+            style={{ maxWidth: size * 1.5 }}
+          >
+            {error || renderError || "جارٍ إنشاء رمز QR…"}
+          </div>
+        )}
+    </div>
+  );
 }
 
 /* ── Data hook ─────────────────────────────────────────── */
@@ -170,8 +218,7 @@ const invoiceStandaloneCss = `
   }
   .invoice-doc-head { grid-template-columns: minmax(0, 1fr) minmax(170px, auto) !important; }
   .invoice-identity-grid { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
-  .invoice-parties { grid-template-columns: minmax(0, 1fr) minmax(0, 250px) !important; align-items: stretch !important; }
-  .invoice-party-side { display: grid !important; gap: 8px !important; grid-template-rows: auto 1fr !important; }
+  .invoice-parties { grid-template-columns: minmax(0, 1fr) auto !important; align-items: stretch !important; }
   .invoice-bottom-grid { display: flex !important; justify-content: flex-end !important; align-items: start !important; }
   .invoice-doc-totals { width: min(100%, 300px) !important; }
   .invoice-doc-table { display: table !important; }
@@ -203,32 +250,31 @@ const invoiceStandaloneCss = `
   .invoice-doc-table,
   .invoice-bottom-grid { margin-bottom: 8px !important; }
   .invoice-doc-head { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-  .invoice-brand-block img { height: 40px !important; width: 40px !important; object-fit: contain !important; flex-shrink: 0 !important; }
+  .invoice-brand-logo { width: 194px !important; height: 61px !important; object-fit: contain !important; flex-shrink: 0 !important; }
 `;
 
 async function replaceInvoiceQrInClone(clone: HTMLElement, invoice: api.Invoice) {
-  const qrTarget = clone.querySelector<HTMLElement>(".zatca-qr-code");
-  if (!qrTarget) return;
+  const qrTarget = clone.querySelector<HTMLElement>(".zatca-qr-slot");
+  if (!qrTarget) throw new Error("رمز QR غير موجود في مستند الفاتورة، لذلك أُوقفت الطباعة.");
   const qrData = generateZATCAQR(invoice);
-  if (!qrData) return;
   const qrSrc = await QRCode.toDataURL(qrData, {
     errorCorrectionLevel: "M",
     margin: 1,
-    width: 140,
+    width: 104,
     color: { dark: "#000000", light: "#ffffff" },
   });
   if (qrTarget instanceof HTMLImageElement) {
     qrTarget.src = qrSrc;
-    qrTarget.width = 140;
-    qrTarget.height = 140;
+    qrTarget.width = 104;
+    qrTarget.height = 104;
     return;
   }
   const qrImage = document.createElement("img");
   qrImage.src = qrSrc;
-  qrImage.width = 140;
-  qrImage.height = 140;
+  qrImage.width = 104;
+  qrImage.height = 104;
   qrImage.className = "zatca-qr-code";
-  qrImage.alt = "ZATCA QR code";
+  qrImage.alt = "رمز الفاتورة الضريبية";
   qrTarget.replaceWith(qrImage);
 }
 
@@ -437,10 +483,11 @@ function InvoiceModal({ title, children, onClose }: { title: string; children: R
 
 function invoiceSummaryRows(stats: api.InvoiceStats) {
   return [
-    { label: "كل الفواتير", value: stats.total, icon: <FileText size={18} /> },
+    { label: "كل المستندات", value: stats.total, icon: <FileText size={18} /> },
     { label: "مصدرة", value: stats.issued, icon: <Send size={18} /> },
     { label: "مرسلة", value: stats.sent, icon: <MessageCircle size={18} /> },
     { label: "مدفوعة", value: stats.paid, icon: <CheckCircle2 size={18} /> },
+    { label: "إشعارات دائنة", value: stats.credit_notes || 0, icon: <RefreshCcw size={18} /> },
   ];
 }
 
@@ -448,6 +495,7 @@ function invoiceSummaryRows(stats: api.InvoiceStats) {
 
 function invoiceShareText(invoice: api.Invoice) {
   const lines = invoice.items.map((item) => `- ${item.description} × ${item.quantity}: ${money(item.total, invoice.currency)}`);
+  const visibleTerms = cleanInvoiceTerms(invoice.terms);
   return [
     `${invoiceKind(invoice).ar} - ${invoice.seller_name || sellerEnglishName}`,
     `رقم الفاتورة: ${invoice.invoice_number}`,
@@ -464,7 +512,7 @@ function invoiceShareText(invoice: api.Invoice) {
     `ضريبة القيمة المضافة (${invoice.vat_percent}%): ${money(invoice.vat_amount, invoice.currency)}`,
     Number(invoice.additional_fee || 0) > 0 ? `رسوم إضافية: ${money(invoice.additional_fee, invoice.currency)}` : "",
     `الإجمالي شامل الضريبة: ${money(invoice.total_with_vat, invoice.currency)}`,
-    invoice.terms ? `الشروط: ${invoice.terms}` : "",
+    visibleTerms ? `الشروط: ${visibleTerms}` : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -478,7 +526,13 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   const [creating, setCreating] = useState(false);
   const [invoiceFormDirty, setInvoiceFormDirty] = useState(false);
   const [sendingInvoiceId, setSendingInvoiceId] = useState("");
+  const [payingInvoiceId, setPayingInvoiceId] = useState("");
+  const payingInvoiceIdsRef = useRef(new Set<string>());
+  const paymentIdempotencyKeysRef = useRef(new Map<string, string>());
+  const paymentReconciliationStartedRef = useRef(false);
   const invoices = useAsyncData(() => api.getInvoices({ search, status }), [search, status]);
+  const paymentCapabilities = useAsyncData(api.getPaymentCapabilities, []);
+  const paymentUnavailableMessage = "بوابة الدفع غير مهيأة حاليًا. تواصل مع مسؤول النظام لتفعيلها.";
   const stats = invoices.data?.stats || {
     total: 0,
     draft: 0,
@@ -494,6 +548,39 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   const refreshAll = async () => {
     await Promise.all([invoices.refresh(), refreshStats()]);
   };
+
+  useEffect(() => {
+    if (paymentReconciliationStartedRef.current) return;
+    const redirectUrl = new URL(window.location.href);
+    const paymentId = redirectUrl.searchParams.get("payment_id")?.trim() || "";
+    const tapChargeId = redirectUrl.searchParams.get("tap_id")?.trim() || "";
+    if (!paymentId || !tapChargeId) return;
+    paymentReconciliationStartedRef.current = true;
+
+    void (async () => {
+      try {
+        const result = await api.getPaymentStatus(paymentId, tapChargeId);
+        if (result.status === "completed") {
+          notify("تم التحقق من Tap وتحديث الفاتورة كمدفوعة");
+        } else if (result.status === "failed" || result.status === "cancelled") {
+          notify("لم تكتمل عملية الدفع في Tap.", false);
+        } else {
+          notify("تمت مطابقة عملية Tap وما زالت قيد المعالجة.");
+        }
+        await refreshAll();
+      } catch (error) {
+        notify(error instanceof Error ? error.message : "تعذر التحقق من نتيجة الدفع في Tap.", false);
+      } finally {
+        redirectUrl.searchParams.delete("payment_id");
+        redirectUrl.searchParams.delete("tap_id");
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`,
+        );
+      }
+    })();
+  }, []);
 
   const saveInvoice = async (payload: api.InvoiceInput) => {
     try {
@@ -520,6 +607,10 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   };
 
   const openInvoiceEditor = (invoice: api.Invoice) => {
+    if (!invoiceIsMutableDraft(invoice)) {
+      notify("الفاتورة المصدرة سجل مالي ثابت؛ يمكن تعديل المسودة فقط.", false);
+      return;
+    }
     setInvoiceFormDirty(false);
     setCreating(false);
     setEditing(invoice);
@@ -533,17 +624,28 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   }, [invoiceFormDirty]);
 
   const setInvoiceStatus = async (invoice: api.Invoice, nextStatus: api.InvoiceStatus) => {
-    if (
-      (nextStatus === "cancelled" || nextStatus === "refunded")
-      && !window.confirm(
+    let reason = "";
+    if (nextStatus === "cancelled" || nextStatus === "refunded") {
+      const entered = window.prompt(
         nextStatus === "cancelled"
-          ? `تأكيد إلغاء الفاتورة ${invoice.invoice_number}؟`
-          : `تأكيد تعليم الفاتورة ${invoice.invoice_number} كمستردة؟`,
-      )
-    ) return;
+          ? `اكتب سبب إلغاء الفاتورة ${invoice.invoice_number} وإنشاء إشعار دائن كامل:`
+          : `اكتب سبب استرداد الفاتورة ${invoice.invoice_number} وإنشاء إشعار دائن كامل:`,
+        nextStatus === "cancelled" ? "إلغاء كامل بناءً على طلب العميل" : "استرداد كامل بناءً على طلب العميل",
+      );
+      if (entered === null) return;
+      reason = entered.trim();
+      if (reason.length < 3) {
+        notify("سبب الإلغاء أو الاسترداد مطلوب.", false);
+        return;
+      }
+    }
     try {
-      await api.setInvoiceStatus(invoice.id, nextStatus);
-      notify(nextStatus === "paid" ? "تم تأكيد الدفع" : nextStatus === "cancelled" ? "تم إلغاء الفاتورة" : "تم تحديث حالة الفاتورة");
+      await api.setInvoiceStatus(invoice.id, nextStatus, reason);
+      notify(nextStatus === "paid"
+        ? "تم تأكيد الدفع"
+        : nextStatus === "cancelled" || nextStatus === "refunded"
+          ? "تم إنشاء إشعار دائن مرتبط مع إبقاء الفاتورة الأصلية محفوظة"
+          : "تم تحديث حالة الفاتورة");
       await refreshAll();
     } catch (err) {
       notify(err instanceof Error ? err.message : "تعذر تحديث الفاتورة", false);
@@ -581,9 +683,15 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
         await printInvoiceInNewWindow(invoice, printWindow);
         notify("تم فتح مستند طباعة مستقل للفاتورة فقط");
       }
-    } catch {
+    } catch (error) {
       printWindow?.close();
-      notify(asPdf ? "تعذر حفظ PDF للفاتورة." : "تعذر فتح مستند الطباعة. اسمح بفتح النوافذ المنبثقة ثم حاول مرة أخرى.", false);
+      const reason = qrErrorMessage(error);
+      notify(
+        asPdf
+          ? `تعذر حفظ PDF للفاتورة: ${reason}`
+          : `تعذر فتح مستند الطباعة: ${reason}`,
+        false,
+      );
     } finally {
       document.title = previousTitle;
     }
@@ -603,9 +711,19 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     setSendingInvoiceId(invoice.id);
     try {
       const response = await api.sendInvoiceWhatsApp(invoice, invoiceShareText(invoice));
-      const typedResponse = response as { dry_run?: boolean; result?: { dryRun?: boolean } };
+      const typedResponse = response as {
+        dry_run?: boolean;
+        result?: { dryRun?: boolean };
+        invoice?: api.Invoice | null;
+      };
       const dryRun = Boolean(typedResponse.dry_run || typedResponse.result?.dryRun);
-      if (!dryRun && (invoice.status === "draft" || invoice.status === "issued")) {
+      const returnedInvoice = typedResponse.invoice;
+      if (
+        !dryRun
+        && !invoiceIsCreditNote(invoice)
+        && invoice.status === "issued"
+        && returnedInvoice?.status !== "sent"
+      ) {
         await api.setInvoiceStatus(invoice.id, "sent");
       }
       notify(dryRun ? "تمت محاكاة إرسال الفاتورة فقط؛ لم تُرسل للعميل ولم تتغير حالتها" : "تم إرسال الفاتورة عبر واتساب");
@@ -622,16 +740,30 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       notify("الفاتورة مدفوعة مسبقاً");
       return;
     }
+    if (payingInvoiceIdsRef.current.has(invoice.id)) return;
+
+    payingInvoiceIdsRef.current.add(invoice.id);
+    setPayingInvoiceId(invoice.id);
+    const existingKey = paymentIdempotencyKeysRef.current.get(invoice.id);
+    const idempotencyKey = existingKey || `payment:${invoice.id}:${crypto.randomUUID()}`;
+    paymentIdempotencyKeysRef.current.set(invoice.id, idempotencyKey);
     try {
-      const result = await api.createPayment(invoice.id);
+      const result = await api.createPayment(invoice.id, idempotencyKey);
       if (result.redirect_url) {
         window.open(result.redirect_url, "_blank", "noopener,noreferrer");
         notify("جاري توجيهك لبوابة الدفع…");
+      } else if (result.status === "completed") {
+        notify("تم تأكيد الدفع وتحديث الفاتورة");
+        await refreshAll();
       } else {
         notify("تعذر إنشاء جلسة دفع. تأكد من إعداد بوابة الدفع.", false);
       }
     } catch (err) {
+      paymentIdempotencyKeysRef.current.delete(invoice.id);
       notify(err instanceof Error ? err.message : "فشل الاتصال ببوابة الدفع", false);
+    } finally {
+      payingInvoiceIdsRef.current.delete(invoice.id);
+      setPayingInvoiceId((current) => current === invoice.id ? "" : current);
     }
   };
 
@@ -640,8 +772,8 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       <section className="cloud-hero quotes-hero">
         <div className="cloud-hero-copy">
           <span className="eyebrow">الفواتير الضريبية</span>
-          <h1>الفواتير الضريبية (ZATCA)</h1>
-          <p>إصدار فواتير ضريبية واضحة مع رمز QR لحقول المرحلة الأولى. التكامل مع منصة فاتورة للمرحلة الثانية غير مفعّل بعد.</p>
+          <h1>الفواتير الضريبية</h1>
+          <p>إصدار الفواتير وإدارتها وطباعتها ومشاركتها مع العملاء.</p>
           <div className="hero-actions">
             <button className="btn primary" type="button" onClick={openNewInvoice}>
               <Plus size={16} /> إصدار فاتورة
@@ -701,6 +833,13 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
         </select>
       </div>
 
+      {paymentCapabilities.data && !paymentCapabilities.data.available && (
+        <div className="error-box" id="invoice-payment-unavailable-reason" role="status">
+          <CreditCard size={16} aria-hidden="true" />
+          <span>{paymentUnavailableMessage}</span>
+        </div>
+      )}
+
       {invoices.loading ? (
         <div className="empty">
           <RefreshCcw size={26} className="spin" />
@@ -719,6 +858,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                 <div className="quote-title-line">
                   <strong>{invoice.invoice_number}</strong>
                   <InvoiceBadge status={invoice.status} />
+                  {invoiceIsCreditNote(invoice) && <span className="badge danger">إشعار دائن</span>}
                 </div>
                 <h3>{invoice.title || "فاتورة"}</h3>
                 <p>{invoice.customer_name} · {invoice.customer_phone || "بدون جوال"} · {invoice.customer_city || "بدون مدينة"}</p>
@@ -726,6 +866,9 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                   <span className="badge muted"><CalendarDays size={12} /> {invoice.issue_date}</span>
                   {invoice.due_date && <span className="badge warn">مستحق {invoice.due_date}</span>}
                   {invoice.paid_at && <span className="badge success">تم الدفع</span>}
+                  {invoiceIsCreditNote(invoice) && invoice.source_invoice_number && (
+                    <span className="badge muted">مرتبط بـ {invoice.source_invoice_number}</span>
+                  )}
                   {invoice.seller_vat_number && <span className="badge muted">VAT: {invoice.seller_vat_number}</span>}
                 </div>
               </div>
@@ -735,25 +878,35 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                 <small>ضريبة {money(invoice.vat_amount, invoice.currency)}</small>
               </div>
               <div className="row-actions">
-                <button className="icon-btn success" type="button" title="تأكيد الدفع" aria-label="تأكيد الدفع" onClick={() => setInvoiceStatus(invoice, "paid")} disabled={invoice.status === "paid"}>
-                  <CheckCircle2 size={15} />
-                </button>
-                <button className="icon-btn" type="button" title="تعليم كمرسلة" aria-label="تعليم الفاتورة كمرسلة" onClick={() => setInvoiceStatus(invoice, "sent")} disabled={invoice.status === "sent" || invoice.status === "paid"}>
-                  <Send size={15} />
-                </button>
-                <button className="icon-btn" type="button" title="طباعة" aria-label="طباعة الفاتورة" onClick={() => printInvoice(invoice)}>
-                  <Printer size={15} />
-                </button>
+                {!invoiceIsCreditNote(invoice) && (invoice.status === "issued" || invoice.status === "sent") && (
+                  <button className="icon-btn success" type="button" title="تأكيد الدفع" aria-label="تأكيد الدفع" onClick={() => setInvoiceStatus(invoice, "paid")}>
+                    <CheckCircle2 size={15} />
+                  </button>
+                )}
+                {!invoiceIsCreditNote(invoice) && invoice.status === "issued" && (
+                  <button className="icon-btn" type="button" title="تعليم كمرسلة" aria-label="تعليم الفاتورة كمرسلة" onClick={() => setInvoiceStatus(invoice, "sent")}>
+                    <Send size={15} />
+                  </button>
+                )}
+                {!invoiceIsMutableDraft(invoice) && (
+                  <button className="icon-btn" type="button" title="طباعة" aria-label="طباعة الفاتورة" onClick={() => printInvoice(invoice)}>
+                    <Printer size={15} />
+                  </button>
+                )}
                 <button className="icon-btn" type="button" title="معاينة" aria-label="معاينة الفاتورة" onClick={() => setPreview(invoice)}>
                   <Eye size={15} />
                 </button>
-                <button className="icon-btn" type="button" title="نسخ" aria-label="نسخ نص الفاتورة" onClick={() => copyInvoice(invoice)}>
-                  <Copy size={15} />
-                </button>
-                <button className="icon-btn" type="button" title="تعديل" aria-label="تعديل الفاتورة" onClick={() => openInvoiceEditor(invoice)}>
-                  <Edit3 size={15} />
-                </button>
-                {invoice.customer_phone && (
+                {!invoiceIsMutableDraft(invoice) && (
+                  <button className="icon-btn" type="button" title="نسخ" aria-label="نسخ نص الفاتورة" onClick={() => copyInvoice(invoice)}>
+                    <Copy size={15} />
+                  </button>
+                )}
+                {invoiceIsMutableDraft(invoice) && (
+                  <button className="icon-btn" type="button" title="تعديل المسودة" aria-label="تعديل مسودة الفاتورة" onClick={() => openInvoiceEditor(invoice)}>
+                    <Edit3 size={15} />
+                  </button>
+                )}
+                {invoice.customer_phone && invoice.status !== "draft" && (
                   <button
                     className="icon-btn"
                     type="button"
@@ -765,26 +918,47 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                     <MessageCircle size={15} />
                   </button>
                 )}
-                {invoice.status !== "paid" && invoice.status !== "cancelled" && (
+                {!invoiceIsCreditNote(invoice) && (invoice.status === "issued" || invoice.status === "sent") && (
                   <button
                     className="icon-btn accent"
                     type="button"
-                    title="ادفع الآن"
-                    aria-label="دفع الفاتورة الآن"
+                    title={payingInvoiceId === invoice.id
+                      ? "جاري إنشاء رابط الدفع"
+                      : paymentCapabilities.data?.available
+                        ? "ادفع الآن"
+                        : paymentUnavailableMessage}
+                    aria-label={payingInvoiceId === invoice.id
+                      ? "جاري إنشاء رابط الدفع"
+                      : paymentCapabilities.data?.available
+                        ? "دفع الفاتورة الآن"
+                        : paymentUnavailableMessage}
+                    aria-describedby={paymentCapabilities.data && !paymentCapabilities.data.available
+                      ? "invoice-payment-unavailable-reason"
+                      : undefined}
+                    aria-busy={payingInvoiceId === invoice.id || undefined}
+                    disabled={payingInvoiceId === invoice.id || !paymentCapabilities.data?.available}
                     onClick={() => handlePayInvoice(invoice)}
                   >
-                    <CreditCard size={15} />
+                    {payingInvoiceId === invoice.id
+                      ? <RefreshCcw size={15} className="spin" aria-hidden="true" />
+                      : <CreditCard size={15} aria-hidden="true" />}
                   </button>
                 )}
-                <button className="icon-btn danger" type="button" title="إلغاء" aria-label="إلغاء الفاتورة" onClick={() => setInvoiceStatus(invoice, "cancelled")} disabled={invoice.status === "cancelled"}>
-                  <X size={15} />
-                </button>
-                <button className="icon-btn danger" type="button" title="مستردة" aria-label="تعليم الفاتورة كمستردة" onClick={() => setInvoiceStatus(invoice, "refunded")} disabled={invoice.status === "refunded"}>
-                  <RefreshCcw size={15} />
-                </button>
-                <button className="icon-btn danger" type="button" title="حذف" aria-label="حذف الفاتورة" onClick={() => remove(invoice)}>
-                  <Trash2 size={15} />
-                </button>
+                {!invoiceIsCreditNote(invoice) && (invoice.status === "issued" || invoice.status === "sent") && (
+                  <button className="icon-btn danger" type="button" title="إنشاء إشعار دائن للإلغاء" aria-label="إنشاء إشعار دائن لإلغاء الفاتورة" onClick={() => setInvoiceStatus(invoice, "cancelled")}>
+                    <X size={15} />
+                  </button>
+                )}
+                {!invoiceIsCreditNote(invoice) && invoice.status === "paid" && (
+                  <button className="icon-btn danger" type="button" title="إنشاء إشعار دائن للاسترداد" aria-label="إنشاء إشعار دائن لاسترداد الفاتورة" onClick={() => setInvoiceStatus(invoice, "refunded")}>
+                    <RefreshCcw size={15} />
+                  </button>
+                )}
+                {invoiceIsMutableDraft(invoice) && (
+                  <button className="icon-btn danger" type="button" title="حذف المسودة" aria-label="حذف مسودة الفاتورة" onClick={() => remove(invoice)}>
+                    <Trash2 size={15} />
+                  </button>
+                )}
               </div>
             </article>
           ))}
@@ -839,10 +1013,19 @@ function invoiceBreakdown(invoice: api.Invoice) {
 }
 
 function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; onCopy: () => void; onPrint: (asPdf?: boolean) => void }) {
-  const qrCode = useMemo(() => generateZATCAQR(invoice), [invoice]);
+  const qr = useMemo(() => {
+    if (invoiceIsMutableDraft(invoice)) {
+      return { data: "", error: "هذه مسودة غير مصدرة ولا تحمل رمز فاتورة ضريبية نهائيًا." };
+    }
+    try {
+      return { data: generateZATCAQR(invoice), error: "" };
+    } catch (error) {
+      return { data: "", error: qrErrorMessage(error) };
+    }
+  }, [invoice]);
   const kind = invoiceKind(invoice);
   const breakdown = useMemo(() => invoiceBreakdown(invoice), [invoice]);
-  const issueTime = invoiceTimestamp(invoice).replace("T", " ").replace("Z", " UTC");
+  const visibleTerms = cleanInvoiceTerms(invoice.terms);
   const [sellerOption, setSellerOption] = useState<string>(invoiceSellerOptions[0]);
   const [customSeller, setCustomSeller] = useState("");
   const exportSellerName = sellerOption === "custom" ? customSeller.trim() : sellerOption;
@@ -852,17 +1035,20 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
       <section className="invoice-a4-doc" dir="rtl">
         <header className="invoice-doc-head">
           <div className="invoice-brand-block">
-            <img src="/brand/icon-256.png" alt="BreeXe Pro" style={{ height: 40, width: 40, objectFit: "contain", flexShrink: 0 }} />
-            <div>
-              <span dir="ltr">{invoice.seller_name || sellerEnglishName}</span>
+            <img className="invoice-brand-logo" src="/brand/logo-full.png" alt="BreeXe Pro" width={194} height={61} />
+            <div className="invoice-brand-copy">
               <strong>{sellerLegalName}</strong>
               <small>{invoice.seller_address || "الرياض، المملكة العربية السعودية"}</small>
-              <small dir="ltr">{sellerPhone}</small>
+              <small><bdi dir="ltr">{sellerPhone}</bdi></small>
             </div>
           </div>
           <div className="invoice-title-block">
             <span>{kind.en}</span>
             <h2>{kind.ar}</h2>
+            {invoiceIsMutableDraft(invoice) && <span className="badge danger">مسودة — غير صالحة كفاتورة ضريبية مصدرة</span>}
+            {invoiceIsCreditNote(invoice) && invoice.source_invoice_number && (
+              <span className="badge muted">مرجع الفاتورة: {invoice.source_invoice_number}</span>
+            )}
             {invoice.title && <em style={{ display: "block", fontStyle: "normal", fontSize: "0.8em", opacity: 0.7 }}>{invoice.title}</em>}
             <strong>{invoice.invoice_number}</strong>
           </div>
@@ -870,17 +1056,16 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
 
         <section className="invoice-identity-grid">
           <article>
-            <span>رقم الفاتورة</span>
-            <strong>{invoice.invoice_number}</strong>
-          </article>
-          <article>
             <span>تاريخ الإصدار</span>
             <strong>{invoice.issue_date}</strong>
-            <small>{issueTime}</small>
           </article>
           <article>
             <span>الرقم الضريبي للبائع</span>
             <strong>{invoice.seller_vat_number || "-"}</strong>
+          </article>
+          <article>
+            <span>السجل التجاري</span>
+            <strong>{sellerCrNumber}</strong>
           </article>
           <article>
             <span>المندوب</span>
@@ -889,28 +1074,21 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
         </section>
 
         <section className="invoice-parties">
-          <article>
-            <h3>بيانات البائع</h3>
-            <p><span>الاسم:</span> <bdi>{invoice.seller_name || sellerEnglishName}</bdi></p>
-            <p><span>السجل/الاسم القانوني:</span> {sellerLegalName}</p>
-            <p><span>الرقم الضريبي:</span> {invoice.seller_vat_number || "-"}</p>
-            <p><span>السجل التجاري:</span> {sellerCrNumber}</p>
-            <p><span>الجوال:</span> <bdi dir="ltr">{sellerPhone}</bdi></p>
-            <p><span>العنوان:</span> {invoice.seller_address || "-"}</p>
+          <article className="invoice-customer-card">
+            <h3>بيانات العميل</h3>
+            <dl className="invoice-party-facts">
+              <div><dt>الاسم</dt><dd>{invoice.customer_name || "-"}</dd></div>
+              <div><dt>الجوال</dt><dd><bdi dir="ltr">{invoice.customer_phone || "-"}</bdi></dd></div>
+              <div><dt>المدينة</dt><dd>{invoice.customer_city || "-"}</dd></div>
+              <div><dt>الرقم الضريبي</dt><dd>{invoice.customer_vat || "-"}</dd></div>
+            </dl>
           </article>
-          <div className="invoice-party-side">
-            <article>
-              <h3>بيانات العميل</h3>
-              <p><span>الاسم:</span> {invoice.customer_name}</p>
-              <p><span>الجوال:</span> {invoice.customer_phone || "-"}</p>
-              <p><span>المدينة:</span> {invoice.customer_city || "-"}</p>
-              <p><span>الرقم الضريبي:</span> {invoice.customer_vat || "-"}</p>
-            </article>
-            <aside className="invoice-zatca-card">
-              <QRCodeDisplay data={qrCode} size={132} />
-              <span>رمز الاستجابة السريع — حقول زاتكا للمرحلة الأولى</span>
-            </aside>
-          </div>
+          <aside className="invoice-zatca-card" aria-label="رمز الفاتورة الضريبية">
+            <QRCodeDisplay key={qr.data || qr.error} data={qr.data} error={qr.error} size={96} />
+            <small style={{ maxWidth: 190, textAlign: "center", color: "#64748b", lineHeight: 1.5 }}>
+              رمز TLV أساسي للمرحلة الأولى؛ لا يمثل ربط المرحلة الثانية مع منصة فاتورة.
+            </small>
+          </aside>
         </section>
 
         <table className="invoice-doc-table">
@@ -965,10 +1143,7 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
           </div>
         </section>
 
-        {invoice.terms && <p className="invoice-doc-terms">{invoice.terms}</p>}
-        <footer className="invoice-doc-foot">
-          <strong>{sellerEnglishName}</strong>
-        </footer>
+        {visibleTerms && <p className="invoice-doc-terms">{visibleTerms}</p>}
       </section>
       <div className="form-actions">
         <div className="invoice-export-options">
@@ -986,9 +1161,9 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
             </label>
           )}
         </div>
-        <button className="btn primary" type="button" onClick={() => onPrint(false)}><Printer size={16} /> طباعة A4</button>
-        <button className="btn muted" type="button" onClick={() => onPrint(true)}><Download size={16} /> حفظ PDF</button>
-        <button className="btn muted" type="button" onClick={onCopy}><Copy size={16} /> نسخ نص الفاتورة</button>
+        <button className="btn primary" type="button" disabled={Boolean(qr.error)} onClick={() => onPrint(false)}><Printer size={16} /> طباعة A4</button>
+        <button className="btn muted" type="button" disabled={Boolean(qr.error)} onClick={() => onPrint(true)}><Download size={16} /> حفظ PDF</button>
+        <button className="btn muted" type="button" disabled={invoiceIsMutableDraft(invoice)} onClick={onCopy}><Copy size={16} /> نسخ نص الفاتورة</button>
       </div>
     </div>
   );
@@ -1066,13 +1241,14 @@ function InvoiceForm({
       })),
     [items],
   );
+  const parsedVatPercent = Number(vatPercent || 0);
   const financialTotals = useMemo(() => calculateDocumentTotals({
     lines: normalizedItems,
     discountValue: Number(discountValue || 0),
     discountMode,
-    vatPercent: Number(vatPercent || 0),
+    vatPercent: parsedVatPercent,
     additionalTax: Number(additionalFee || 0),
-  }), [normalizedItems, discountValue, discountMode, vatPercent, additionalFee]);
+  }), [normalizedItems, discountValue, discountMode, parsedVatPercent, additionalFee]);
   const vatRate = financialTotals.vatPercent / 100;
   const resolvedInvoiceType = resolveInvoiceTaxType({
     requested: invoiceType,
@@ -1102,7 +1278,14 @@ function InvoiceForm({
     event.preventDefault();
     setSaving(true);
     try {
-      await onSave({
+      const missingDescriptionIndex = normalizedItems.findIndex((item) => !item.description.trim());
+      if (missingDescriptionIndex < 0 && !verifiableInvoiceItems(normalizedItems)) {
+        throw new Error("يجب إدخال وصف وكمية أكبر من صفر وسعر غير سالب لكل بند.");
+      }
+      if (missingDescriptionIndex >= 0) {
+        throw new Error(`أدخل وصف البند رقم ${missingDescriptionIndex + 1} أو احذف البند قبل حفظ الفاتورة`);
+      }
+      const payload: api.InvoiceInput = {
         quote_id: initial?.quote_id || null,
         customer_id: customerId || null,
         customer_name: customerName.trim(),
@@ -1114,19 +1297,27 @@ function InvoiceForm({
         status,
         issue_date: issueDate,
         due_date: dueDate || null,
-        vat_percent: Number(vatPercent || 15),
+        vat_percent: parsedVatPercent,
         discount: financialTotals.discountAmount,
         discount_mode: discountMode,
         discount_value: Number(discountValue || 0),
         additional_fee: financialTotals.additionalTax,
         currency: "SAR",
-        items: normalizedItems.filter((item) => item.description.trim()),
+        items: normalizedItems,
         notes: notes.trim(),
         terms: terms.trim(),
         seller_name: sellerName.trim() || sellerEnglishName,
         seller_vat_number: sellerVat.trim(),
         seller_address: sellerAddress.trim(),
+      };
+      generateZatcaQrBase64({
+        sellerName: payload.seller_name || sellerEnglishName,
+        vatNumber: payload.seller_vat_number || "",
+        timestamp: invoiceQrTimestamp({ issueDate, createdAt: initial?.createdAt }),
+        total: financialTotals.total,
+        vatTotal: financialTotals.vatAmount,
       });
+      await onSave(payload);
     } catch (err) {
       notify(err instanceof Error ? err.message : "فشل حفظ الفاتورة", false);
     } finally {
@@ -1205,12 +1396,9 @@ function InvoiceForm({
           <span>حالة الفاتورة</span>
           <select className="input" name="invoice_status" autoComplete="off" value={status} onChange={(event) => setStatus(event.target.value as api.InvoiceStatus)}>
             <option value="issued">مصدرة</option>
-            <option value="sent">مرسلة</option>
             <option value="draft">مسودة</option>
-            <option value="paid">مدفوعة</option>
-            <option value="cancelled">ملغية</option>
-            <option value="refunded">مستردة</option>
           </select>
+          <small className="field-help">بعد الإصدار يصبح المحتوى المالي ثابتًا؛ الإلغاء والاسترداد يتمان بإشعار دائن.</small>
         </label>
         <label className="field">
           <span>نوع الفاتورة</span>
@@ -1326,7 +1514,7 @@ function InvoiceForm({
               value={item.description}
               onChange={(event) => updateItem(index, { description: event.target.value })}
               placeholder="وصف البند…"
-              required={index === 0}
+              required
             />
             <input
               className="input"
@@ -1334,10 +1522,11 @@ function InvoiceForm({
               name={`invoice_item_${index}_quantity`}
               autoComplete="off"
               inputMode="decimal"
-              min={0}
-              step="1"
+              min={0.0001}
+              step="0.0001"
               value={item.quantity}
               onChange={(event) => updateItem(index, { quantity: Number(event.target.value) })}
+              required
               aria-label="الكمية"
             />
             <input

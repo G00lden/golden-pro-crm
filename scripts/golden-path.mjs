@@ -194,7 +194,7 @@ try {
     created.quoteId = r.body.id;
   });
 
-  await step("POST and PUT /api/invoices preserve additional fees", async () => {
+  await step("invoice drafts preserve fees and become immutable after issuance", async () => {
     const create = await request("/api/invoices", {
       method: "POST",
       body: JSON.stringify({
@@ -208,6 +208,7 @@ try {
         vat_percent: 15,
         additional_fee: 50,
         currency: "SAR",
+        status: "draft",
       }),
     });
     assert.equal(create.status, 201, `expected 201, got ${create.status}: ${JSON.stringify(create.body)}`);
@@ -228,11 +229,37 @@ try {
         vat_percent: 15,
         additional_fee: 60,
         currency: "SAR",
+        status: "draft",
       }),
     });
     assert.equal(update.status, 200, `expected 200, got ${update.status}: ${JSON.stringify(update.body)}`);
     assert.equal(update.body?.invoice?.additional_fee, 60);
     assert.equal(update.body?.invoice?.total_with_vat, 960);
+
+    const issue = await request(`/api/invoices/${created.directInvoiceId}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status: "issued" }),
+    });
+    assert.equal(issue.status, 200, `expected 200, got ${issue.status}: ${JSON.stringify(issue.body)}`);
+    assert.equal(issue.body?.invoice?.status, "issued");
+    assert.equal(issue.body?.invoice?.additional_fee, 60);
+    assert.equal(issue.body?.invoice?.total_with_vat, 960);
+
+    const immutableUpdate = await request(`/api/invoices/${created.directInvoiceId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        customer_id: created.customerId,
+        customer_name: "Golden Path Direct Invoice",
+        items: [{ description: "VAT-inclusive item", quantity: 1, unit_price: 1000, vat_excluded: false }],
+        discount_mode: "percent",
+        discount_value: 10,
+        vat_percent: 15,
+        additional_fee: 70,
+        currency: "SAR",
+        status: "draft",
+      }),
+    });
+    assert.equal(immutableUpdate.status, 409, `expected 409, got ${immutableUpdate.status}: ${JSON.stringify(immutableUpdate.body)}`);
   });
 
   await step("POST /api/quotes/:id/convert-to-invoice preserves totals", async () => {

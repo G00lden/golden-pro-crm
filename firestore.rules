@@ -259,5 +259,17 @@ service cloud.firestore {
       allow read: if ownsExisting();
       allow create, update, delete: if false;
     }
+
+    // Tax documents are issued only through the authenticated server ledger,
+    // which owns atomic numbering and credit-note creation. Admin SDK writes
+    // bypass these rules; browsers may only read their own immutable records.
+    match /invoices/{id} {
+      allow read: if ownsExisting();
+      allow create, update, delete: if false;
+    }
+
+    match /invoice_sequences/{id} {
+      allow read, write: if false;
+    }
   }
 }

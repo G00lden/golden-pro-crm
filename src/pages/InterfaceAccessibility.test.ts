@@ -32,6 +32,13 @@ test("application navigation and shared modals expose keyboard landmarks", () =>
 test("shared loading and button states are announced without duplicate icon text", () => {
   assert.match(sharedSource, /aria-busy=\{loading \|\| undefined\}/);
   assert.match(sharedSource, /className="spin" aria-hidden="true"/);
+  assert.match(sharedSource, /loading && <RefreshCcw[\s\S]{0,160}?\{children\}/);
+  assert.match(stylesSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.spin\s*\{\s*animation: none;/);
+  assert.ok(
+    stylesSource.lastIndexOf("@media (prefers-reduced-motion: reduce)") > stylesSource.indexOf("animation: spin 900ms"),
+    "the reduced-motion override must follow the base spinner animation in the cascade",
+  );
+  assert.match(stylesSource, /\.btn\[aria-busy="true"\] > svg:not\(\.spin\)/);
   assert.match(sharedSource, /className="empty" role="status" aria-live="polite"/);
   assert.match(sharedSource, /جاري التحميل…/);
   assert.match(sharedSource, /className="error-box" role="alert"/);

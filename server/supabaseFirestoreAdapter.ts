@@ -62,6 +62,14 @@ const fieldToColumn: Record<string, string> = {
   remoteSyncedAt: "remote_synced_at",
   syncOrigin: "sync_origin",
   remoteDeletedAt: "remote_deleted_at",
+  documentKind: "document_kind",
+  sequenceNo: "sequence_no",
+  issuedAt: "issued_at",
+  sourceInvoiceId: "source_invoice_id",
+  adjustmentKind: "adjustment_kind",
+  adjustmentScope: "adjustment_scope",
+  adjustmentReason: "adjustment_reason",
+  idempotencyKey: "idempotency_key",
 };
 
 const columnToField: Record<string, string> = {
@@ -94,6 +102,14 @@ const columnToField: Record<string, string> = {
   remote_synced_at: "remoteSyncedAt",
   sync_origin: "syncOrigin",
   remote_deleted_at: "remoteDeletedAt",
+  document_kind: "documentKind",
+  sequence_no: "sequenceNo",
+  issued_at: "issuedAt",
+  source_invoice_id: "sourceInvoiceId",
+  adjustment_kind: "adjustmentKind",
+  adjustment_scope: "adjustmentScope",
+  adjustment_reason: "adjustmentReason",
+  idempotency_key: "idempotencyKey",
 };
 
 function configured() {
@@ -155,6 +171,19 @@ function newId(collection: string) {
   return `${prefixFor(collection)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 }
 
+function normalizedCounterInput(ownerUid: string, namespace: string, minimumNext: number) {
+  const owner = String(ownerUid || "").trim();
+  const series = String(namespace || "").trim();
+  if (!owner || owner.length > 256) throw new Error("Counter owner UID is invalid.");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(series)) {
+    throw new Error("Counter namespace is invalid.");
+  }
+  if (!Number.isSafeInteger(minimumNext) || minimumNext < 1) {
+    throw new Error("Counter minimumNext must be a positive safe integer.");
+  }
+  return { owner, series, minimumNext };
+}
+
 function postgrestOp(op: FilterOp) {
   if (op === "==") return "eq";
   if (op === "<=") return "lte";
@@ -204,6 +233,25 @@ async function request<T>(
 
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+async function allocateCounter(ownerUid: string, namespace: string, minimumNext = 1) {
+  const input = normalizedCounterInput(ownerUid, namespace, minimumNext);
+  const raw = await request<unknown>("rpc/allocate_invoice_sequence", new URLSearchParams(), {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      p_owner_uid: input.owner,
+      p_series: input.series,
+      p_minimum_next: input.minimumNext,
+    }),
+  });
+  const candidate = Array.isArray(raw) ? raw[0] : raw;
+  const value = Number(candidate);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error("Supabase returned an invalid counter allocation.");
+  }
+  return value;
 }
 
 class SupabaseDocSnapshot {
@@ -442,6 +490,7 @@ class SupabaseWriteBatch {
 export function createSupabaseFirestoreAdapter() {
   return {
     configured,
+    allocateCounter,
     collection(table: string) {
       return new SupabaseCollectionRef(table);
     },

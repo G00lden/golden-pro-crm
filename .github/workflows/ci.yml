@@ -1,6 +1,6 @@
 name: CI
 
-# Type-check and build on every push and PR so broken code never reaches main.
+# Type-check, test, and build every release candidate before deployment.
 on:
   push:
     branches: [main]
@@ -28,6 +28,9 @@ jobs:
 
       - name: Type-check (lint)
         run: npm run lint
+
+      - name: Unit and deployment transaction tests
+        run: npm run test:unit
 
       - name: Build
         run: npm run build

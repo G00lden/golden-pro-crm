@@ -165,7 +165,7 @@ export default function SettingsPage({
               <legend>بيانات الفاتورة الضريبية (ZATCA)</legend>
               <div className="form-grid">
                 <Field label="اسم البائع (الجهة المصدرة)">
-                  <TextInput name="seller_name" autoComplete="organization" value={values.seller_name || ""} onChange={(e) => setValues({ ...values, seller_name: e.target.value })} placeholder="مثال: Breexe Pro Co.…" />
+                  <TextInput name="seller_name" autoComplete="organization" value={values.seller_name || ""} onChange={(e) => setValues({ ...values, seller_name: e.target.value })} placeholder="مثال: BreeXe Pro Co.…" />
                 </Field>
                 <Field label="الرقم الضريبي (VAT)">
                   <TextInput name="seller_vat_number" autoComplete="off" inputMode="numeric" value={values.seller_vat_number || ""} onChange={(e) => setValues({ ...values, seller_vat_number: e.target.value.replace(/\D/g, '').slice(0, 15) })} placeholder="مثال: 15 رقمًا…" />
