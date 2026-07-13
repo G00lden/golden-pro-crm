@@ -5,13 +5,13 @@
  *   1. Inbound call hits the IVR webhook → `buildGreeting()` returns a menu
  *      built from `ivr_departments` and records a `call_logs` row.
  *   2. Caller presses a digit → `handleDigit()` resolves the department + its
- *      first active agent and returns a `dial` (forward) instruction.
+ *      next eligible agent atomically (round-robin) and returns one `dial`.
  *   3. The dial ends → the status webhook calls `handleCallStatus()`. On a
- *      no-answer/busy/failed/voicemail outcome we run the missed-call flow:
- *      WhatsApp to the customer (apology) and to the agent (call-back alert).
+ *      no-answer/busy/failed outcome we create the CRM follow-up and enqueue
+ *      notifications: WhatsApp first, then Android-gateway SMS as fallback.
  *
- * All WhatsApp side effects are best-effort and never throw to the caller, so a
- * disconnected WhatsApp session can't break the webhook response.
+ * Provider callbacks are idempotent, session tokens are stored as hashes, and
+ * communication side effects are dispatched through a durable outbox.
  */
 import crypto from "crypto";
 import db from "./db";
@@ -20,6 +20,7 @@ import type {
   NormalizedCallStatus,
   NormalizedInboundCall,
 } from "./telephony/types";
+import { dispatchCommunicationJob } from "./communicationOutbox";
 import { sendWhatsAppTemplate } from "./whatsapp";
 import { logError, logEvent } from "./logger";
 
@@ -35,7 +36,7 @@ function nowIso() {
 }
 
 /** Normalize a Saudi phone to international digits for provider dialing. */
-function normalizeDialNumber(phone: string): string {
+export function normalizeDialNumber(phone: string): string {
   let digits = String(phone || "").replace(/\D/g, "");
   if (digits.startsWith("00")) digits = digits.slice(2);
   if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
@@ -60,7 +61,7 @@ export type TelephonyConfig = {
 };
 
 export type TelephonyReadinessCheck = {
-  id: "system_enabled" | "main_number" | "public_url" | "webhook_secret" | "departments" | "agents";
+  id: "system_enabled" | "main_number" | "public_url" | "webhook_secret" | "status_auth" | "departments" | "agents" | "live_verified";
   label: string;
   ready: boolean;
   blocking: boolean;
@@ -77,6 +78,8 @@ export type TelephonyReadiness = {
   webhook_base_url: string;
   ivr_webhook_url: string;
   status_webhook_url: string;
+  setup_complete: boolean;
+  live_verified: boolean;
   checks: TelephonyReadinessCheck[];
 };
 
@@ -99,6 +102,9 @@ export type IvrDepartment = {
   ring_timeout_sec: number;
   active: boolean;
   sort_order: number;
+  workflow_action: "lead" | "service_task" | "none";
+  schedule_json: string;
+  fallback_user_id: string | null;
   agents: IvrAgent[];
 };
 
@@ -126,26 +132,58 @@ export function upsertTelephonyConfig(
 ): TelephonyConfig {
   const current = getTelephonyConfig(ownerUid);
   const next = { ...current, ...patch };
-  db.prepare(
-    `INSERT INTO telephony_config (owner_uid, provider, main_number, greeting, menu_prompt, ring_timeout_sec, enabled, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(owner_uid) DO UPDATE SET
-       main_number = excluded.main_number,
-       greeting = excluded.greeting,
-       menu_prompt = excluded.menu_prompt,
-       ring_timeout_sec = excluded.ring_timeout_sec,
-       enabled = excluded.enabled,
-       updated_at = excluded.updated_at`,
-  ).run(
-    ownerUid,
-    next.provider,
-    next.main_number,
-    next.greeting,
-    next.menu_prompt,
-    next.ring_timeout_sec,
-    next.enabled ? 1 : 0,
-    nowIso(),
-  );
+  const normalizedMainNumber = normalizeDialNumber(next.main_number);
+  const timestamp = nowIso();
+  const persist = db.transaction(() => {
+    if (normalizedMainNumber) {
+      const existingNumber = db.prepare(
+        "SELECT owner_uid FROM telephony_numbers WHERE provider = ? AND phone_norm = ?",
+      ).get(next.provider, normalizedMainNumber) as { owner_uid?: string } | undefined;
+      if (existingNumber?.owner_uid && existingNumber.owner_uid !== ownerUid) {
+        const error = new Error("رقم الهاتف مرتبط بمساحة شركة أخرى.") as Error & { status?: number };
+        error.status = 409;
+        throw error;
+      }
+    }
+
+    db.prepare(
+      `INSERT INTO telephony_config (owner_uid, provider, main_number, greeting, menu_prompt, ring_timeout_sec, enabled, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(owner_uid) DO UPDATE SET
+         main_number = excluded.main_number,
+         greeting = excluded.greeting,
+         menu_prompt = excluded.menu_prompt,
+         ring_timeout_sec = excluded.ring_timeout_sec,
+         enabled = excluded.enabled,
+         updated_at = excluded.updated_at`,
+    ).run(
+      ownerUid,
+      next.provider,
+      next.main_number,
+      next.greeting,
+      next.menu_prompt,
+      next.ring_timeout_sec,
+      next.enabled ? 1 : 0,
+      timestamp,
+    );
+
+    // Only the currently configured number should resolve inbound calls for a
+    // workspace. Keeping old mappings active makes a replaced number silently
+    // continue routing into the company queue.
+    db.prepare(
+      "UPDATE telephony_numbers SET active = 0, updated_at = ? WHERE owner_uid = ? AND provider = ? AND phone_norm <> ?",
+    ).run(timestamp, ownerUid, next.provider, normalizedMainNumber);
+
+    if (normalizedMainNumber) {
+      db.prepare(
+        `INSERT INTO telephony_numbers (id, owner_uid, provider, phone, phone_norm, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+         ON CONFLICT(provider, phone_norm) DO UPDATE SET
+           phone = excluded.phone, active = 1, updated_at = excluded.updated_at`,
+      ).run(newId("telnum"), ownerUid, next.provider, next.main_number, normalizedMainNumber, timestamp, timestamp);
+    }
+  });
+  persist();
   return getTelephonyConfig(ownerUid);
 }
 
@@ -179,6 +217,11 @@ function rowToDepartment(row: Record<string, unknown>): IvrDepartment {
     ring_timeout_sec: Number(row.ring_timeout_sec || DEFAULT_RING_TIMEOUT),
     active: row.active === null ? true : row.active === 1,
     sort_order: Number(row.sort_order || 0),
+    workflow_action: (["lead", "service_task", "none"].includes(String(row.workflow_action))
+      ? String(row.workflow_action)
+      : "none") as IvrDepartment["workflow_action"],
+    schedule_json: String(row.schedule_json || ""),
+    fallback_user_id: row.fallback_user_id ? String(row.fallback_user_id) : null,
     agents: agentsForDepartment(String(row.id)),
   };
 }
@@ -188,6 +231,16 @@ export function listDepartments(ownerUid: string): IvrDepartment[] {
     .prepare("SELECT * FROM ivr_departments WHERE owner_uid = ? ORDER BY sort_order ASC, digit ASC")
     .all(ownerUid) as Array<Record<string, unknown>>;
   return rows.map(rowToDepartment);
+}
+
+export function resolveTelephonyOwnerUid(dialedNumber: string | undefined, fallbackUid: string): string {
+  const normalized = normalizeDialNumber(dialedNumber || "");
+  if (!normalized) return fallbackUid;
+  const row = db.prepare(
+    `SELECT owner_uid FROM telephony_numbers
+     WHERE phone_norm = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1`,
+  ).get(normalized) as { owner_uid?: string } | undefined;
+  return row?.owner_uid || fallbackUid;
 }
 
 function publicHttpsUrl(raw: string): boolean {
@@ -227,6 +280,13 @@ export function getTelephonyReadiness(ownerUid: string): TelephonyReadiness {
   const baseUrl = String(process.env.PUBLIC_BASE_URL || process.env.APP_BASE_URL || "").replace(/\/$/, "");
   const mainNumberReady = isDialablePhone(config.main_number);
   const publicUrlReady = publicHttpsUrl(baseUrl);
+  const statusAuthReady = Boolean(
+    process.env.TELEPHONY_STATUS_WEBHOOK_USER && process.env.TELEPHONY_STATUS_WEBHOOK_PASSWORD,
+  );
+  const numberRow = db.prepare(
+    "SELECT live_verified_at FROM telephony_numbers WHERE owner_uid = ? AND provider = ? AND phone_norm = ? AND active = 1",
+  ).get(ownerUid, config.provider, normalizeDialNumber(config.main_number)) as { live_verified_at?: string } | undefined;
+  const liveVerified = Boolean(numberRow?.live_verified_at);
   const checks: TelephonyReadinessCheck[] = [
     {
       id: "system_enabled",
@@ -257,6 +317,15 @@ export function getTelephonyReadiness(ownerUid: string): TelephonyReadiness {
       detail: process.env.TELEPHONY_WEBHOOK_SECRET ? "السر المشترك مضبوط ولا يتم عرضه." : "اضبط TELEPHONY_WEBHOOK_SECRET في بيئة الخادم.",
     },
     {
+      id: "status_auth",
+      label: "حماية حالات المكالمات",
+      ready: statusAuthReady,
+      blocking: process.env.NODE_ENV === "production",
+      detail: statusAuthReady
+        ? "بيانات Basic Authentication المستقلة مضبوطة."
+        : "اضبط TELEPHONY_STATUS_WEBHOOK_USER وTELEPHONY_STATUS_WEBHOOK_PASSWORD قبل الإنتاج.",
+    },
+    {
       id: "departments",
       label: "أقسام الاستقبال",
       ready: activeDepartments.length > 0,
@@ -275,10 +344,20 @@ export function getTelephonyReadiness(ownerUid: string): TelephonyReadiness {
             ? `أقسام بلا مختص نشط: ${uncoveredDepartments.join("، ")}.`
             : `${reachableAgents} مختص نشط جاهز للتحويل.`,
     },
+    {
+      id: "live_verified",
+      label: "التحقق بمكالمة حقيقية",
+      ready: liveVerified,
+      blocking: false,
+      detail: liveVerified
+        ? "وصلت مكالمة حقيقية وسُجلت حالتها داخل CRM."
+        : "الإعداد لم يُثبت بعد بمكالمة حقيقية ناجحة.",
+    },
   ];
 
+  const setupComplete = checks.filter((check) => check.blocking).every((check) => check.ready);
   return {
-    ready: checks.filter((check) => check.blocking).every((check) => check.ready),
+    ready: setupComplete,
     provider: config.provider,
     enabled: config.enabled,
     active_departments: activeDepartments.length,
@@ -287,6 +366,8 @@ export function getTelephonyReadiness(ownerUid: string): TelephonyReadiness {
     webhook_base_url: baseUrl,
     ivr_webhook_url: baseUrl ? `${baseUrl}/webhooks/telephony/ivr` : "",
     status_webhook_url: baseUrl ? `${baseUrl}/webhooks/telephony/status` : "",
+    setup_complete: setupComplete,
+    live_verified: liveVerified,
     checks,
   };
 }
@@ -319,6 +400,9 @@ type DepartmentInput = {
   ring_timeout_sec?: number;
   active?: boolean;
   sort_order?: number;
+  workflow_action?: "lead" | "service_task" | "none";
+  schedule_json?: string;
+  fallback_user_id?: string | null;
   agents?: AgentInput[];
 };
 
@@ -348,8 +432,8 @@ export function createDepartment(ownerUid: string, input: DepartmentInput): IvrD
   const id = newId("dept");
   db.prepare(
     `INSERT INTO ivr_departments
-      (id, owner_uid, digit, name, ring_timeout_sec, active, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, owner_uid, digit, name, ring_timeout_sec, active, sort_order, workflow_action, schedule_json, fallback_user_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     ownerUid,
@@ -358,6 +442,9 @@ export function createDepartment(ownerUid: string, input: DepartmentInput): IvrD
     input.ring_timeout_sec ?? DEFAULT_RING_TIMEOUT,
     input.active === false ? 0 : 1,
     input.sort_order ?? 0,
+    input.workflow_action || "none",
+    input.schedule_json || "",
+    input.fallback_user_id || null,
     nowIso(),
     nowIso(),
   );
@@ -374,7 +461,7 @@ export function updateDepartment(
   if (!existing) return null;
   db.prepare(
     `UPDATE ivr_departments SET
-       digit = ?, name = ?, ring_timeout_sec = ?, active = ?, sort_order = ?, updated_at = ?
+       digit = ?, name = ?, ring_timeout_sec = ?, active = ?, sort_order = ?, workflow_action = ?, schedule_json = ?, fallback_user_id = ?, updated_at = ?
      WHERE owner_uid = ? AND id = ?`,
   ).run(
     input.digit ?? existing.digit,
@@ -382,6 +469,9 @@ export function updateDepartment(
     input.ring_timeout_sec ?? existing.ring_timeout_sec,
     input.active === undefined ? (existing.active ? 1 : 0) : input.active ? 1 : 0,
     input.sort_order ?? existing.sort_order,
+    input.workflow_action ?? existing.workflow_action,
+    input.schedule_json ?? existing.schedule_json,
+    input.fallback_user_id === undefined ? existing.fallback_user_id : input.fallback_user_id,
     nowIso(),
     ownerUid,
     id,
@@ -404,19 +494,28 @@ export function deleteDepartment(ownerUid: string, id: string): boolean {
  * first employee. Advances and persists the department's pointer.
  */
 export function pickAgentRoundRobin(dept: IvrDepartment): IvrAgent | null {
-  const agents = dept.agents.filter((agent) => agent.active && isDialablePhone(agent.phone));
-  if (agents.length === 0) return null;
-  const row = db.prepare("SELECT rr_counter FROM ivr_departments WHERE id = ?").get(dept.id) as
-    | { rr_counter?: number }
-    | undefined;
-  const counter = Number(row?.rr_counter || 0);
-  const agent = agents[counter % agents.length];
-  db.prepare("UPDATE ivr_departments SET rr_counter = ?, updated_at = ? WHERE id = ?").run(
-    (counter + 1) % 1_000_000,
-    nowIso(),
-    dept.id,
-  );
-  return agent;
+  const pick = db.transaction((departmentId: string): IvrAgent | null => {
+    const row = db.prepare(
+      "SELECT rr_counter FROM ivr_departments WHERE id = ? AND owner_uid = ?",
+    ).get(departmentId, dept.owner_uid) as { rr_counter?: number } | undefined;
+    if (!row) return null;
+    const rows = db.prepare(
+      `SELECT a.* FROM ivr_department_agents a
+       LEFT JOIN users u ON a.user_id IS NOT NULL AND (u.uid = a.user_id OR u.id = a.user_id)
+       WHERE a.department_id = ? AND a.owner_uid = ? AND a.active = 1
+         AND (a.user_id IS NULL OR (u.active = 1 AND u.workspace_owner_uid = ?))
+       ORDER BY a.sort_order ASC, a.created_at ASC`,
+    ).all(departmentId, dept.owner_uid, dept.owner_uid) as Array<Record<string, unknown>>;
+    const agents = rows.map(rowToAgent).filter((agent) => isDialablePhone(agent.phone));
+    if (agents.length === 0) return null;
+    const counter = Number(row.rr_counter || 0);
+    const agent = agents[counter % agents.length];
+    db.prepare(
+      "UPDATE ivr_departments SET rr_counter = ?, updated_at = ? WHERE id = ? AND owner_uid = ?",
+    ).run((counter + 1) % 1_000_000, nowIso(), departmentId, dept.owner_uid);
+    return agent;
+  });
+  return pick(dept.id);
 }
 
 /**
@@ -470,9 +569,12 @@ export function recordCall(input: {
 }): CallLog {
   const id = newId("call");
   const customer = findCustomerByPhone(input.ownerUid, input.from);
+  const status = input.status || "menu";
   db.prepare(
-    `INSERT INTO call_logs (id, owner_uid, provider, call_sid, from_phone, to_phone, status, customer_id, customer_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO call_logs
+      (id, owner_uid, provider, call_sid, from_phone, to_phone, from_phone_norm, to_phone_norm,
+       status, call_status, follow_up_status, customer_id, customer_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?)`,
   ).run(
     id,
     input.ownerUid,
@@ -480,13 +582,103 @@ export function recordCall(input: {
     input.callSid || null,
     input.from || null,
     input.to || null,
-    input.status || "menu",
+    normalizeDialNumber(input.from) || null,
+    normalizeDialNumber(input.to) || null,
+    status,
+    status,
     customer?.id || null,
     customer?.name || null,
     nowIso(),
     nowIso(),
   );
   return { id };
+}
+
+/**
+ * Provider-neutral customer lookup through the same Firestore-style adapter
+ * used by the rest of the CRM (native Firestore, Supabase, or SQLite).
+ */
+export async function findCustomerByPhoneRepository(
+  ownerUid: string,
+  phone: string,
+): Promise<{ id: string; name: string } | null> {
+  const normalized = normalizeDialNumber(phone);
+  if (!normalized) return null;
+  const tail = normalized.slice(-9);
+  const { adminDb } = await import("./firebaseAdmin");
+  const snapshot = await adminDb.collection("customers")
+    .where("createdBy", "==", ownerUid)
+    .limit(1000)
+    .get();
+  for (const document of snapshot.docs as Array<{ id: string; data: () => Record<string, unknown> }>) {
+    const data = document.data();
+    const candidate = normalizeDialNumber(String(data.phone || data.customer_phone || ""));
+    if (candidate && candidate.endsWith(tail)) {
+      return { id: document.id, name: String(data.name || data.customer_name || "") };
+    }
+  }
+  return null;
+}
+
+function sessionTokenHash(token: string) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+export function createCallSession(
+  ownerUid: string,
+  provider: string,
+  call: NormalizedInboundCall,
+): { call: Record<string, unknown>; token: string } {
+  const token = crypto.randomBytes(32).toString("base64url");
+  const internalSid = newId("session");
+  const created = recordCall({
+    ownerUid,
+    provider,
+    callSid: internalSid,
+    from: call.from,
+    to: call.to,
+    status: "menu",
+  });
+  const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+  db.prepare(
+    `UPDATE call_logs SET session_token_hash = ?, session_expires_at = ?, provider_call_sid = ?, updated_at = ?
+     WHERE id = ? AND owner_uid = ?`,
+  ).run(sessionTokenHash(token), expiresAt, call.callSid || null, nowIso(), created.id, ownerUid);
+  return { call: getCallById(ownerUid, created.id)!, token };
+}
+
+export function getCallBySessionToken(token: string): Record<string, unknown> | null {
+  if (!token) return null;
+  const row = db.prepare(
+    `SELECT * FROM call_logs
+     WHERE session_token_hash = ? AND session_expires_at > ?
+     ORDER BY created_at DESC LIMIT 1`,
+  ).get(sessionTokenHash(token), nowIso()) as Record<string, unknown> | undefined;
+  return row ? { ...row, metadata: safeJson(row.metadata) } : null;
+}
+
+export function getCallById(ownerUid: string, callId: string): Record<string, unknown> | null {
+  const row = db.prepare("SELECT * FROM call_logs WHERE owner_uid = ? AND id = ?")
+    .get(ownerUid, callId) as Record<string, unknown> | undefined;
+  return row ? { ...row, metadata: safeJson(row.metadata) } : null;
+}
+
+export function updateCallById(ownerUid: string, callId: string, fields: Record<string, unknown>) {
+  const allowed = new Set([
+    "provider_call_sid", "department_id", "department_name", "selected_digit",
+    "agent_user_id", "assigned_user_id", "agent_phone", "agent_name", "status",
+    "call_status", "follow_up_status", "follow_up_outcome", "follow_up_notes",
+    "forwarded_at", "ended_at", "duration_sec", "missed", "handled", "handled_at",
+    "handled_by", "wa_customer_notified", "wa_agent_notified", "lead_id", "task_id",
+    "invalid_attempts", "live_verified", "metadata", "customer_id", "customer_name",
+  ]);
+  const keys = Object.keys(fields).filter((key) => allowed.has(key));
+  if (!keys.length) return false;
+  const set = keys.map((key) => `${key} = ?`).join(", ");
+  const result = db.prepare(
+    `UPDATE call_logs SET ${set}, updated_at = ? WHERE owner_uid = ? AND id = ?`,
+  ).run(...keys.map((key) => fields[key]), nowIso(), ownerUid, callId);
+  return result.changes > 0;
 }
 
 const AGENT_ACK_KEYWORDS = ["تم", "تمت", "استلمت", "تواصلت", "تم التواصل", "تمت المعالجة", "done", "ok"];
@@ -514,20 +706,28 @@ export function findUnhandledCallForAgent(ownerUid: string, agentPhone: string):
 }
 
 /** Mark a call as handled (resolved follow-up). `by` is 'agent' or a user id. */
-export function markCallHandled(ownerUid: string, callId: string, by: string): boolean {
+export function markCallHandled(
+  ownerUid: string,
+  callId: string,
+  by: string,
+  outcome = "completed",
+  notes = "",
+): boolean {
   const res = db
     .prepare(
-      "UPDATE call_logs SET handled = 1, handled_at = ?, handled_by = ?, status = 'handled', updated_at = ? WHERE owner_uid = ? AND id = ?",
+      `UPDATE call_logs SET handled = 1, handled_at = ?, handled_by = ?,
+       follow_up_status = 'done', follow_up_outcome = ?, follow_up_notes = ?, updated_at = ?
+       WHERE owner_uid = ? AND id = ?`,
     )
-    .run(nowIso(), by, nowIso(), ownerUid, callId);
+    .run(nowIso(), by, outcome, notes, nowIso(), ownerUid, callId);
   return res.changes > 0;
 }
 
 export function getCallBySid(callSid: string): Record<string, unknown> | null {
   if (!callSid) return null;
   const row = db
-    .prepare("SELECT * FROM call_logs WHERE call_sid = ? ORDER BY created_at DESC LIMIT 1")
-    .get(callSid) as Record<string, unknown> | undefined;
+    .prepare("SELECT * FROM call_logs WHERE call_sid = ? OR provider_call_sid = ? ORDER BY created_at DESC LIMIT 1")
+    .get(callSid, callSid) as Record<string, unknown> | undefined;
   return row ? { ...row, metadata: safeJson(row.metadata) } : null;
 }
 
@@ -536,37 +736,86 @@ export function updateCallBySid(callSid: string, fields: Record<string, unknown>
   const keys = Object.keys(fields);
   if (keys.length === 0) return;
   const set = keys.map((k) => `${k} = ?`).join(", ");
-  db.prepare(`UPDATE call_logs SET ${set}, updated_at = ? WHERE call_sid = ?`).run(
+  db.prepare(`UPDATE call_logs SET ${set}, updated_at = ? WHERE call_sid = ? OR provider_call_sid = ?`).run(
     ...keys.map((k) => fields[k]),
     nowIso(),
+    callSid,
     callSid,
   );
 }
 
 /** Dashboard counters: unhandled missed calls + today's totals. */
-export function callStats(ownerUid: string): { missed_unhandled: number; missed_today: number; total_today: number } {
+export function callStats(ownerUid: string, assignedUserId?: string): { missed_unhandled: number; missed_today: number; total_today: number } {
   const today = new Date().toISOString().slice(0, 10);
-  const one = (sql: string, ...args: unknown[]) =>
-    (db.prepare(sql).get(ownerUid, ...args) as { c: number }).c;
+  const assignedClause = assignedUserId ? " AND (assigned_user_id = ? OR agent_user_id = ?)" : "";
+  const one = (extraWhere: string, ...args: unknown[]) => {
+    const assignedArgs = assignedUserId ? [assignedUserId, assignedUserId] : [];
+    return (db.prepare(
+      `SELECT COUNT(*) AS c FROM call_logs WHERE owner_uid = ?${extraWhere}${assignedClause}`,
+    ).get(ownerUid, ...args, ...assignedArgs) as { c: number }).c;
+  };
   return {
-    missed_unhandled: one("SELECT COUNT(*) AS c FROM call_logs WHERE owner_uid = ? AND missed = 1 AND IFNULL(handled,0) = 0"),
-    missed_today: one("SELECT COUNT(*) AS c FROM call_logs WHERE owner_uid = ? AND missed = 1 AND created_at LIKE ?", `${today}%`),
-    total_today: one("SELECT COUNT(*) AS c FROM call_logs WHERE owner_uid = ? AND created_at LIKE ?", `${today}%`),
+    missed_unhandled: one(" AND missed = 1 AND IFNULL(handled,0) = 0"),
+    missed_today: one(" AND missed = 1 AND created_at LIKE ?", `${today}%`),
+    total_today: one(" AND created_at LIKE ?", `${today}%`),
   };
 }
 
-export function listCalls(opts: { ownerUid: string; limit?: number; missedOnly?: boolean }): Record<string, unknown>[] {
+export function listCalls(opts: {
+  ownerUid: string;
+  limit?: number;
+  missedOnly?: boolean;
+  assignedUserId?: string;
+  status?: string;
+  followUpStatus?: string;
+  departmentId?: string;
+  search?: string;
+  fromDate?: string;
+  toDate?: string;
+}): Record<string, unknown>[] {
   const limit = Math.min(500, opts.limit || 100);
-  const sql = opts.missedOnly
-    ? "SELECT * FROM call_logs WHERE owner_uid = ? AND missed = 1 ORDER BY created_at DESC LIMIT ?"
-    : "SELECT * FROM call_logs WHERE owner_uid = ? ORDER BY created_at DESC LIMIT ?";
-  const rows = db.prepare(sql).all(opts.ownerUid, limit) as Array<Record<string, unknown>>;
+  const where = ["owner_uid = ?"];
+  const args: unknown[] = [opts.ownerUid];
+  if (opts.missedOnly) where.push("missed = 1");
+  if (opts.assignedUserId) {
+    where.push("(assigned_user_id = ? OR agent_user_id = ?)");
+    args.push(opts.assignedUserId, opts.assignedUserId);
+  }
+  if (opts.status) {
+    where.push("call_status = ?");
+    args.push(opts.status);
+  }
+  if (opts.followUpStatus) {
+    where.push("follow_up_status = ?");
+    args.push(opts.followUpStatus);
+  }
+  if (opts.departmentId) {
+    where.push("department_id = ?");
+    args.push(opts.departmentId);
+  }
+  if (opts.search) {
+    where.push("(from_phone LIKE ? OR customer_name LIKE ? OR agent_name LIKE ?)");
+    const needle = `%${opts.search}%`;
+    args.push(needle, needle, needle);
+  }
+  if (opts.fromDate) {
+    where.push("created_at >= ?");
+    args.push(`${opts.fromDate}T00:00:00.000Z`);
+  }
+  if (opts.toDate) {
+    where.push("created_at <= ?");
+    args.push(`${opts.toDate}T23:59:59.999Z`);
+  }
+  const rows = db.prepare(
+    `SELECT * FROM call_logs WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ?`,
+  ).all(...args, limit) as Array<Record<string, unknown>>;
   return rows.map((r) => ({ ...r, metadata: safeJson(r.metadata) }));
 }
 
 // ── IVR instruction builders ──────────────────────────────────────────────────
-function ivrResponseUrl(baseUrl: string) {
-  return `${baseUrl.replace(/\/$/, "")}/webhooks/telephony/ivr`;
+function ivrResponseUrl(baseUrl: string, token?: string) {
+  const root = `${baseUrl.replace(/\/$/, "")}/webhooks/telephony/ivr`;
+  return token ? `${root}/session/${encodeURIComponent(token)}` : root;
 }
 function statusCallbackUrl(baseUrl: string) {
   return `${baseUrl.replace(/\/$/, "")}/webhooks/telephony/status`;
@@ -587,7 +836,7 @@ export function buildMenuText(ownerUid: string): { greeting: string; prompt: str
 }
 
 /** Instructions for a fresh inbound call: greet, then gather one digit. */
-export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
+export function legacyBuildGreeting(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
   const config = getTelephonyConfig(ownerUid);
   if (!config.enabled) {
     return [
@@ -625,7 +874,7 @@ export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, bas
 }
 
 /** Instructions after a digit press: forward to the department's agent. */
-export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
+export function legacyHandleDigit(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
   const config = getTelephonyConfig(ownerUid);
   if (!config.enabled) {
     return [
@@ -712,31 +961,412 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
   ];
 }
 
+type DepartmentSchedule = {
+  days?: number[];
+  start?: string;
+  end?: string;
+};
+
+export function departmentOpenNow(department: IvrDepartment, at = new Date()): boolean {
+  if (!department.schedule_json) return true;
+  try {
+    const schedule = JSON.parse(department.schedule_json) as DepartmentSchedule;
+    if (!schedule.days?.length || !schedule.start || !schedule.end) return true;
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: process.env.APP_TIMEZONE || "Asia/Riyadh",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(at);
+    const weekday = parts.find((part) => part.type === "weekday")?.value || "Sun";
+    const day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekday);
+    const hour = parts.find((part) => part.type === "hour")?.value || "00";
+    const minute = parts.find((part) => part.type === "minute")?.value || "00";
+    const current = `${hour}:${minute}`;
+    return schedule.days.includes(day) && current >= schedule.start && current <= schedule.end;
+  } catch {
+    return true;
+  }
+}
+
+function managerQueueUid(ownerUid: string): string {
+  const row = db.prepare(
+    `SELECT uid FROM users
+     WHERE workspace_owner_uid = ? AND active = 1 AND uid IS NOT NULL AND role IN ('manager','admin')
+     ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`,
+  ).get(ownerUid) as { uid?: string } | undefined;
+  return row?.uid || ownerUid;
+}
+
+function ensureServiceTask(
+  call: Record<string, unknown>,
+  department: IvrDepartment,
+  agent: IvrAgent | null,
+  priority: "normal" | "high" = "normal",
+): string {
+  const existing = db.prepare(
+    "SELECT id FROM crm_tasks WHERE owner_uid = ? AND related_type = 'call' AND related_id = ? AND status = 'open' LIMIT 1",
+  ).get(call.owner_uid, call.id) as { id?: string } | undefined;
+  const dueAt = new Date(Date.now() + 15 * 60_000).toISOString();
+  if (existing?.id) {
+    if (priority === "high") {
+      db.prepare(
+        "UPDATE crm_tasks SET priority = 'high', due_at = ?, due_date = ?, updated_at = ? WHERE id = ?",
+      ).run(dueAt, dueAt.slice(0, 10), nowIso(), existing.id);
+    }
+    return existing.id;
+  }
+  const taskId = newId("task");
+  const assignedTo = agent?.user_id || department.fallback_user_id || managerQueueUid(String(call.owner_uid));
+  db.prepare(
+    `INSERT INTO crm_tasks
+      (id, owner_uid, title, status, priority, due_date, due_at, assigned_to, related_type,
+       related_id, customer_id, contact_phone, source, notes, created_at, updated_at)
+     VALUES (?, ?, ?, 'open', ?, ?, ?, ?, 'call', ?, ?, ?, 'phone_call', ?, ?, ?)`,
+  ).run(
+    taskId,
+    call.owner_uid,
+    `متابعة مكالمة ${department.name}`,
+    priority,
+    priority === "high" ? dueAt.slice(0, 10) : null,
+    priority === "high" ? dueAt : null,
+    assignedTo,
+    call.id,
+    call.customer_id || null,
+    call.from_phone_norm || call.from_phone || null,
+    `اتصال وارد إلى قسم ${department.name}`,
+    nowIso(),
+    nowIso(),
+  );
+  return taskId;
+}
+
+function ensurePhoneLead(
+  call: Record<string, unknown>,
+  department: IvrDepartment,
+  agent: IvrAgent | null,
+): string | null {
+  if (call.customer_id) return null;
+  const phone = String(call.from_phone_norm || normalizeDialNumber(String(call.from_phone || "")));
+  if (!phone) return null;
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString();
+  const existing = db.prepare(
+    `SELECT id FROM crm_deals
+     WHERE owner_uid = ? AND source = 'phone_call' AND customer_phone = ?
+       AND stage NOT IN ('paid','lost') AND updated_at >= ?
+       AND notes LIKE ? ORDER BY updated_at DESC LIMIT 1`,
+  ).get(call.owner_uid, phone, cutoff, `%department:${department.id}%`) as { id?: string } | undefined;
+  if (existing?.id) return existing.id;
+  const leadId = newId("deal");
+  db.prepare(
+    `INSERT INTO crm_deals
+      (id, owner_uid, title, customer_phone, stage, amount, currency, probability,
+       assigned_to, source, notes, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'lead', 0, 'SAR', 10, ?, 'phone_call', ?, ?, ?)`,
+  ).run(
+    leadId,
+    call.owner_uid,
+    `متصل جديد - ${department.name}`,
+    phone,
+    agent?.user_id || department.fallback_user_id || managerQueueUid(String(call.owner_uid)),
+    `department:${department.id}; call:${call.id}`,
+    nowIso(),
+    nowIso(),
+  );
+  return leadId;
+}
+
+function createDepartmentWorkItem(callSid: string, department: IvrDepartment, agent: IvrAgent | null) {
+  const call = getCallBySid(callSid);
+  if (!call) return;
+  if (department.workflow_action === "lead") {
+    const leadId = ensurePhoneLead(call, department, agent);
+    if (leadId) updateCallBySid(callSid, { lead_id: leadId });
+  } else if (department.workflow_action === "service_task") {
+    const taskId = ensureServiceTask(call, department, agent);
+    updateCallBySid(callSid, { task_id: taskId });
+  }
+}
+
+/** Start a fresh, independently authenticated call session. */
+export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
+  const config = getTelephonyConfig(ownerUid);
+  if (!config.enabled) {
+    return [
+      { action: "say", text: "عذرًا، خدمة الرد الآلي غير متاحة حاليًا. سيتواصل معك فريقنا قريبًا.", language: "ar" },
+      { action: "hangup" },
+    ];
+  }
+  const { greeting, prompt } = buildMenuText(ownerUid);
+  const session = createCallSession(ownerUid, config.provider, {
+    ...call,
+    to: call.to || config.main_number,
+  });
+  return [{
+    action: "gather",
+    text: `${greeting} ${prompt}`,
+    numDigits: 1,
+    timeoutSec: 8,
+    responseUrl: ivrResponseUrl(baseUrl, session.token),
+    language: "ar",
+  }];
+}
+
+/** Live route variant that enriches the new call through the configured CRM adapter. */
+export async function buildGreetingForProvider(
+  ownerUid: string,
+  call: NormalizedInboundCall,
+  baseUrl: string,
+): Promise<IvrInstruction[]> {
+  const config = getTelephonyConfig(ownerUid);
+  if (!config.enabled) return buildGreeting(ownerUid, call, baseUrl);
+  const { greeting, prompt } = buildMenuText(ownerUid);
+  const customer = await findCustomerByPhoneRepository(ownerUid, call.from).catch(() => null);
+  const session = createCallSession(ownerUid, config.provider, {
+    ...call,
+    to: call.to || config.main_number,
+  });
+  if (customer) {
+    updateCallById(ownerUid, String(session.call.id), {
+      // These fields are intentionally not client-controlled; they come from
+      // the selected CRM repository.
+      customer_id: customer.id,
+      customer_name: customer.name,
+    });
+  }
+  return [{
+    action: "gather",
+    text: `${greeting} ${prompt}`,
+    numDigits: 1,
+    timeoutSec: 8,
+    responseUrl: ivrResponseUrl(baseUrl, session.token),
+    language: "ar",
+  }];
+}
+
+/** Route a session-bound digit to one active specialist using round-robin. */
+export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
+  const config = getTelephonyConfig(ownerUid);
+  const existing = getCallBySid(call.callSid);
+  if (!config.enabled || !existing) {
+    return [
+      { action: "say", text: "عذرًا، انتهت جلسة المكالمة. سيتواصل معك فريقنا قريبًا.", language: "ar" },
+      { action: "hangup" },
+    ];
+  }
+  const digit = String(call.digit || "");
+  const department = getDepartmentByDigit(ownerUid, digit);
+  if (!department) {
+    const attempts = Number(existing.invalid_attempts || 0) + 1;
+    updateCallBySid(call.callSid, { invalid_attempts: attempts, status: "menu", call_status: "menu" });
+    if (attempts < 2 && call.sessionToken) {
+      const { greeting, prompt } = buildMenuText(ownerUid);
+      return [{
+        action: "gather",
+        text: `اختيار غير صحيح. ${greeting} ${prompt}`,
+        numDigits: 1,
+        timeoutSec: 8,
+        responseUrl: ivrResponseUrl(baseUrl, call.sessionToken),
+        language: "ar",
+      }];
+    }
+    updateCallBySid(call.callSid, {
+      status: "no_answer", call_status: "no_answer", follow_up_status: "new",
+      missed: 1, ended_at: nowIso(),
+    });
+    runMissedCallFlow(call.callSid).catch((error) => logError("ivr.invalid_choice_followup_failed", error));
+    return [
+      { action: "say", text: "عذرًا، لم نستلم اختيارًا صحيحًا. أنشأنا طلب متابعة وسنتصل بك قريبًا.", language: "ar" },
+      { action: "hangup" },
+    ];
+  }
+
+  if (!departmentOpenNow(department)) {
+    updateCallBySid(call.callSid, {
+      department_id: department.id, department_name: department.name, selected_digit: digit,
+      status: "no_answer", call_status: "no_answer", follow_up_status: "new",
+      missed: 1, ended_at: nowIso(),
+    });
+    createDepartmentWorkItem(call.callSid, department, null);
+    runMissedCallFlow(call.callSid).catch((error) => logError("ivr.out_of_hours_followup_failed", error));
+    return [
+      { action: "say", text: `قسم ${department.name} خارج ساعات العمل حاليًا. أنشأنا طلب متابعة وسنتصل بك قريبًا.`, language: "ar" },
+      { action: "hangup" },
+    ];
+  }
+
+  const assigned = existing.agent_phone
+    ? department.agents.find((candidate) => candidate.phone === existing.agent_phone) || null
+    : pickAgentRoundRobin(department);
+  if (!assigned) {
+    updateCallBySid(call.callSid, {
+      department_id: department.id, department_name: department.name, selected_digit: digit,
+      status: "no_answer", call_status: "no_answer", follow_up_status: "new",
+      missed: 1, ended_at: nowIso(),
+    });
+    createDepartmentWorkItem(call.callSid, department, null);
+    runMissedCallFlow(call.callSid).catch((error) => logError("ivr.no_agent_followup_failed", error));
+    return [
+      { action: "say", text: `لا يوجد مختص متاح في قسم ${department.name} حاليًا. أنشأنا طلب متابعة.`, language: "ar" },
+      { action: "hangup" },
+    ];
+  }
+
+  updateCallBySid(call.callSid, {
+    department_id: department.id,
+    department_name: department.name,
+    selected_digit: digit,
+    agent_user_id: assigned.user_id,
+    assigned_user_id: assigned.user_id,
+    agent_phone: assigned.phone,
+    agent_name: assigned.name,
+    status: "forwarding",
+    call_status: "forwarding",
+    follow_up_status: assigned.user_id ? "assigned" : "new",
+    forwarded_at: nowIso(),
+  });
+  createDepartmentWorkItem(call.callSid, department, assigned);
+  return [{
+    action: "dial",
+    text: `يتم تحويلك الآن إلى ${department.name}. يرجى الانتظار.`,
+    number: normalizeDialNumber(assigned.phone),
+    callerId: config.main_number ? normalizeDialNumber(config.main_number) : undefined,
+    ringTimeoutSec: department.ring_timeout_sec || config.ring_timeout_sec,
+    statusCallbackUrl: statusCallbackUrl(baseUrl),
+    recording: false,
+  }];
+}
+
 /**
  * Status webhook entry point. Returns a short summary for logging. On a
  * not-connected outcome it triggers the missed-call WhatsApp flow.
  */
 export async function handleCallStatus(status: NormalizedCallStatus): Promise<Record<string, unknown>> {
-  const call = getCallBySid(status.callSid);
+  let call = status.callSid ? getCallBySid(status.callSid) : null;
+  if (!call) {
+    const from = normalizeDialNumber(status.from || "");
+    const to = normalizeDialNumber(status.to || "");
+    const cutoff = new Date(Date.now() - 5 * 60_000).toISOString();
+    const clauses = ["created_at >= ?"];
+    const args: unknown[] = [cutoff];
+    if (from) {
+      clauses.push("from_phone_norm = ?");
+      args.push(from);
+    }
+    if (to) {
+      clauses.push("to_phone_norm = ?");
+      args.push(to);
+    }
+    const candidates = db.prepare(
+      `SELECT * FROM call_logs WHERE ${clauses.join(" AND ")}
+       AND call_status IN ('new','menu','selected','forwarding','ringing','connected','in_progress')
+       ORDER BY created_at DESC LIMIT 3`,
+    ).all(...args) as Array<Record<string, unknown>>;
+    if (candidates.length !== 1) {
+      return {
+        handled: false,
+        reason: candidates.length > 1 ? "ambiguous_recent_call" : "unknown_call",
+        callSid: status.callSid,
+      };
+    }
+    call = candidates[0];
+  }
   if (!call) {
     return { handled: false, reason: "unknown_call_sid", callSid: status.callSid };
   }
 
   const missedStatuses: NormalizedCallStatus["status"][] = ["no_answer", "busy", "failed", "voicemail"];
-  const isMissed = missedStatuses.includes(status.status);
+  const completedWithoutSelection = status.status === "completed" && ["new", "menu"].includes(String(call.call_status));
+  const isMissed = missedStatuses.includes(status.status) || completedWithoutSelection;
+  const callId = String(call.id);
+  const ownerUid = String(call.owner_uid);
+  const internalSid = String(call.call_sid);
+  const terminal = ["completed", "no_answer", "busy", "failed"].includes(String(call.call_status));
+  const incomingTerminal = status.status === "completed" || isMissed;
+  if (terminal && (!incomingTerminal || String(call.call_status) === "completed" || status.status !== "completed")) {
+    return { handled: true, ignored: true, reason: "late_or_regressive_event", callId };
+  }
+  const callStatus = completedWithoutSelection
+    ? "no_answer"
+    : status.status === "in_progress"
+    ? "connected"
+    : status.status === "voicemail"
+      ? "no_answer"
+      : status.status;
 
-  updateCallBySid(status.callSid, {
+  updateCallById(ownerUid, callId, {
+    provider_call_sid: status.callSid || call.provider_call_sid || null,
     status: status.status,
+    call_status: callStatus,
     duration_sec: status.durationSec ?? Number(call.duration_sec || 0),
-    ended_at: nowIso(),
+    ended_at: incomingTerminal ? nowIso() : call.ended_at || null,
     missed: isMissed ? 1 : 0,
+    live_verified: status.callSid ? 1 : Number(call.live_verified || 0),
   });
+  if (status.callSid) {
+    db.prepare(
+      `UPDATE telephony_numbers SET live_verified_at = COALESCE(live_verified_at, ?), updated_at = ?
+       WHERE owner_uid = ? AND phone_norm = ? AND active = 1`,
+    ).run(nowIso(), nowIso(), ownerUid, String(call.to_phone_norm || ""));
+  }
 
   if (isMissed) {
-    const result = await runMissedCallFlow(status.callSid);
+    const result = await runMissedCallFlow(internalSid);
     return { handled: true, missed: true, ...result };
   }
-  return { handled: true, missed: false, status: status.status };
+  return { handled: true, missed: false, status: callStatus, callId };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function beginTelephonyEvent(ownerUid: string, provider: string, status: NormalizedCallStatus) {
+  const canonical = stableJson({
+    callSid: status.callSid,
+    status: status.status,
+    occurredAt: status.occurredAt || null,
+    from: normalizeDialNumber(status.from || ""),
+    to: normalizeDialNumber(status.to || ""),
+    durationSec: status.durationSec ?? null,
+    raw: status.raw,
+  });
+  const eventKey = crypto.createHash("sha256").update(canonical).digest("hex");
+  const eventId = newId("televent");
+  const result = db.prepare(
+    `INSERT OR IGNORE INTO telephony_events
+      (id, owner_uid, provider, event_key, event_type, provider_call_sid, payload, status, attempts, received_at)
+     VALUES (?, ?, ?, ?, 'call_status', ?, ?, 'processing', 1, ?)`,
+  ).run(eventId, ownerUid, provider, eventKey, status.callSid || null, canonical, nowIso());
+  const existing = db.prepare(
+    "SELECT id, status FROM telephony_events WHERE owner_uid = ? AND provider = ? AND event_key = ?",
+  ).get(ownerUid, provider, eventKey) as { id: string; status: string };
+  if (result.changes === 0 && existing.status === "failed") {
+    db.prepare(
+      "UPDATE telephony_events SET status = 'processing', attempts = attempts + 1, error = NULL WHERE id = ?",
+    ).run(existing.id);
+  }
+  return { duplicate: result.changes === 0 && existing.status !== "failed", eventId: existing.id };
+}
+
+export function completeTelephonyEvent(eventId: string, callId?: string) {
+  db.prepare(
+    "UPDATE telephony_events SET status = 'processed', call_id = ?, processed_at = ?, error = NULL WHERE id = ?",
+  ).run(callId || null, nowIso(), eventId);
+}
+
+export function failTelephonyEvent(eventId: string, error: unknown) {
+  db.prepare(
+    "UPDATE telephony_events SET status = 'failed', error = ?, attempts = attempts + 1 WHERE id = ?",
+  ).run(error instanceof Error ? error.message : String(error), eventId);
 }
 
 // ── Missed-call WhatsApp flow ─────────────────────────────────────────────────
@@ -744,7 +1374,7 @@ export async function handleCallStatus(status: NormalizedCallStatus): Promise<Re
  * Sends the apology to the customer and the call-back alert to the agent.
  * Idempotent per flag — re-running won't double-send. Never throws.
  */
-export async function runMissedCallFlow(callSid: string): Promise<Record<string, unknown>> {
+export async function legacyRunMissedCallFlow(callSid: string): Promise<Record<string, unknown>> {
   const call = getCallBySid(callSid);
   if (!call) return { sent: false, reason: "unknown_call" };
 
@@ -800,4 +1430,110 @@ export async function runMissedCallFlow(callSid: string): Promise<Record<string,
     department: departmentName,
   });
   return out;
+}
+
+/** Create the callback task and dispatch each notification exactly once. */
+export async function runMissedCallFlow(callSid: string): Promise<Record<string, unknown>> {
+  const call = getCallBySid(callSid);
+  if (!call) return { sent: false, reason: "unknown_call" };
+
+  const ownerUid = String(call.owner_uid || "");
+  const customerPhone = String(call.from_phone || "");
+  const departmentName = String(call.department_name || "المتابعة العامة");
+  const agentName = String(call.agent_name || "أحد موظفينا");
+  let agentPhone = String(call.agent_phone || "");
+  const department = call.department_id
+    ? getDepartment(ownerUid, String(call.department_id))
+    : null;
+  const fallbackDepartment: IvrDepartment = department || {
+    id: "general",
+    owner_uid: ownerUid,
+    digit: "",
+    name: departmentName,
+    ring_timeout_sec: DEFAULT_RING_TIMEOUT,
+    active: true,
+    sort_order: 0,
+    workflow_action: "none",
+    schedule_json: "",
+    fallback_user_id: null,
+    agents: [],
+  };
+  const assignedAgent: IvrAgent | null = agentPhone ? {
+    id: String(call.agent_user_id || agentPhone),
+    department_id: fallbackDepartment.id,
+    owner_uid: ownerUid,
+    user_id: call.agent_user_id ? String(call.agent_user_id) : null,
+    name: agentName,
+    phone: agentPhone,
+    sort_order: 0,
+    active: true,
+  } : null;
+  const assignedUid = assignedAgent?.user_id || fallbackDepartment.fallback_user_id || managerQueueUid(ownerUid);
+  if (!agentPhone && assignedUid) {
+    const user = db.prepare(
+      "SELECT phone FROM users WHERE workspace_owner_uid = ? AND uid = ? AND active = 1 LIMIT 1",
+    ).get(ownerUid, assignedUid) as { phone?: string } | undefined;
+    agentPhone = String(user?.phone || "");
+  }
+  const taskId = ensureServiceTask(call, fallbackDepartment, assignedAgent, "high");
+  updateCallBySid(callSid, {
+    task_id: taskId,
+    follow_up_status: assignedAgent?.user_id ? "assigned" : "new",
+    assigned_user_id: assignedUid,
+  });
+
+  const callTime = new Date(String(call.created_at || nowIso())).toLocaleString("ar-SA", {
+    timeZone: process.env.APP_TIMEZONE || "Asia/Riyadh",
+  });
+  const output: Record<string, unknown> = { sent: true, customer: false, agent: false, taskId };
+
+  if (customerPhone && Number(call.wa_customer_notified || 0) === 0) {
+    try {
+      const delivery = await dispatchCommunicationJob({
+        ownerUid,
+        idempotencyKey: `${String(call.id)}:missed:customer`,
+        callId: String(call.id),
+        role: "customer",
+        phone: customerPhone,
+        template: "missed_call_customer",
+        vars: { department_name: departmentName, agent_name: agentName },
+      });
+      if (delivery.channel !== "pending") updateCallBySid(callSid, { wa_customer_notified: 1 });
+      output.customer = delivery.channel;
+    } catch (error) {
+      logError("ivr.missed_call.customer_dispatch_failed", error);
+      output.sent = false;
+    }
+  }
+
+  if (agentPhone && Number(call.wa_agent_notified || 0) === 0) {
+    try {
+      const delivery = await dispatchCommunicationJob({
+        ownerUid,
+        idempotencyKey: `${String(call.id)}:missed:agent`,
+        callId: String(call.id),
+        role: assignedAgent ? "agent" : "manager",
+        phone: agentPhone,
+        template: "missed_call_agent",
+        vars: {
+          department_name: departmentName,
+          customer_phone: normalizeDialNumber(customerPhone) || "-",
+          call_time: callTime,
+        },
+      });
+      if (delivery.channel !== "pending") updateCallBySid(callSid, { wa_agent_notified: 1 });
+      output.agent = delivery.channel;
+    } catch (error) {
+      logError("ivr.missed_call.agent_dispatch_failed", error);
+      output.sent = false;
+    }
+  }
+
+  logEvent("info", "ivr.missed_call.followup_created", {
+    callSid,
+    taskId,
+    customerChannel: output.customer,
+    agentChannel: output.agent,
+  });
+  return output;
 }

@@ -30,6 +30,23 @@ type QuotesPageProps = {
   refreshStats: () => Promise<void>;
 };
 
+type TelephonyActionContext = {
+  target?: string;
+  call_id?: string;
+  customer_id?: string | null;
+  customer_name?: string | null;
+  phone?: string | null;
+};
+
+function telephonyQuoteContext(): TelephonyActionContext | null {
+  try {
+    const value = JSON.parse(sessionStorage.getItem("telephony_action_context") || "null") as TelephonyActionContext | null;
+    return value?.target === "quotes" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 const today = () => new Date().toLocaleDateString("en-CA");
 
 const addDays = (date: string, days: number) => {
@@ -385,11 +402,12 @@ function quoteShareText(quote: api.Quote) {
 }
 
 export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
+  const callContext = useMemo(telephonyQuoteContext, []);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [editing, setEditing] = useState<api.Quote | null>(null);
   const [preview, setPreview] = useState<api.Quote | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(Boolean(callContext));
   const [sendingQuoteId, setSendingQuoteId] = useState("");
   const quotes = useAsyncData(() => api.getQuotes({ search, status }), [search, status]);
   const stats = quotes.data?.stats || {
@@ -418,6 +436,7 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
     }
     setCreating(false);
     setEditing(null);
+    sessionStorage.removeItem("telephony_action_context");
     await refreshAll();
   };
 
@@ -638,10 +657,11 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
       )}
 
       {(creating || editing) && (
-        <QuoteModal title={editing ? "تعديل عرض السعر" : "إصدار عرض سعر"} onClose={() => { setCreating(false); setEditing(null); }}>
+        <QuoteModal title={editing ? "تعديل عرض السعر" : "إصدار عرض سعر"} onClose={() => { setCreating(false); setEditing(null); sessionStorage.removeItem("telephony_action_context"); }}>
           <QuoteForm
             initial={editing || undefined}
-            onCancel={() => { setCreating(false); setEditing(null); }}
+            prefill={editing ? undefined : callContext || undefined}
+            onCancel={() => { setCreating(false); setEditing(null); sessionStorage.removeItem("telephony_action_context"); }}
             onSave={saveQuote}
           />
         </QuoteModal>
@@ -788,18 +808,20 @@ function QuotePreview({ quote, onCopy, onPrint }: { quote: api.Quote; onCopy: ()
 
 function QuoteForm({
   initial,
+  prefill,
   onCancel,
   onSave,
 }: {
   initial?: api.Quote;
+  prefill?: TelephonyActionContext;
   onCancel: () => void;
   onSave: (payload: api.QuoteInput) => Promise<void>;
 }) {
   const customers = useAsyncData(() => api.getCustomers(""), []);
   const products = useAsyncData(() => api.getProducts(), []);
-  const [customerId, setCustomerId] = useState(initial?.customer_id || "");
-  const [customerName, setCustomerName] = useState(initial?.customer_name || "");
-  const [customerPhone, setCustomerPhone] = useState(initial?.customer_phone || "");
+  const [customerId, setCustomerId] = useState(initial?.customer_id || prefill?.customer_id || "");
+  const [customerName, setCustomerName] = useState(initial?.customer_name || prefill?.customer_name || (prefill?.phone ? `متصل ${prefill.phone}` : ""));
+  const [customerPhone, setCustomerPhone] = useState(initial?.customer_phone || prefill?.phone || "");
   const [customerCity, setCustomerCity] = useState(initial?.customer_city || "");
   const [title, setTitle] = useState(initial?.title || "");
   const [status, setStatus] = useState<api.QuoteStatus>(initial?.status || "issued");
@@ -808,7 +830,7 @@ function QuoteForm({
   const [followUpDate, setFollowUpDate] = useState(initial?.follow_up_date || addDays(today(), 2));
   const [discount, setDiscount] = useState(String(initial?.discount || 0));
   const [tax, setTax] = useState(String(initial?.tax || 0));
-  const [notes, setNotes] = useState(initial?.notes || "");
+  const [notes, setNotes] = useState(initial?.notes || (prefill?.call_id ? `من مكالمة CRM: ${prefill.call_id}` : ""));
   const [terms, setTerms] = useState(initial?.terms || "العرض صالح حسب التاريخ الموضح، والأسعار بالريال السعودي.");
   const [items, setItems] = useState<api.QuoteItem[]>(
     initial?.items?.length

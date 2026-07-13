@@ -21,11 +21,23 @@ function fmt(value?: string | null) {
 }
 
 export default function OdooCrmPage({ notify }: { notify: (message: string, ok?: boolean) => void }) {
+  const callContext = useMemo(() => {
+    try {
+      const value = JSON.parse(sessionStorage.getItem("telephony_action_context") || "null") as {
+        target?: string;
+        customer_id?: string | null;
+        phone?: string | null;
+      } | null;
+      return value?.target === "odooCrm" ? value : null;
+    } catch {
+      return null;
+    }
+  }, []);
   const [dashboard, setDashboard] = useState<api.OdooDashboard | null>(null);
   const [pipeline, setPipeline] = useState<Array<{ stage: api.OdooCrmStage; count: number; amount: number; items: api.OdooDeal[] }>>([]);
   const [tasks, setTasks] = useState<api.OdooTask[]>([]);
   const [audit, setAudit] = useState<api.OdooAuditLog[]>([]);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(callContext?.phone || "");
   const [searchItems, setSearchItems] = useState<api.OdooSearchItem[]>([]);
   const [customer360, setCustomer360] = useState<api.Customer360 | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,6 +69,15 @@ export default function OdooCrmPage({ notify }: { notify: (message: string, ok?:
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!callContext) return;
+    sessionStorage.removeItem("telephony_action_context");
+    if (!callContext.customer_id) return;
+    api.getCustomer360(callContext.customer_id)
+      .then(setCustomer360)
+      .catch(() => undefined);
+  }, [callContext]);
 
   useEffect(() => {
     const timer = setTimeout(async () => {
@@ -252,8 +273,18 @@ export default function OdooCrmPage({ notify }: { notify: (message: string, ok?:
             <article className="stat"><span>عروض</span><strong>{customer360.quotes.length}</strong></article>
             <article className="stat"><span>فواتير</span><strong>{customer360.invoices.length}</strong></article>
             <article className="stat"><span>محادثات</span><strong>{customer360.conversations.length}</strong></article>
+            <article className="stat"><span>مكالمات</span><strong>{customer360.calls.length}</strong></article>
+            <article className="stat"><span>فرص هاتفية</span><strong>{customer360.leads.length}</strong></article>
           </div>
           <div className="list">
+            {customer360.calls.map((call) => (
+              <article className="row-card" key={call.id}>
+                <div className="row-main">
+                  <strong>مكالمة {call.department_name || "عامة"}</strong>
+                  <span>{fmt(call.created_at)} · {call.call_status || call.status} · متابعة {call.follow_up_status}</span>
+                </div>
+              </article>
+            ))}
             {customer360.notes.map((note) => (
               <article className="row-card" key={note.id}>
                 <div className="row-main"><strong>{note.body}</strong><span>{fmt(note.created_at)}</span></div>

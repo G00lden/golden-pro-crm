@@ -13,7 +13,7 @@
     "test:golden": "node scripts/golden-path.mjs",
     "test:assets": "node --import tsx --test server/assetMaintenance.test.ts",
     "test:products": "node --import tsx --test server/productCatalog.test.ts",
-    "test:telephony": "node --import tsx --test server/ivrEngine.telephony.test.ts",
+    "test:telephony": "node --import tsx --test server/ivrEngine.telephony.test.ts server/routes-telephony.test.ts",
     "sync:salla-products": "node --import tsx scripts/sync-salla-products.ts",
     "doctor": "node scripts/doctor.mjs",
     "doctor:prod": "node scripts/doctor.mjs --production",

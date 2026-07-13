@@ -3,15 +3,16 @@
  *
  * Implements Unifonic's documented Voice / inbound-IVR contract:
  *
- *  Inbound IVR Endpoint (GET) — Unifonic queries it on each inbound call and
- *  again on each DTMF response. Fields it sends:
+ *  Inbound IVR Endpoint (GET) — Unifonic queries it once for an inbound call.
+ *  The generated gather response sends DTMF to a tokenized POST responseUrl.
+ *  Fields supported defensively across provider payload variants include:
  *     { callerId, recipient, digits, speechResult, confidence }
  *   - callerId  = the customer's number (E.164, e.g. +9665…)
  *   - recipient = the dialed number (our main number)
  *   - digits    = DTMF the caller pressed (present only on a response hit)
- *   Unifonic does NOT include a persistent call id in the response payload, so
- *   we correlate a call by its (normalized) callerId — a caller has one active
- *   call at a time.
+ *   If Unifonic includes a persistent call id we store it. If it does not, the
+ *   engine correlates status by both normalized endpoints inside a five-minute
+ *   window and rejects ambiguous matches.
  *
  *  Response — a bare JSON ARRAY of IVR objects. Verbs used here:
  *   - say:      { say, language, voice, ttsEngine }
@@ -74,14 +75,12 @@ const F = {
   digit: ["digits", "Digits", "digit", "dtmf", "input"],
   status: ["status", "Status", "callStatus", "CallStatus", "dialStatus", "DialCallStatus", "result", "event"],
   duration: ["duration", "Duration", "callDuration", "durationSec", "seconds"],
-  callSid: ["callSid", "CallSid", "callId", "sessionId", "id"],
+  callSid: ["callSid", "CallSid", "callId", "sessionId", "uniqueCallId", "externalCallsId", "id"],
+  timestamp: ["timestamp", "Timestamp", "eventTime", "createdAt", "updatedAt", "callEndTime", "endTime"],
 } as const;
 
 function correlationId(src: AnyRecord): string {
-  const explicit = pick(src, [...F.callSid]);
-  if (explicit) return explicit;
-  const caller = normalizeDigits(pick(src, [...F.caller]));
-  return caller ? `caller:${caller}` : "";
+  return pick(src, [...F.callSid]) || "";
 }
 
 function normalizeStatus(raw: string | undefined): NormalizedCallStatus["status"] {
@@ -120,6 +119,7 @@ export const unifonicAdapter: TelephonyAdapter = {
       to: pick(src, [...F.recipient]),
       status: normalizeStatus(pick(src, [...F.status])),
       durationSec: durationRaw ? Number(durationRaw) || 0 : undefined,
+      occurredAt: pick(src, [...F.timestamp]),
       raw: src,
     };
   },

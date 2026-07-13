@@ -1,539 +1,523 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ClipboardCheck,
+  ExternalLink,
+  Filter,
+  MessageCircle,
   PhoneCall,
   PhoneMissed,
   Plus,
   RefreshCcw,
   Save,
+  Settings2,
+  ShieldCheck,
   Smartphone,
   Trash2,
-  Users as UsersIcon,
+  Users,
+  X,
 } from "lucide-react";
 import * as api from "../api";
 
 type Notifier = (message: string, ok?: boolean) => void;
+type CallPage = "odooCrm" | "bookings" | "quotes" | "customers";
+type Tab = "operations" | "routing" | "integration" | "test";
 
-function fmtDateTime(value?: string | null) {
-  if (!value) return "—";
-  try {
-    return new Date(value.replace(" ", "T") + (value.length === 19 ? "Z" : "")).toLocaleString("ar-SA");
-  } catch {
-    return value;
-  }
-}
-
-const STATUS_LABEL: Record<string, string> = {
-  menu: "في القائمة",
-  forwarding: "جارٍ التحويل",
-  in_progress: "قيد المكالمة",
-  completed: "تمت",
-  no_answer: "لم يُرد",
-  busy: "مشغول",
-  failed: "فشلت",
-  voicemail: "بريد صوتي",
-  ringing: "يرن",
-  routed: "مُحوّلة لموظف",
-  handled: "تمت المعالجة",
+type DraftAgent = {
+  user_id: string | null;
+  name: string;
+  phone: string;
+  external: boolean;
 };
 
-type DraftAgent = { name: string; phone: string };
-type DraftDept = {
+type DraftDepartment = {
   id?: string;
   digit: string;
   name: string;
   ring_timeout_sec: number;
   active: boolean;
+  workflow_action: "lead" | "service_task" | "none";
+  fallback_user_id: string | null;
+  scheduleEnabled: boolean;
+  workDays: number[];
+  start: string;
+  end: string;
   agents: DraftAgent[];
 };
 
-const emptyDraft = (): DraftDept => ({
+const STATUS_LABEL: Record<string, string> = {
+  new: "جديدة",
+  menu: "في القائمة",
+  selected: "تم الاختيار",
+  forwarding: "جاري التحويل",
+  ringing: "ترن",
+  connected: "متصلة",
+  in_progress: "متصلة",
+  completed: "مكتملة",
+  no_answer: "لم يُرد",
+  busy: "مشغول",
+  failed: "فشلت",
+};
+
+// `in_progress` is a legacy provider alias kept for rendering old rows. The
+// public lifecycle exposes `connected`, so showing both in the filter creates
+// two indistinguishable "متصلة" options.
+const FILTER_CALL_STATUSES = Object.entries(STATUS_LABEL).filter(([value]) => value !== "in_progress");
+
+const FOLLOW_UP_LABEL: Record<string, string> = {
+  new: "جديدة",
+  assigned: "مسندة",
+  in_progress: "قيد المتابعة",
+  done: "منجزة",
+};
+
+const WORKFLOW_LABEL: Record<DraftDepartment["workflow_action"], string> = {
+  lead: "إنشاء فرصة للمتصل الجديد",
+  service_task: "إنشاء مهمة خدمة",
+  none: "تسجيل المكالمة فقط",
+};
+
+const emptyAgent = (): DraftAgent => ({ user_id: null, name: "", phone: "", external: false });
+const emptyDraft = (): DraftDepartment => ({
   digit: "",
   name: "",
   ring_timeout_sec: 20,
   active: true,
-  agents: [{ name: "", phone: "" }],
+  workflow_action: "none",
+  fallback_user_id: null,
+  scheduleEnabled: false,
+  workDays: [0, 1, 2, 3, 4],
+  start: "09:00",
+  end: "18:00",
+  agents: [emptyAgent()],
 });
 
-export function CallSystemPage({ notify }: { notify: Notifier }) {
+function fmtDateTime(value?: string | null) {
+  if (!value) return "—";
+  const normalized = value.includes("T") ? value : value.replace(" ", "T") + "Z";
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ar-SA");
+}
+
+function phoneForWhatsApp(phone?: string | null) {
+  let digits = String(phone || "").replace(/\D/g, "");
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.startsWith("0")) digits = `966${digits.slice(1)}`;
+  if (digits.length === 9 && digits.startsWith("5")) digits = `966${digits}`;
+  return digits;
+}
+
+function parseSchedule(raw: string) {
+  try {
+    const parsed = JSON.parse(raw) as { days?: number[]; start?: string; end?: string };
+    return {
+      scheduleEnabled: Boolean(parsed.days?.length && parsed.start && parsed.end),
+      workDays: parsed.days?.length ? parsed.days : [0, 1, 2, 3, 4],
+      start: parsed.start || "09:00",
+      end: parsed.end || "18:00",
+    };
+  } catch {
+    return { scheduleEnabled: false, workDays: [0, 1, 2, 3, 4], start: "09:00", end: "18:00" };
+  }
+}
+
+export function CallSystemPage({
+  notify,
+  currentRole,
+  onNavigate,
+}: {
+  notify: Notifier;
+  currentRole: api.AppUserRole;
+  onNavigate: (page: CallPage) => void;
+}) {
+  const isAdmin = currentRole === "admin" || currentRole === "manager";
+  const [tab, setTab] = useState<Tab>("operations");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [config, setConfig] = useState<api.TelephonyConfig | null>(null);
+  const [savedConfig, setSavedConfig] = useState("");
   const [readiness, setReadiness] = useState<api.TelephonyReadiness | null>(null);
   const [departments, setDepartments] = useState<api.TelephonyDepartment[]>([]);
   const [calls, setCalls] = useState<api.CallLogRow[]>([]);
+  const [users, setUsers] = useState<api.ManagedAppUser[]>([]);
   const [gateway, setGateway] = useState<api.GatewayStatus | null>(null);
-  const [draft, setDraft] = useState<DraftDept>(emptyDraft());
-  const [savingDept, setSavingDept] = useState(false);
-  const [savingConfig, setSavingConfig] = useState(false);
+  const [draft, setDraft] = useState<DraftDepartment>(emptyDraft());
+  const [savedDraft, setSavedDraft] = useState(JSON.stringify(emptyDraft()));
+  const [saving, setSaving] = useState(false);
   const [testPhone, setTestPhone] = useState("");
   const [testDigit, setTestDigit] = useState("");
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search.trim().toLowerCase());
+  const [statusFilter, setStatusFilter] = useState("");
+  const [followUpFilter, setFollowUpFilter] = useState("");
+  const [departmentFilter, setDepartmentFilter] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [selectedCall, setSelectedCall] = useState<api.CallLogRow | null>(null);
+  const [outcome, setOutcome] = useState("completed");
+  const [notes, setNotes] = useState("");
 
-  const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+  const configDirty = Boolean(config && JSON.stringify(config) !== savedConfig);
+  const draftDirty = JSON.stringify(draft) !== savedDraft;
+  const hasUnsavedChanges = isAdmin && (configDirty || draftDirty);
 
-  const refresh = useCallback(async () => {
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!hasUnsavedChanges) return;
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [hasUnsavedChanges]);
+
+  const refresh = useCallback(async (initial = false) => {
+    if (!initial) setRefreshing(true);
     try {
-      const [cfg, ready, depts, log, gw] = await Promise.all([
-        api.getTelephonyConfig(),
-        api.getTelephonyReadiness(),
-        api.getTelephonyDepartments(),
-        api.getCallLogs({ limit: 100 }),
-        api.getGatewayStatus().catch(() => null),
-      ]);
-      setConfig(cfg);
-      setReadiness(ready);
-      setDepartments(depts);
-      setCalls(log);
-      setGateway(gw);
+      if (isAdmin) {
+        const [nextConfig, nextReadiness, nextDepartments, nextCalls, nextUsers, nextGateway] = await Promise.all([
+          api.getTelephonyConfig(),
+          api.getTelephonyReadiness(),
+          api.getTelephonyDepartments(),
+          api.getCallLogs({ limit: 300 }),
+          api.listAppUsers({ active: true }),
+          api.getGatewayStatus().catch(() => null),
+        ]);
+        setConfig(nextConfig);
+        setSavedConfig(JSON.stringify(nextConfig));
+        setReadiness(nextReadiness);
+        setDepartments(nextDepartments);
+        setCalls(nextCalls);
+        setUsers(nextUsers.users);
+        setGateway(nextGateway);
+      } else {
+        setCalls(await api.getCallLogs({ limit: 300 }));
+      }
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر تحميل نظام المكالمات", false);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, [notify]);
+  }, [isAdmin, notify]);
 
   useEffect(() => {
-    refresh();
+    void refresh(true);
   }, [refresh]);
 
-  const missedCount = useMemo(() => calls.filter((c) => c.missed).length, [calls]);
+  const visibleCalls = useMemo(() => calls.filter((call) => {
+    const haystack = `${call.from_phone || ""} ${call.customer_name || ""} ${call.agent_name || ""}`.toLowerCase();
+    if (deferredSearch && !haystack.includes(deferredSearch)) return false;
+    if (statusFilter && (call.call_status || call.status) !== statusFilter) return false;
+    if (followUpFilter && call.follow_up_status !== followUpFilter) return false;
+    if (departmentFilter && call.department_name !== departmentFilter) return false;
+    const date = String(call.created_at || "").slice(0, 10);
+    if (fromDate && date < fromDate) return false;
+    if (toDate && date > toDate) return false;
+    return true;
+  }), [calls, deferredSearch, departmentFilter, followUpFilter, fromDate, statusFilter, toDate]);
+
+  const switchTab = (next: Tab) => {
+    if (hasUnsavedChanges && !window.confirm("لديك تعديلات غير محفوظة. هل تريد الانتقال دون حفظها؟")) return;
+    setTab(next);
+  };
 
   const saveConfig = async () => {
     if (!config) return;
-    setSavingConfig(true);
+    setSaving(true);
     try {
-      const saved = await api.updateTelephonyConfig({
-        main_number: config.main_number,
-        greeting: config.greeting,
-        menu_prompt: config.menu_prompt,
-        ring_timeout_sec: config.ring_timeout_sec,
-        enabled: config.enabled,
-      });
+      const saved = await api.updateTelephonyConfig(config);
       setConfig(saved);
-      const ready = await api.getTelephonyReadiness().catch(() => null);
-      if (ready) setReadiness(ready);
-      notify("تم حفظ إعدادات المكالمات", true);
+      setSavedConfig(JSON.stringify(saved));
+      setReadiness(await api.getTelephonyReadiness());
+      notify("تم حفظ إعدادات الرقم والرد الآلي");
     } catch (error) {
-      notify(error instanceof Error ? error.message : "تعذر الحفظ", false);
+      notify(error instanceof Error ? error.message : "تعذر حفظ الإعدادات", false);
     } finally {
-      setSavingConfig(false);
+      setSaving(false);
     }
   };
 
-  const editDept = (d: api.TelephonyDepartment) => {
-    setDraft({
-      id: d.id,
-      digit: d.digit,
-      name: d.name,
-      ring_timeout_sec: d.ring_timeout_sec,
-      active: d.active,
-      agents: d.agents.length ? d.agents.map((a) => ({ name: a.name || "", phone: a.phone })) : [{ name: "", phone: "" }],
-    });
+  const editDepartment = (department: api.TelephonyDepartment) => {
+    const schedule = parseSchedule(department.schedule_json);
+    const next: DraftDepartment = {
+      id: department.id,
+      digit: department.digit,
+      name: department.name,
+      ring_timeout_sec: department.ring_timeout_sec,
+      active: department.active,
+      workflow_action: department.workflow_action || "none",
+      fallback_user_id: department.fallback_user_id,
+      ...schedule,
+      agents: department.agents.length
+        ? department.agents.map((agent) => ({
+            user_id: agent.user_id || null,
+            name: agent.name || "",
+            phone: agent.phone,
+            external: !agent.user_id,
+          }))
+        : [emptyAgent()],
+    };
+    setDraft(next);
+    setSavedDraft(JSON.stringify(next));
   };
 
-  const saveDept = async () => {
-    const agents = draft.agents.filter((a) => a.phone.trim());
-    if (!draft.digit.trim() || !draft.name.trim()) {
-      notify("الرقم واسم القسم مطلوبان", false);
+  const resetDraft = () => {
+    const next = emptyDraft();
+    setDraft(next);
+    setSavedDraft(JSON.stringify(next));
+  };
+
+  const saveDepartment = async () => {
+    if (!draft.digit || !draft.name.trim()) {
+      notify("رقم الاختيار واسم القسم مطلوبان", false);
       return;
     }
-    if (!agents.length) {
-      notify("أضف موظفاً واحداً على الأقل برقم جوال", false);
-      return;
-    }
-    setSavingDept(true);
+    const agents = draft.agents
+      .filter((agent) => agent.phone.trim())
+      .map((agent, index) => ({
+        user_id: agent.external ? null : agent.user_id,
+        name: agent.name.trim(),
+        phone: agent.phone.trim(),
+        sort_order: index,
+        active: true,
+      }));
+    const payload: api.TelephonyDepartmentInput = {
+      digit: draft.digit,
+      name: draft.name.trim(),
+      ring_timeout_sec: draft.ring_timeout_sec,
+      active: draft.active,
+      workflow_action: draft.workflow_action,
+      fallback_user_id: draft.fallback_user_id,
+      schedule_json: draft.scheduleEnabled
+        ? JSON.stringify({ days: draft.workDays, start: draft.start, end: draft.end })
+        : "",
+      agents,
+    };
+    setSaving(true);
     try {
-      const payload = {
-        digit: draft.digit.trim(),
-        name: draft.name.trim(),
-        ring_timeout_sec: draft.ring_timeout_sec,
-        active: draft.active,
-        agents: agents.map((a, i) => ({ name: a.name.trim(), phone: a.phone.trim(), sort_order: i })),
-      };
-      if (draft.id) {
-        await api.updateTelephonyDepartment(draft.id, payload);
-        notify("تم تحديث القسم", true);
-      } else {
-        await api.createTelephonyDepartment(payload);
-        notify("تم إضافة القسم", true);
-      }
-      setDraft(emptyDraft());
+      if (draft.id) await api.updateTelephonyDepartment(draft.id, payload);
+      else await api.createTelephonyDepartment(payload);
+      notify(draft.id ? "تم تحديث القسم" : "تم إنشاء القسم");
+      resetDraft();
       await refresh();
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر حفظ القسم", false);
     } finally {
-      setSavingDept(false);
+      setSaving(false);
     }
   };
 
-  const removeDept = async (id: string) => {
+  const deleteDepartment = async (department: api.TelephonyDepartment) => {
+    if (!window.confirm(`حذف قسم «${department.name}»؟ لا يمكن التراجع عن هذا الإجراء.`)) return;
     try {
-      await api.deleteTelephonyDepartment(id);
-      notify("تم حذف القسم", true);
-      if (draft.id === id) setDraft(emptyDraft());
+      await api.deleteTelephonyDepartment(department.id);
+      if (draft.id === department.id) resetDraft();
+      notify("تم حذف القسم");
       await refresh();
     } catch (error) {
-      notify(error instanceof Error ? error.message : "تعذر الحذف", false);
+      notify(error instanceof Error ? error.message : "تعذر حذف القسم", false);
     }
   };
 
-  const handleCall = async (id: string) => {
+  const chooseUser = (index: number, uid: string) => {
+    const user = users.find((candidate) => candidate.uid === uid);
+    setDraft((current) => ({
+      ...current,
+      agents: current.agents.map((agent, agentIndex) => agentIndex === index
+        ? { user_id: uid || null, name: user?.name || "", phone: user?.phone || "", external: false }
+        : agent),
+    }));
+  };
+
+  const openAction = (page: CallPage, call: api.CallLogRow) => {
+    sessionStorage.setItem("telephony_action_context", JSON.stringify({
+      target: page,
+      call_id: call.id,
+      lead_id: call.lead_id,
+      task_id: call.task_id,
+      customer_id: call.customer_id,
+      customer_name: call.customer_name,
+      phone: call.from_phone,
+    }));
+    onNavigate(page);
+  };
+
+  const completeFollowUp = async () => {
+    if (!selectedCall) return;
     try {
-      await api.markCallHandled(id);
-      notify("تم وضع المكالمة كمُعالَجة", true);
+      await api.completeCallFollowUp(selectedCall.id, { outcome, notes: notes.trim() });
+      notify("تم تسجيل نتيجة المتابعة دون تغيير حالة الاتصال الأصلية");
+      setSelectedCall(null);
+      setNotes("");
       await refresh();
     } catch (error) {
-      notify(error instanceof Error ? error.message : "تعذر التحديث", false);
+      notify(error instanceof Error ? error.message : "تعذر تسجيل المتابعة", false);
     }
   };
 
   const runTest = async () => {
     if (!testPhone.trim()) {
-      notify("أدخل رقم جوال العميل للاختبار", false);
+      notify("أدخل رقم المتصل للمحاكاة", false);
       return;
     }
     try {
-      const res = await api.testMissedCall({ from_phone: testPhone.trim(), digit: testDigit.trim() || undefined });
-      notify(`تمت محاكاة مكالمة فائتة لقسم ${res.department}`, true);
+      const result = await api.testMissedCall({ from_phone: testPhone.trim(), digit: testDigit || undefined });
+      notify(`نجحت محاكاة مكالمة فائتة لقسم ${result.department}`);
       setTestPhone("");
-      setTestDigit("");
       await refresh();
     } catch (error) {
-      notify(error instanceof Error ? error.message : "تعذر تشغيل الاختبار", false);
+      notify(error instanceof Error ? error.message : "فشل الاختبار", false);
     }
   };
 
   if (loading) {
-    return (
-      <div className="empty" dir="rtl">
-        <RefreshCcw className="spin" size={26} />
-        <p>جاري تحميل نظام المكالمات…</p>
-      </div>
-    );
+    return <div className="empty" dir="rtl"><RefreshCcw className="spin" size={24} /><p>جاري تحميل المكالمات…</p></div>;
   }
 
+  const tabs: Array<{ id: Tab; label: string; icon: typeof PhoneCall; admin?: boolean }> = [
+    { id: "operations", label: isAdmin ? "التشغيل والمتابعة" : "مكالماتي", icon: PhoneCall },
+    { id: "routing", label: "الأقسام والتوجيه", icon: Users, admin: true },
+    { id: "integration", label: "ربط الرقم وUnifonic", icon: Settings2, admin: true },
+    { id: "test", label: "الاختبار", icon: ClipboardCheck, admin: true },
+  ];
+
   return (
-    <section dir="rtl" style={{ display: "grid", gap: 18 }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+    <section className="call-system-page" dir="rtl">
+      <header className="call-system-header">
         <div>
-          <h1 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-            <PhoneCall size={22} /> نظام المكالمات والتحويل
-          </h1>
-          <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
-            قائمة صوتية ترد على المتصلين وتحوّلهم للموظف المختص، وعند عدم الرد ترسل واتساب للعميل والموظف.
-          </p>
+          <span className="eyebrow">مركز الاتصال</span>
+          <h1>{isAdmin ? "نظام المكالمات والرد الآلي" : "مكالماتي"}</h1>
+          <p>{isAdmin
+            ? "Unifonic يجيب عن المكالمة ويوجهها لمختص واحد بالتناوب، ثم ينشئ متابعة عند عدم الرد."
+            : "المكالمات والمهام المسندة إليك فقط، مع تسجيل نتيجة المتابعة."}</p>
         </div>
-        <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} /> تحديث</button>
+        <button className="btn muted" type="button" onClick={() => void refresh()} disabled={refreshing}>
+          <RefreshCcw size={15} className={refreshing ? "spin" : ""} /> تحديث
+        </button>
       </header>
 
-      {readiness && (
-        <div
-          className="card"
-          style={{
-            padding: 16,
-            display: "grid",
-            gap: 12,
-            border: `1px solid ${readiness.ready ? "rgba(15,191,108,0.45)" : "rgba(245,158,11,0.45)"}`,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-            <div>
-              <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-                {readiness.ready ? <CheckCircle2 size={19} color="#0fbf6c" /> : <AlertTriangle size={19} color="#f59e0b" />}
-                جاهزية الرد الآلي والتحويل
-              </h3>
-              <p style={{ margin: "4px 0 0", opacity: 0.75, fontSize: 13 }}>
-                {readiness.ready
-                  ? "إعدادات الخادم مكتملة. اربط العناوين أدناه بالرقم الصوتي ثم نفّذ مكالمة تجريبية."
-                  : "أكمل البنود الناقصة قبل نشر الرقم؛ التفعيل وحده لا يعني أن المكالمات ستصل للمختصين."}
-              </p>
-            </div>
-            <span
-              role="status"
-              style={{
-                fontSize: 12,
-                padding: "4px 11px",
-                borderRadius: 999,
-                background: readiness.ready ? "rgba(15,191,108,0.15)" : "rgba(245,158,11,0.15)",
-                color: readiness.ready ? "#0fbf6c" : "#f59e0b",
-              }}
-            >
-              {readiness.ready ? "جاهز للربط" : "غير جاهز"}
-            </span>
+      <nav className="call-tabs" aria-label="أقسام نظام المكالمات">
+        {tabs.filter((item) => !item.admin || isAdmin).map((item) => {
+          const Icon = item.icon;
+          return <button key={item.id} type="button" className={tab === item.id ? "active" : ""} onClick={() => switchTab(item.id)}>
+            <Icon size={16} /> {item.label}
+          </button>;
+        })}
+      </nav>
+
+      {tab === "operations" && (
+        <div className="call-section">
+          <div className="call-summary-grid">
+            <article><span>المعروضة</span><strong>{visibleCalls.length}</strong></article>
+            <article><span>تحتاج متابعة</span><strong>{visibleCalls.filter((call) => call.missed && call.follow_up_status !== "done").length}</strong></article>
+            <article><span>منجزة</span><strong>{visibleCalls.filter((call) => call.follow_up_status === "done").length}</strong></article>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(230px,1fr))", gap: 8 }}>
-            {readiness.checks.map((check) => (
-              <div
-                key={check.id}
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 8,
-                  padding: 10,
-                  borderRadius: 10,
-                  background: check.ready ? "rgba(15,191,108,0.08)" : "rgba(245,158,11,0.08)",
-                }}
-              >
-                {check.ready
-                  ? <CheckCircle2 size={17} color="#0fbf6c" style={{ flex: "0 0 auto", marginTop: 2 }} />
-                  : <AlertTriangle size={17} color="#f59e0b" style={{ flex: "0 0 auto", marginTop: 2 }} />}
-                <span>
-                  <strong style={{ display: "block", fontSize: 13 }}>{check.label}</strong>
-                  <span style={{ display: "block", marginTop: 2, opacity: 0.72, fontSize: 12, lineHeight: 1.6 }}>{check.detail}</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+          <form className="call-filters" onSubmit={(event) => event.preventDefault()}>
+            <label><span>بحث</span><input className="input" type="search" name="call_search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="رقم أو عميل أو مختص" /></label>
+            <label><span>حالة الاتصال</span><select className="input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">الكل</option>{FILTER_CALL_STATUSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label><span>حالة المتابعة</span><select className="input" value={followUpFilter} onChange={(event) => setFollowUpFilter(event.target.value)}><option value="">الكل</option>{Object.entries(FOLLOW_UP_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            {isAdmin && <label><span>القسم</span><select className="input" value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option value="">كل الأقسام</option>{departments.map((department) => <option key={department.id} value={department.name}>{department.name}</option>)}</select></label>}
+            <label><span>من تاريخ</span><input className="input" type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+            <label><span>إلى تاريخ</span><input className="input" type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+            <button className="btn muted" type="button" onClick={() => { setSearch(""); setStatusFilter(""); setFollowUpFilter(""); setDepartmentFilter(""); setFromDate(""); setToDate(""); }}><Filter size={14} /> مسح</button>
+          </form>
 
-      {/* Self-hosted gateway (no external provider, no WhatsApp QR) */}
-      <div className="card" style={{ padding: 16, display: "grid", gap: 10, border: "1px solid rgba(96,165,250,0.35)" }}>
-        <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <Smartphone size={18} /> البوابة الذاتية (جوالك) — بدون مزوّد خارجي
-          <span style={{ fontSize: 12, padding: "2px 10px", borderRadius: 8,
-            background: gateway?.configured ? "rgba(15,191,108,0.15)" : "rgba(245,158,11,0.15)",
-            color: gateway?.configured ? "#0fbf6c" : "#f59e0b" }}>
-            {gateway?.configured ? "مُفعّلة (التوكن مضبوط)" : "تحتاج ضبط GATEWAY_TOKEN"}
-          </span>
-        </h3>
-        <p style={{ margin: 0, opacity: 0.8, fontSize: 13, lineHeight: 1.8 }}>
-          ضع شريحة الشركة في جوال أندرويد وشغّل تطبيق أتمتة مجاني (MacroDroid/Tasker) ليرسل أحداث المكالمات لخادمك ويرسل ردود SMS من شريحتك.
-          نمط التوجيه الحالي: <strong>{gateway?.routing_mode === "direct" ? "تحويل مباشر" : "قائمة عبر SMS (يرد العميل برقم)"}</strong> — يُضبط عبر <code>GATEWAY_ROUTING_MODE</code>.
-        </p>
-        <div style={{ display: "grid", gap: 4, fontSize: 12 }}>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/event  (ترويسة x-gateway-token)</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>GET  {baseUrl}/api/gateway/outbox   ← الرسائل المنتظرة للإرسال</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/outbox/ack  ← تأكيد الإرسال</code>
-        </div>
-        <p style={{ margin: 0, opacity: 0.7, fontSize: 12 }}>
-          الدليل الكامل لإعداد الجوال في <code>docs/gateway-setup.md</code>. الرسائل المنتظرة الآن: <strong>{gateway?.pending ?? 0}</strong>.
-          {!gateway?.configured && " تظهر الردود محلياً حتى تضبط التوكن."}
-        </p>
-        {gateway && gateway.recent.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead><tr style={{ textAlign: "right", opacity: 0.7 }}>
-                <th style={{ padding: 5 }}>الوقت</th><th style={{ padding: 5 }}>إلى</th>
-                <th style={{ padding: 5 }}>النوع</th><th style={{ padding: 5 }}>الحالة</th><th style={{ padding: 5 }}>النص</th>
-              </tr></thead>
-              <tbody>
-                {gateway.recent.slice(0, 12).map((m) => (
-                  <tr key={m.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-                    <td style={{ padding: 5, whiteSpace: "nowrap" }}>{fmtDateTime(m.created_at)}</td>
-                    <td style={{ padding: 5 }}>{m.to_phone}</td>
-                    <td style={{ padding: 5 }}>{m.role === "agent" ? "موظف" : "عميل"}</td>
-                    <td style={{ padding: 5, color: m.status === "sent" ? "#0fbf6c" : m.status === "failed" ? "#ef4444" : "#f59e0b" }}>
-                      {m.status === "sent" ? "أُرسلت" : m.status === "failed" ? "فشلت" : "بالانتظار"}
-                    </td>
-                    <td style={{ padding: 5, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.body}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Config */}
-      {config && (
-        <div className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
-          <h3 style={{ margin: 0 }}>الإعدادات العامة</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
-            <label className="field">
-              <span>الرقم الأساسي (للإعلانات)</span>
-              <input className="input" value={config.main_number}
-                onChange={(e) => setConfig({ ...config, main_number: e.target.value })}
-                placeholder="9665XXXXXXXX" />
-            </label>
-            <label className="field">
-              <span>مهلة الرنين (ثانية)</span>
-              <input className="input" type="number" min={5} max={120} value={config.ring_timeout_sec}
-                onChange={(e) => setConfig({ ...config, ring_timeout_sec: Number(e.target.value) || 20 })} />
-            </label>
-            <label className="field" style={{ alignSelf: "end" }}>
-              <span>تفعيل النظام</span>
-              <select className="input" value={config.enabled ? "1" : "0"}
-                onChange={(e) => setConfig({ ...config, enabled: e.target.value === "1" })}>
-                <option value="1">مفعّل</option>
-                <option value="0">متوقف</option>
-              </select>
-            </label>
-          </div>
-          <label className="field">
-            <span>رسالة الترحيب</span>
-            <input className="input" value={config.greeting}
-              onChange={(e) => setConfig({ ...config, greeting: e.target.value })}
-              placeholder="مرحباً بكم في شركتنا." />
-          </label>
-          <label className="field">
-            <span>نص القائمة (اتركه فارغاً لتوليده تلقائياً من الأقسام)</span>
-            <input className="input" value={config.menu_prompt}
-              onChange={(e) => setConfig({ ...config, menu_prompt: e.target.value })}
-              placeholder="للمبيعات اضغط 1، للصيانة اضغط 2" />
-          </label>
-          <div>
-            <button className="btn primary" type="button" onClick={saveConfig} disabled={savingConfig}>
-              <Save size={14} /> {savingConfig ? "…" : "حفظ الإعدادات"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Departments + editor */}
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(0,1fr)", gap: 16 }}>
-        <div className="card" style={{ padding: 16 }}>
-          <h3 style={{ marginTop: 0 }}>الأقسام ({departments.length})</h3>
-          {departments.length === 0 ? (
-            <p style={{ opacity: 0.7 }}>لا توجد أقسام. أضف قسماً من النموذج المجاور.</p>
-          ) : (
-            <div style={{ display: "grid", gap: 10 }}>
-              {departments.map((d) => (
-                <div key={d.id} style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, padding: 12 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                    <strong style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ background: "rgba(96,165,250,0.18)", color: "#60a5fa", borderRadius: 8, padding: "2px 10px", fontSize: 16 }}>{d.digit}</span>
-                      {d.name}
-                      {!d.active && <span style={{ fontSize: 11, color: "#f59e0b" }}>(متوقف)</span>}
-                    </strong>
-                    <span style={{ display: "flex", gap: 6 }}>
-                      <button className="icon-btn muted" title="تعديل" type="button" onClick={() => editDept(d)}>تعديل</button>
-                      <button className="icon-btn danger" title="حذف" type="button" onClick={() => removeDept(d.id)}><Trash2 size={14} /></button>
-                    </span>
-                  </div>
-                  <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <UsersIcon size={13} />
-                    {d.agents.length ? d.agents.map((a) => `${a.name || "موظف"} (${a.phone})`).join("، ") : "لا يوجد موظفون"}
-                  </div>
-                </div>
-              ))}
+          {visibleCalls.length === 0 ? <div className="empty"><PhoneCall size={28} /><p>لا توجد مكالمات مطابقة.</p></div> : (
+            <div className="responsive-table-wrap">
+              <table className="responsive-table call-table">
+                <thead><tr><th>الوقت</th><th>المتصل</th><th>القسم</th><th>المختص</th><th>الاتصال</th><th>المتابعة</th><th>إجراءات</th></tr></thead>
+                <tbody>{visibleCalls.map((call) => {
+                  const callStatus = call.call_status || call.status;
+                  const waPhone = phoneForWhatsApp(call.from_phone);
+                  return <tr key={call.id} className={call.missed && call.follow_up_status !== "done" ? "needs-follow-up" : ""}>
+                    <td data-label="الوقت">{fmtDateTime(call.created_at)}</td>
+                    <td data-label="المتصل"><strong>{call.customer_name || call.from_phone || "غير معروف"}</strong>{call.customer_name && <small>{call.from_phone}</small>}</td>
+                    <td data-label="القسم">{call.department_name || "عام"}</td>
+                    <td data-label="المختص">{call.agent_name || call.agent_phone || "طابور المدير"}</td>
+                    <td data-label="الاتصال"><span className={`call-status status-${callStatus}`}>{STATUS_LABEL[callStatus] || callStatus}</span></td>
+                    <td data-label="المتابعة"><span className={`follow-status follow-${call.follow_up_status || "new"}`}>{FOLLOW_UP_LABEL[call.follow_up_status || "new"]}</span></td>
+                    <td data-label="إجراءات"><div className="call-actions">
+                      {waPhone && <a className="icon-btn muted" href={`https://wa.me/${waPhone}`} target="_blank" rel="noreferrer" aria-label="فتح محادثة واتساب" title="فتح واتساب"><MessageCircle size={15} /></a>}
+                      <button className="icon-btn muted" type="button" onClick={() => openAction("odooCrm", call)} aria-label="فتح سجل CRM" title="CRM"><ExternalLink size={15} /></button>
+                      <button className="btn muted compact" type="button" onClick={() => { setSelectedCall(call); setOutcome(call.follow_up_outcome || "completed"); setNotes(call.follow_up_notes || ""); }} disabled={call.follow_up_status === "done"}>تسجيل النتيجة</button>
+                    </div></td>
+                  </tr>;
+                })}</tbody>
+              </table>
             </div>
           )}
         </div>
+      )}
 
-        <div className="card" style={{ padding: 16 }}>
-          <h3 style={{ marginTop: 0 }}>{draft.id ? "تعديل قسم" : "إضافة قسم"}</h3>
-          <div style={{ display: "grid", gap: 10 }}>
-            <label className="field">
-              <span>رقم الاختيار (0-9)</span>
-              <input className="input" maxLength={1} value={draft.digit}
-                onChange={(e) => setDraft({ ...draft, digit: e.target.value.replace(/[^0-9]/g, "") })}
-                placeholder="1" />
-            </label>
-            <label className="field">
-              <span>اسم القسم</span>
-              <input className="input" value={draft.name}
-                onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="المبيعات" />
-            </label>
-            <label className="field">
-              <span>مهلة الرنين (ثانية)</span>
-              <input className="input" type="number" min={5} max={120} value={draft.ring_timeout_sec}
-                onChange={(e) => setDraft({ ...draft, ring_timeout_sec: Number(e.target.value) || 20 })} />
-            </label>
-
-            <div style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 13, opacity: 0.8 }}>الموظفون (تُجرّب أرقامهم بالترتيب)</span>
-              {draft.agents.map((a, i) => (
-                <div key={i} style={{ display: "flex", gap: 6 }}>
-                  <input className="input" style={{ flex: 1 }} value={a.name} placeholder="الاسم"
-                    onChange={(e) => setDraft({ ...draft, agents: draft.agents.map((x, j) => j === i ? { ...x, name: e.target.value } : x) })} />
-                  <input className="input" style={{ flex: 1 }} value={a.phone} placeholder="9665XXXXXXXX"
-                    onChange={(e) => setDraft({ ...draft, agents: draft.agents.map((x, j) => j === i ? { ...x, phone: e.target.value } : x) })} />
-                  <button className="icon-btn danger" title="حذف الموظف" type="button"
-                    onClick={() => setDraft({ ...draft, agents: draft.agents.filter((_, j) => j !== i) })}><Trash2 size={13} /></button>
-                </div>
-              ))}
-              <button className="btn muted" type="button" onClick={() => setDraft({ ...draft, agents: [...draft.agents, { name: "", phone: "" }] })}>
-                <Plus size={13} /> موظف آخر
+      {tab === "routing" && isAdmin && (
+        <div className="routing-layout">
+          <section className="call-panel">
+            <div className="section-heading"><div><h2>الأقسام</h2><p>يُختار مختص واحد بالتناوب لكل مكالمة.</p></div><button className="btn muted" type="button" onClick={resetDraft}><Plus size={14} /> قسم جديد</button></div>
+            <div className="department-list">{departments.length === 0 ? <div className="empty"><p>لم تُنشأ أقسام بعد.</p></div> : departments.map((department) => <article key={department.id}>
+              <button className="department-main" type="button" onClick={() => editDepartment(department)}>
+                <span className="digit">{department.digit}</span><span><strong>{department.name}</strong><small>{WORKFLOW_LABEL[department.workflow_action || "none"]} · {department.agents.length} مختص</small></span>
               </button>
+              <button className="icon-btn danger" type="button" onClick={() => void deleteDepartment(department)} aria-label={`حذف قسم ${department.name}`} title="حذف"><Trash2 size={15} /></button>
+            </article>)}</div>
+          </section>
+
+          <section className="call-panel department-editor">
+            <div className="section-heading"><div><h2>{draft.id ? "تعديل القسم" : "قسم جديد"}</h2><p>{draftDirty ? "توجد تعديلات غير محفوظة" : "لا توجد تعديلات معلقة"}</p></div></div>
+            <div className="form-grid two">
+              <label><span>رقم الاختيار</span><input className="input" inputMode="numeric" maxLength={1} value={draft.digit} onChange={(event) => setDraft((current) => ({ ...current, digit: event.target.value.replace(/\D/g, "") }))} /></label>
+              <label><span>اسم القسم</span><input className="input" name="department_name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+              <label><span>سلوك القسم</span><select className="input" value={draft.workflow_action} onChange={(event) => setDraft((current) => ({ ...current, workflow_action: event.target.value as DraftDepartment["workflow_action"] }))}><option value="lead">إنشاء فرصة</option><option value="service_task">إنشاء مهمة خدمة</option><option value="none">تسجيل فقط</option></select></label>
+              <label><span>مهلة الرنين بالثواني</span><input className="input" type="number" min={5} max={120} value={draft.ring_timeout_sec} onChange={(event) => setDraft((current) => ({ ...current, ring_timeout_sec: Number(event.target.value) || 20 }))} /></label>
+              <label><span>طابور الاحتياط</span><select className="input" value={draft.fallback_user_id || ""} onChange={(event) => setDraft((current) => ({ ...current, fallback_user_id: event.target.value || null }))}><option value="">المدير تلقائيًا</option>{users.filter((user) => user.uid && ["admin", "manager"].includes(user.role)).map((user) => <option key={user.id} value={user.uid || ""}>{user.name}</option>)}</select></label>
+              <label><span>الحالة</span><select className="input" value={draft.active ? "active" : "inactive"} onChange={(event) => setDraft((current) => ({ ...current, active: event.target.value === "active" }))}><option value="active">نشط</option><option value="inactive">متوقف</option></select></label>
             </div>
 
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn primary" type="button" onClick={saveDept} disabled={savingDept}>
-                <Save size={14} /> {savingDept ? "…" : draft.id ? "حفظ التعديل" : "إضافة القسم"}
-              </button>
-              {draft.id && (
-                <button className="btn muted" type="button" onClick={() => setDraft(emptyDraft())}>إلغاء</button>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
+            <fieldset className="schedule-fieldset"><legend>ساعات العمل</legend><label className="check-row"><input type="checkbox" checked={draft.scheduleEnabled} onChange={(event) => setDraft((current) => ({ ...current, scheduleEnabled: event.target.checked }))} /> تقييد التحويل بساعات محددة</label>{draft.scheduleEnabled && <><div className="weekday-row">{["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"].map((label, day) => <label key={label}><input type="checkbox" checked={draft.workDays.includes(day)} onChange={(event) => setDraft((current) => ({ ...current, workDays: event.target.checked ? [...current.workDays, day].sort() : current.workDays.filter((item) => item !== day) }))} /> {label}</label>)}</div><div className="form-grid two"><label><span>من</span><input className="input" type="time" value={draft.start} onChange={(event) => setDraft((current) => ({ ...current, start: event.target.value }))} /></label><label><span>إلى</span><input className="input" type="time" value={draft.end} onChange={(event) => setDraft((current) => ({ ...current, end: event.target.value }))} /></label></div></>}</fieldset>
 
-      {/* Setup hint */}
-      <div className="card" style={{ padding: 16, fontSize: 13, lineHeight: 1.9 }}>
-        <h3 style={{ marginTop: 0 }}>ربط Unifonic</h3>
-        <p style={{ opacity: 0.85, margin: "0 0 6px" }}>في لوحة Unifonic، اضبط العناوين التالية لرقمك الأساسي:</p>
-        <div style={{ display: "grid", gap: 4 }}>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>IVR Endpoint: {readiness?.ivr_webhook_url || `${baseUrl}/webhooks/telephony/ivr`}</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>Status Callback: {readiness?.status_webhook_url || `${baseUrl}/webhooks/telephony/status`}</code>
-        </div>
-        <p style={{ opacity: 0.7, marginBottom: 0 }}>
-          أرسل السر المشترك في الترويسة <code>x-telephony-webhook-secret</code> (نفس قيمة <code>TELEPHONY_WEBHOOK_SECRET</code>).
-        </p>
-      </div>
+            <div className="agent-editor"><div className="section-heading"><div><h3>المختصون</h3><p>اختر مستخدم CRM أو أضف وجهة خارجية واضحة.</p></div><button className="btn muted" type="button" onClick={() => setDraft((current) => ({ ...current, agents: [...current.agents, emptyAgent()] }))}><Plus size={14} /> مختص</button></div>{draft.agents.map((agent, index) => <div className="agent-row" key={`${index}-${agent.user_id || "external"}`}>
+              <label className="check-row"><input type="checkbox" checked={agent.external} onChange={(event) => setDraft((current) => ({ ...current, agents: current.agents.map((item, itemIndex) => itemIndex === index ? { ...item, external: event.target.checked, user_id: null, name: "", phone: "" } : item) }))} /> وجهة خارجية</label>
+              {agent.external ? <><label><span>الاسم</span><input className="input" value={agent.name} onChange={(event) => setDraft((current) => ({ ...current, agents: current.agents.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) }))} /></label><label><span>رقم التحويل</span><input className="input" type="tel" inputMode="tel" value={agent.phone} onChange={(event) => setDraft((current) => ({ ...current, agents: current.agents.map((item, itemIndex) => itemIndex === index ? { ...item, phone: event.target.value } : item) }))} /></label></> : <label className="agent-user-select"><span>مستخدم CRM</span><select className="input" value={agent.user_id || ""} onChange={(event) => chooseUser(index, event.target.value)}><option value="">اختر مستخدمًا</option>{users.filter((user) => user.uid && user.phone && ["sales", "technician", "manager", "admin"].includes(user.role)).map((user) => <option key={user.id} value={user.uid || ""}>{user.name} — {user.phone}</option>)}</select></label>}
+              <button className="icon-btn danger" type="button" onClick={() => setDraft((current) => ({ ...current, agents: current.agents.filter((_, itemIndex) => itemIndex !== index) }))} aria-label="إزالة المختص" title="إزالة"><X size={15} /></button>
+            </div>)}</div>
 
-      {/* Test missed call */}
-      <div className="card" style={{ padding: 16, display: "grid", gap: 10 }}>
-        <h3 style={{ margin: 0 }}>اختبار مكالمة فائتة</h3>
-        <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>محاكاة مكالمة لم يُرد عليها لاختبار وصول الواتساب للعميل والموظف (بدون مكالمة حقيقية).</p>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <input className="input" style={{ flex: 2, minWidth: 180 }} value={testPhone} placeholder="رقم جوال العميل 9665XXXXXXXX"
-            onChange={(e) => setTestPhone(e.target.value)} />
-          <input className="input" style={{ flex: 1, minWidth: 90 }} maxLength={1} value={testDigit} placeholder="القسم (رقم)"
-            onChange={(e) => setTestDigit(e.target.value.replace(/[^0-9]/g, ""))} />
-          <button className="btn primary" type="button" onClick={runTest}><PhoneMissed size={14} /> تشغيل الاختبار</button>
+            <button className="btn primary" type="button" disabled={saving} onClick={() => void saveDepartment()}><Save size={15} /> {draft.id ? "حفظ التعديلات" : "إنشاء القسم"}</button>
+          </section>
         </div>
-      </div>
+      )}
 
-      {/* Call log */}
-      <div className="card" style={{ padding: 16 }}>
-        <h3 style={{ marginTop: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          سجل المكالمات
-          {missedCount > 0 && <span style={{ color: "#ef4444", fontSize: 13 }}>({missedCount} فائتة)</span>}
-        </h3>
-        {calls.length === 0 ? (
-          <p style={{ opacity: 0.7 }}>لا توجد مكالمات بعد.</p>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ textAlign: "right", opacity: 0.7 }}>
-                  <th style={{ padding: 6 }}>الوقت</th>
-                  <th style={{ padding: 6 }}>المتصل</th>
-                  <th style={{ padding: 6 }}>القسم</th>
-                  <th style={{ padding: 6 }}>الموظف</th>
-                  <th style={{ padding: 6 }}>الحالة</th>
-                  <th style={{ padding: 6 }}>المتابعة</th>
-                </tr>
-              </thead>
-              <tbody>
-                {calls.map((c) => (
-                  <tr key={c.id} style={{ borderTop: "1px solid rgba(255,255,255,0.08)", background: c.missed && !c.handled ? "rgba(239,68,68,0.06)" : undefined }}>
-                    <td style={{ padding: 6 }}>{fmtDateTime(c.created_at)}</td>
-                    <td style={{ padding: 6 }}>
-                      {c.customer_name
-                        ? <span title={c.from_phone || ""}><strong>{c.customer_name}</strong> <span style={{ opacity: 0.6, fontSize: 11 }}>(عميل)</span></span>
-                        : (c.from_phone || "—")}
-                    </td>
-                    <td style={{ padding: 6 }}>{c.department_name || (c.selected_digit ? `#${c.selected_digit}` : "—")}</td>
-                    <td style={{ padding: 6 }}>{c.agent_name || c.agent_phone || "—"}</td>
-                    <td style={{ padding: 6, color: c.missed && !c.handled ? "#ef4444" : undefined }}>{STATUS_LABEL[c.status] || c.status}</td>
-                    <td style={{ padding: 6 }}>
-                      {c.handled
-                        ? <span style={{ color: "#0fbf6c" }}>✓ تمت المعالجة</span>
-                        : c.missed
-                          ? <button className="btn muted" style={{ padding: "2px 10px", fontSize: 12 }} type="button" onClick={() => handleCall(c.id)}>تمت المعالجة</button>
-                          : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      {tab === "integration" && isAdmin && config && (
+        <div className="integration-layout">
+          <section className="call-panel readiness-panel">
+            <div className="readiness-head"><div><h2>جاهزية التشغيل</h2><p>الإعداد المكتمل لا يعني أنه تم التحقق بمكالمة حقيقية.</p></div></div>
+            <div className="readiness-badges"><span className={readiness?.setup_complete ? "ready" : "pending"}>{readiness?.setup_complete ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />} الإعداد {readiness?.setup_complete ? "مكتمل" : "غير مكتمل"}</span><span className={readiness?.live_verified ? "ready" : "pending"}>{readiness?.live_verified ? <CheckCircle2 size={16} /> : <PhoneCall size={16} />} {readiness?.live_verified ? "تم التحقق بمكالمة حقيقية" : "لم يتم التحقق بمكالمة حقيقية"}</span></div>
+            <div className="readiness-list">{readiness?.checks.map((check) => <article key={check.id}>{check.ready ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}<span><strong>{check.label}</strong><small>{check.detail}</small></span></article>)}</div>
+          </section>
+
+          <section className="call-panel">
+            <div className="section-heading"><div><h2>الرقم والرسالة</h2><p>الرقم الحالي يُحوّل دون شرط إلى رقم Unifonic.</p></div></div>
+            <div className="form-grid two"><label><span>رقم Unifonic</span><input className="input" type="tel" inputMode="tel" name="unifonic_number" value={config.main_number} onChange={(event) => setConfig((current) => current ? { ...current, main_number: event.target.value } : current)} placeholder="9665XXXXXXXX" /></label><label><span>مهلة الرنين</span><input className="input" type="number" min={5} max={120} value={config.ring_timeout_sec} onChange={(event) => setConfig((current) => current ? { ...current, ring_timeout_sec: Number(event.target.value) || 20 } : current)} /></label></div>
+            <label><span>رسالة الترحيب</span><textarea className="input" rows={3} value={config.greeting} onChange={(event) => setConfig((current) => current ? { ...current, greeting: event.target.value } : current)} /></label>
+            <label><span>نص القائمة المخصص</span><textarea className="input" rows={3} value={config.menu_prompt} onChange={(event) => setConfig((current) => current ? { ...current, menu_prompt: event.target.value } : current)} placeholder="اتركه فارغًا لبنائه من الأقسام" /></label>
+            <label className="check-row"><input type="checkbox" checked={config.enabled} onChange={(event) => setConfig((current) => current ? { ...current, enabled: event.target.checked } : current)} /> تشغيل الرد الآلي</label>
+            <button className="btn primary" type="button" onClick={() => void saveConfig()} disabled={saving || !configDirty}><Save size={15} /> حفظ الإعدادات</button>
+          </section>
+
+          <section className="call-panel endpoint-panel"><div className="section-heading"><div><h2>عناوين Unifonic</h2><p>انسخها إلى Incoming Call Application.</p></div><ShieldCheck size={21} /></div><label><span>IVR Endpoint — مع Authorization</span><output dir="ltr">{readiness?.ivr_webhook_url || "يظهر بعد ضبط PUBLIC_BASE_URL"}</output></label><label><span>Status Webhook — مع Basic Authentication</span><output dir="ltr">{readiness?.status_webhook_url || "يظهر بعد ضبط PUBLIC_BASE_URL"}</output></label><p className="call-note">رابط اختيار العميل يُنشأ تلقائيًا لكل مكالمة ويحمل رمز جلسة مؤقتًا؛ لا تضفه يدويًا في Unifonic.</p></section>
+
+          <section className="call-panel gateway-panel"><div className="section-heading"><div><h2><Smartphone size={19} /> بوابة أندرويد</h2><p>احتياط لإرسال SMS فقط عند تعذر واتساب؛ لا تجيب عن المكالمة الصوتية.</p></div><span className={gateway?.configured ? "gateway-ready" : "gateway-pending"}>{gateway?.configured ? "مضبوطة" : "غير مضبوطة"}</span></div><p>الرسائل المنتظرة: <strong>{gateway?.pending || 0}</strong>. مصدر الرد الآلي الصوتي هو Unifonic حصراً.</p></section>
+        </div>
+      )}
+
+      {tab === "test" && isAdmin && (
+        <div className="test-layout">
+          <section className="call-panel"><div className="section-heading"><div><h2>محاكي المتابعة</h2><p>يختبر إنشاء المهمة وطابور واتساب ثم SMS بدون مكالمة حقيقية.</p></div><PhoneMissed size={22} /></div><div className="form-grid two"><label><span>رقم المتصل</span><input className="input" type="tel" inputMode="tel" name="test_phone" value={testPhone} onChange={(event) => setTestPhone(event.target.value)} placeholder="9665XXXXXXXX" /></label><label><span>رقم القسم</span><select className="input" value={testDigit} onChange={(event) => setTestDigit(event.target.value)}><option value="">أول قسم نشط</option>{departments.filter((department) => department.active).map((department) => <option key={department.id} value={department.digit}>{department.digit} — {department.name}</option>)}</select></label></div><button className="btn primary" type="button" onClick={() => void runTest()}><PhoneMissed size={15} /> تشغيل المحاكي</button></section>
+          <section className="call-panel launch-checklist"><h2>اختبار المكالمة الحقيقية</h2><ol><li>اختيار صحيح ثم خاطئ مرتين.</li><li>مختص يجيب ومختص لا يجيب.</li><li>اتصالان متتاليان من الرقم نفسه.</li><li>اتصال خارج ساعات العمل.</li><li>واتساب متصل ثم غير متصل للتحقق من SMS.</li></ol><p>لا تعتمد الإنتاج حتى تظهر شارة «تم التحقق بمكالمة حقيقية» وتظهر المهمة مرة واحدة فقط.</p></section>
+        </div>
+      )}
+
+      {selectedCall && <div className="call-dialog-backdrop" role="presentation" onMouseDown={() => setSelectedCall(null)}><section className="call-dialog" role="dialog" aria-modal="true" aria-labelledby="follow-up-title" onMouseDown={(event) => event.stopPropagation()}><header><div><h2 id="follow-up-title">نتيجة متابعة المكالمة</h2><p>{selectedCall.customer_name || selectedCall.from_phone}</p></div><button className="icon-btn muted" type="button" onClick={() => setSelectedCall(null)} aria-label="إغلاق"><X size={17} /></button></header><label><span>النتيجة</span><select className="input" value={outcome} onChange={(event) => setOutcome(event.target.value)}><option value="completed">تم التواصل</option><option value="no_response">لم يرد العميل</option><option value="rescheduled">تم تحديد موعد لاحق</option><option value="not_interested">غير مهتم</option></select></label><label><span>ملاحظات المتابعة</span><textarea className="input" rows={4} value={notes} onChange={(event) => setNotes(event.target.value)} /></label><div className="dialog-actions"><button className="btn primary" type="button" onClick={() => void completeFollowUp()}><CheckCircle2 size={15} /> حفظ النتيجة</button><button className="btn muted" type="button" onClick={() => openAction("bookings", selectedCall)}>حجز صيانة</button><button className="btn muted" type="button" onClick={() => openAction("quotes", selectedCall)}>عرض سعر</button><button className="btn muted" type="button" onClick={() => openAction("customers", selectedCall)}>إنشاء/فتح عميل</button></div></section></div>}
     </section>
   );
 }

@@ -293,6 +293,7 @@ export default function App() {
   const currentRole = (me.data?.role || "user") as api.AppUserRole;
   const isAdmin = currentRole === "admin";
   const isManagerOrAdmin = currentRole === "admin" || currentRole === "manager";
+  const canAccessCalls = ["admin", "manager", "sales", "technician"].includes(currentRole);
   const currentUid = me.data?.uid || null;
 
   const stats = useData(api.getStats, [page], authed && authReady);
@@ -358,6 +359,9 @@ export default function App() {
       : []),
     { id: "settings" as Page, label: "الإعدادات", icon: Settings },
   ];
+  if (canAccessCalls && !isManagerOrAdmin) {
+    nav.splice(nav.length - 1, 0, { id: "callSystem" as Page, label: "مكالماتي", icon: PhoneCall });
+  }
 
   if (!authReady) return <Loading />;
   if (!authed) return <EmailAuthPage notify={notify} />;
@@ -368,7 +372,7 @@ export default function App() {
   };
 
   const pages: Record<Page, ReactNode> = {
-    dash: <Dashboard stats={summary} notify={notify} refreshStats={stats.refresh} go={openPage} />,
+    dash: <Dashboard stats={summary} notify={notify} refreshStats={stats.refresh} go={openPage} canAccessCalls={canAccessCalls} />,
     customers: <CustomersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     quotes: <QuotesPage notify={notify} refreshStats={stats.refresh} />,
     invoices: <InvoicesPage notify={notify} refreshStats={stats.refresh} />,
@@ -381,7 +385,9 @@ export default function App() {
     care: <CustomerCarePage notify={notify} refreshStats={stats.refresh} />,
     technicians: <TechniciansPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     messages: <WhatsAppConsole notify={notify} />,
-    callSystem: isManagerOrAdmin ? <CallSystemPage notify={notify} /> : <AccessDenied />,
+    callSystem: canAccessCalls
+      ? <CallSystemPage notify={notify} currentRole={currentRole} onNavigate={openPage} />
+      : <AccessDenied />,
     settings: <SettingsPage notify={notify} />,
     adminUsers: isManagerOrAdmin
       ? <AdminUsersPage notify={notify} currentUid={currentUid} />

@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import db from "./db";
-import type { AuthedRequest } from "./auth";
+import { requestOwnerUid, type AuthedRequest } from "./auth";
 import { todayInTimeZone } from "./reminderEngine";
 
 type CrmStage = "lead" | "opportunity" | "quote" | "invoice" | "paid" | "lost";
@@ -26,6 +26,10 @@ function httpError(status: number, message: string) {
 }
 
 function uid(req: Request) {
+  return requestOwnerUid(req);
+}
+
+function actorUid(req: Request) {
   return (req as AuthedRequest).user.uid;
 }
 
@@ -285,7 +289,7 @@ export function registerOdooCrmRoutes(app: Express) {
       `INSERT INTO crm_deals (id, owner_uid, title, customer_id, customer_name, customer_phone, stage, amount, currency, probability, expected_close, assigned_to, source, quote_id, invoice_id, notes, created_at, updated_at)
        VALUES (@id, @owner_uid, @title, @customer_id, @customer_name, @customer_phone, @stage, @amount, @currency, @probability, @expected_close, @assigned_to, @source, @quote_id, @invoice_id, @notes, @created_at, @updated_at)`,
     ).run(deal);
-    recordAudit({ ownerUid, actorUid: uid(req), action: "create", entityType: "crm_deal", entityId: deal.id, summary: deal.title, after: deal });
+    recordAudit({ ownerUid, actorUid: actorUid(req), action: "create", entityType: "crm_deal", entityId: deal.id, summary: deal.title, after: deal });
     res.status(201).json({ deal });
   }));
 
@@ -315,7 +319,7 @@ export function registerOdooCrmRoutes(app: Express) {
        WHERE id=@id AND owner_uid=@owner_uid`,
     ).run(next);
     const after = row("SELECT * FROM crm_deals WHERE id = ? AND owner_uid = ?", req.params.id, ownerUid);
-    recordAudit({ ownerUid, actorUid: uid(req), action: "update", entityType: "crm_deal", entityId: req.params.id, summary: String(next.title || ""), before, after });
+    recordAudit({ ownerUid, actorUid: actorUid(req), action: "update", entityType: "crm_deal", entityId: req.params.id, summary: String(next.title || ""), before, after });
     res.json({ deal: after });
   }));
 
@@ -351,7 +355,7 @@ export function registerOdooCrmRoutes(app: Express) {
       `INSERT INTO crm_tasks (id, owner_uid, title, status, priority, due_date, assigned_to, related_type, related_id, customer_id, notes, created_at, updated_at)
        VALUES (@id, @owner_uid, @title, @status, @priority, @due_date, @assigned_to, @related_type, @related_id, @customer_id, @notes, @created_at, @updated_at)`,
     ).run(task);
-    recordAudit({ ownerUid, actorUid: uid(req), action: "create", entityType: "crm_task", entityId: task.id, summary: task.title, after: task });
+    recordAudit({ ownerUid, actorUid: actorUid(req), action: "create", entityType: "crm_task", entityId: task.id, summary: task.title, after: task });
     res.status(201).json({ task });
   }));
 
@@ -380,7 +384,7 @@ export function registerOdooCrmRoutes(app: Express) {
        notes=@notes, updated_at=@updated_at, completed_at=@completed_at WHERE id=@id AND owner_uid=@owner_uid`,
     ).run(next);
     const after = row("SELECT * FROM crm_tasks WHERE id = ? AND owner_uid = ?", req.params.id, ownerUid);
-    recordAudit({ ownerUid, actorUid: uid(req), action: "update", entityType: "crm_task", entityId: req.params.id, summary: String(next.title || ""), before, after });
+    recordAudit({ ownerUid, actorUid: actorUid(req), action: "update", entityType: "crm_task", entityId: req.params.id, summary: String(next.title || ""), before, after });
     res.json({ task: after });
   }));
 
@@ -397,6 +401,8 @@ export function registerOdooCrmRoutes(app: Express) {
       installations: rows("SELECT * FROM installations WHERE owner_uid = ? AND customer_id = ? ORDER BY next_maintenance DESC LIMIT 50", ownerUid, req.params.id),
       bookings: rows("SELECT * FROM bookings WHERE owner_uid = ? AND customer_id = ? ORDER BY date DESC LIMIT 50", ownerUid, req.params.id),
       conversations: phone ? rows("SELECT * FROM whatsapp_messages WHERE owner_uid = ? AND (from_phone LIKE ? OR to_phone LIKE ?) ORDER BY created_at DESC LIMIT 50", ownerUid, `%${phone.slice(-9)}%`, `%${phone.slice(-9)}%`) : [],
+      calls: rows("SELECT * FROM call_logs WHERE owner_uid = ? AND customer_id = ? ORDER BY created_at DESC LIMIT 50", ownerUid, req.params.id),
+      leads: phone ? rows("SELECT * FROM crm_deals WHERE owner_uid = ? AND (customer_id = ? OR customer_phone LIKE ?) ORDER BY created_at DESC LIMIT 50", ownerUid, req.params.id, `%${phone.slice(-9)}%`) : [],
       notes: rows("SELECT * FROM crm_notes WHERE owner_uid = ? AND customer_id = ? ORDER BY created_at DESC LIMIT 50", ownerUid, req.params.id),
       tasks: rows("SELECT * FROM crm_tasks WHERE owner_uid = ? AND customer_id = ? ORDER BY created_at DESC LIMIT 50", ownerUid, req.params.id),
       audit: rows("SELECT * FROM audit_logs WHERE owner_uid = ? AND entity_id = ? ORDER BY created_at DESC LIMIT 50", ownerUid, req.params.id),
@@ -409,9 +415,9 @@ export function registerOdooCrmRoutes(app: Express) {
     if (!customer) throw httpError(404, "العميل غير موجود.");
     const body = String(req.body?.body || "").trim();
     if (!body) throw httpError(400, "نص الملاحظة مطلوب.");
-    const note = { id: id("note"), owner_uid: ownerUid, customer_id: req.params.id, body, created_by: uid(req), created_at: nowIso() };
+    const note = { id: id("note"), owner_uid: ownerUid, customer_id: req.params.id, body, created_by: actorUid(req), created_at: nowIso() };
     db.prepare("INSERT INTO crm_notes (id, owner_uid, customer_id, body, created_by, created_at) VALUES (@id, @owner_uid, @customer_id, @body, @created_by, @created_at)").run(note);
-    recordAudit({ ownerUid, actorUid: uid(req), action: "create", entityType: "customer_note", entityId: req.params.id, summary: body.slice(0, 120), after: note });
+    recordAudit({ ownerUid, actorUid: actorUid(req), action: "create", entityType: "customer_note", entityId: req.params.id, summary: body.slice(0, 120), after: note });
     res.status(201).json({ note });
   }));
 

@@ -70,6 +70,7 @@ export type AuthedRequest = Request & {
     name?: string;
     role: UserRole;
     permissions: Record<string, boolean>;
+    workspace_owner_uid: string;
     active: boolean;
     local: boolean;
   };
@@ -123,6 +124,7 @@ export async function requireFirebaseUser(
         name: record.name || "Local user",
         role: record.role,
         permissions: record.permissions,
+        workspace_owner_uid: record.workspace_owner_uid,
         active: record.active,
         local: true,
       });
@@ -136,6 +138,7 @@ export async function requireFirebaseUser(
         name: "Local user",
         role: uid === localSharedUid() ? "admin" as UserRole : "user" as UserRole,
         permissions: {},
+        workspace_owner_uid: localSharedUid(),
         active: true,
         local: true,
       });
@@ -171,6 +174,7 @@ export async function requireFirebaseUser(
       name: record.name || name,
       role: record.role,
       permissions: record.permissions,
+      workspace_owner_uid: record.workspace_owner_uid,
       active: record.active,
       local: false,
     });
@@ -186,6 +190,12 @@ export async function requireFirebaseUser(
 
 export function loadAuthedUser(req: Request) {
   return (req as AuthedRequest).user;
+}
+
+/** Stable business-data partition for the current company workspace. */
+export function requestOwnerUid(req: Request): string {
+  const user = (req as AuthedRequest).user;
+  return user?.workspace_owner_uid || user?.uid || "";
 }
 
 export { getUserByUid };

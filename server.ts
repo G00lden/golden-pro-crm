@@ -262,7 +262,7 @@ async function startServer() {
 
   // WhatsApp webhook callbacks + admin endpoints
   const __whatsappOwnerUid = () =>
-    adminUids()[0] || process.env.STORE_WEBHOOK_OWNER_UID || process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
+    process.env.WORKSPACE_OWNER_UID || process.env.STORE_WEBHOOK_OWNER_UID || adminUids()[0] || process.env.LOCAL_AUTH_SHARED_UID || "local-dev-owner";
   registerWhatsAppWebhookRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
 
   // Telephony / IVR public webhooks (provider drives the live call). Owner is
