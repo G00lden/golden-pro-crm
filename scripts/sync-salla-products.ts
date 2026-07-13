@@ -71,6 +71,7 @@ console.log(JSON.stringify({
   failed: result.failed,
   deduplicated: result.deduplicated || 0,
   relinked: result.relinked || 0,
+  archived: result.archived || 0,
   pages: result.pages,
   advertised_count: result.advertised_count ?? result.fetched,
   complete: result.complete ?? result.success,

@@ -123,6 +123,7 @@ export type Product = {
   store_product_type?: string;
   categories?: Array<{ id?: string | null; name: string }> | string;
   variants?: ProductVariant[] | string;
+  catalog_visible?: boolean | number;
   is_available?: boolean | number;
   unlimited_quantity?: boolean | number;
   last_synced_at?: string;
@@ -644,6 +645,7 @@ export type SallaSyncResult = {
   last_error?: string | null;
   deduplicated?: number;
   relinked?: number;
+  archived?: number;
   orders?: {
     success: boolean;
     imported: number;
@@ -665,6 +667,7 @@ export type SallaSyncResult = {
     last_error?: string | null;
     deduplicated?: number;
     relinked?: number;
+    archived?: number;
   };
   customers?: {
     success: boolean;

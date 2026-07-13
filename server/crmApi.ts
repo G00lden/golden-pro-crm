@@ -121,6 +121,11 @@ function docData(doc: DocSnapshot): Record<string, any> & { id: string } {
   return { id: doc.id, ...doc.data() };
 }
 
+function catalogProductIsVisible(product: Record<string, unknown>) {
+  const value = product.catalog_visible;
+  return value !== false && value !== 0 && String(value).toLowerCase() !== "false";
+}
+
 async function stats(uid: string) {
   const [
     customerCount,
@@ -135,7 +140,8 @@ async function stats(uid: string) {
     settings,
   ] = await Promise.all([
     countOwned("customers", uid),
-    countOwned("products", uid),
+    listOwned("products", uid, undefined, MAX_OWNED_SCAN_LIMIT)
+      .then((rows) => rows.filter(catalogProductIsVisible).length),
     countOwned("technicians", uid),
     countOwned("installations", uid),
     countOwned("quotes", uid),
@@ -175,7 +181,7 @@ async function stats(uid: string) {
 
   return {
     customers: customerCount.total,
-    products: productCount.total,
+    products: productCount,
     technicians: technicianCount.total,
     installations: installationCount.total,
     quotes: quoteCount.total,
@@ -670,7 +676,8 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.get("/api/products", asyncRoute(async (req, res) => {
-    res.json(await listOwned("products", userId(req), "name", 1000));
+    const products = await listOwned("products", userId(req), "name", MAX_OWNED_SCAN_LIMIT);
+    res.json(products.filter(catalogProductIsVisible));
   }));
 
   app.post("/api/products", validate(productCreateSchema), asyncRoute(async (req, res) => {
@@ -681,6 +688,7 @@ export function registerCrmApiRoutes(app: express.Express) {
       sku: req.body?.sku || "",
       remind_text: req.body?.remind_text || "",
       source: req.body?.source || "manual",
+      catalog_visible: true,
       product_type: req.body?.product_type || "install_maintenance",
     });
     res.status(201).json({ id });

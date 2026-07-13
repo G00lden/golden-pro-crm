@@ -120,6 +120,7 @@ type SyncResult = {
   advertised_pages?: number | null;
   deduplicated?: number;
   relinked?: number;
+  archived?: number;
 };
 
 const SALLA_AUTHORIZE_URL = "https://accounts.salla.sa/oauth2/auth";
@@ -1596,6 +1597,7 @@ function mapSallaProduct(remoteProduct: Record<string, any>, syncedAt: string) {
   const urls = asRecord(remoteProduct.urls);
   const images = sallaProductImages(remoteProduct);
   const variants = sallaProductVariants(remoteProduct);
+  const variantsProvided = Array.isArray(remoteProduct.variants);
   const status = asRecord(remoteProduct.status);
   const storeStatus = truncate(firstText(status.name, status.slug, remoteProduct.status, remoteProduct.is_available === false ? "unavailable" : "available"), 40);
   const sku = truncate(firstText(remoteProduct.sku, remoteProduct.code, remoteProduct.product_code) || `SALLA-${productId}`, 80);
@@ -1637,7 +1639,8 @@ function mapSallaProduct(remoteProduct: Record<string, any>, syncedAt: string) {
       store_admin_url: truncate(firstText(urls.admin), 500),
       store_product_type: truncate(firstText(remoteProduct.type, remoteProduct.product_type), 80),
       categories,
-      variants,
+      ...(variantsProvided ? { variants } : {}),
+      catalog_visible: true,
       is_available: remoteProduct.is_available !== false && !["hidden", "out", "deleted"].includes(storeStatus.toLowerCase()),
       unlimited_quantity: remoteProduct.unlimited_quantity === true,
       last_synced_at: syncedAt,
@@ -1720,7 +1723,7 @@ async function relinkNestedProductReferences(uid: string, fromId: string, toId: 
 }
 
 export async function deduplicateProductsForUser(currentUid: string) {
-  const snap = await adminDb.collection("products").where("createdBy", "==", currentUid).limit(2000).get();
+  const snap = await adminDb.collection("products").where("createdBy", "==", currentUid).limit(10_000).get();
   const records: ProductCatalogRecord[] = snap.docs.map((doc) => ({ id: doc.id, data: doc.data() || {} }));
   const groups = buildProductDuplicateGroups(records);
   let deduplicated = 0;
@@ -1741,6 +1744,38 @@ export async function deduplicateProductsForUser(currentUid: string) {
   }
 
   return { success: true, deduplicated, relinked, remaining: records.length - deduplicated };
+}
+
+function catalogVisibilityIsFalse(value: unknown) {
+  return value === false || value === 0 || String(value).toLowerCase() === "false";
+}
+
+async function reconcileSallaCatalogVisibility(
+  docs: Array<{ id: string; data: () => Record<string, any>; ref: { update: (data: Record<string, unknown>) => Promise<unknown> } }>,
+  currentRemoteIds: Set<string>,
+  currentDocumentIds: Set<string>,
+  reconciledAt: string,
+) {
+  let archived = 0;
+  for (const doc of docs) {
+    const data = doc.data() || {};
+    const remoteId = firstText(data.store_product_id);
+    const managedBySalla = remoteId
+      || firstText(data.store_provider).toLowerCase() === "salla"
+      || firstText(data.source).toLowerCase() === "salla";
+    if (!managedBySalla || currentDocumentIds.has(doc.id) || (remoteId && currentRemoteIds.has(remoteId))) continue;
+
+    const nextStatus = remoteId ? "archived" : "historical";
+    if (catalogVisibilityIsFalse(data.catalog_visible) && firstText(data.store_status) === nextStatus) continue;
+    await doc.ref.update({
+      catalog_visible: false,
+      is_available: false,
+      store_status: nextStatus,
+      updatedAt: reconciledAt,
+    });
+    archived += 1;
+  }
+  return archived;
 }
 
 function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | null {
@@ -2638,6 +2673,7 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
       for (const doc of products.docs) {
         await doc.ref.update({
           store_status: "deleted",
+          catalog_visible: false,
           is_available: false,
           last_synced_at: archivedAt,
           updatedAt: archivedAt,
@@ -2882,6 +2918,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   let advertisedPages: number | null = null;
   let advertisedTotal: number | null = null;
   const seenRemoteProductIds = new Set<string>();
+  const currentProductDocIds = new Set<string>();
   let firstFailureMessage: string | null = null;
 
   try {
@@ -2933,6 +2970,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
             : undefined;
           const existing = existingByRemoteId.get(mapped.remoteId) || safeLegacySkuMatch;
           const docId = existing?.id || productDocId(currentUid, mapped.remoteId);
+          currentProductDocIds.add(docId);
           await adminDb.collection("products").doc(docId).set({
             ...(existing ? {} : mapped.defaults),
             ...mapped.data,
@@ -2970,6 +3008,17 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       throw new Error(`Salla products sync is incomplete: collected ${seenRemoteProductIds.size} of ${advertisedTotal} products.`);
     }
 
+    const archived = await reconcileSallaCatalogVisibility(
+      existingProductsSnap.docs as Array<{
+        id: string;
+        data: () => Record<string, any>;
+        ref: { update: (data: Record<string, unknown>) => Promise<unknown> };
+      }>,
+      seenRemoteProductIds,
+      currentProductDocIds,
+      syncedAt,
+    );
+
     const errorMessage = failed
       ? `${failed} products could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
       : null;
@@ -2995,6 +3044,7 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
       complete: failed === 0,
       deduplicated: cleanup.deduplicated,
       relinked: cleanup.relinked,
+      archived,
     };
   } catch (syncError) {
     const message = syncFailureMessage(syncError, "Salla products sync failed.");
@@ -3054,6 +3104,7 @@ export async function importSallaProductsSnapshotForUser(
     }
 
     const seenRemoteIds = new Set<string>();
+    const currentProductDocIds = new Set<string>();
     const mappedProducts = products.map((remoteProduct) => {
       const mapped = mapSallaProduct(remoteProduct, syncedAt);
       if (!mapped) throw new Error("Salla product snapshot contains a product without an id.");
@@ -3090,6 +3141,7 @@ export async function importSallaProductsSnapshotForUser(
           : undefined;
         const existing = existingByRemoteId.get(mapped.remoteId) || safeLegacySkuMatch;
         const docId = existing?.id || productDocId(currentUid, mapped.remoteId);
+        currentProductDocIds.add(docId);
         await adminDb.collection("products").doc(docId).set({
           ...(existing ? {} : mapped.defaults),
           ...mapped.data,
@@ -3112,6 +3164,17 @@ export async function importSallaProductsSnapshotForUser(
         }
       }
     }
+
+    const archived = await reconcileSallaCatalogVisibility(
+      existingProductsSnap.docs as Array<{
+        id: string;
+        data: () => Record<string, any>;
+        ref: { update: (data: Record<string, unknown>) => Promise<unknown> };
+      }>,
+      seenRemoteIds,
+      currentProductDocIds,
+      syncedAt,
+    );
 
     const errorMessage = failed
       ? `${failed} products could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
@@ -3138,6 +3201,7 @@ export async function importSallaProductsSnapshotForUser(
       complete: failed === 0,
       deduplicated: cleanup.deduplicated,
       relinked: cleanup.relinked,
+      archived,
     };
   } catch (snapshotError) {
     const message = syncFailureMessage(snapshotError, "Salla product snapshot import failed.");

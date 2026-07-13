@@ -731,14 +731,58 @@ async function findCustomer(uid: string, phone: string) {
   return snap.docs[0] || null;
 }
 
-async function findProduct(uid: string, sku: string) {
-  const snap = await adminDb
+function catalogSkuKey(value: unknown) {
+  return String(value || "").replace(/\s+/g, "").toLocaleLowerCase("en-US");
+}
+
+function productVariants(value: unknown): Array<Record<string, any>> {
+  if (Array.isArray(value)) return value.filter((item) => item && typeof item === "object");
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : [];
+  } catch {
+    return [];
+  }
+}
+
+function visibleCatalogProduct(data: Record<string, any>) {
+  const value = data.catalog_visible;
+  return value !== false && value !== 0 && String(value).toLowerCase() !== "false";
+}
+
+async function findProductMatch(uid: string, sku: string) {
+  const exact = await adminDb
     .collection("products")
     .where("createdBy", "==", uid)
     .where("sku", "==", sku)
-    .limit(1)
+    .limit(20)
     .get();
-  return snap.docs[0] || null;
+  const authoritativeExact = exact.docs.find((doc) => Boolean(doc.data()?.store_product_id));
+  if (authoritativeExact) return { doc: authoritativeExact, matchedVariant: false };
+
+  const requestedSku = catalogSkuKey(sku);
+  if (requestedSku) {
+    const catalog = await adminDb
+      .collection("products")
+      .where("createdBy", "==", uid)
+      .limit(10_000)
+      .get();
+    const variantParents = catalog.docs.filter((doc) => {
+      const data = doc.data() || {};
+      if (!data.store_product_id || !visibleCatalogProduct(data)) return false;
+      return productVariants(data.variants).some((variant) =>
+        catalogSkuKey(variant.sku || variant.code) === requestedSku);
+    });
+    if (variantParents.length === 1) return { doc: variantParents[0], matchedVariant: true };
+  }
+
+  return exact.docs[0] ? { doc: exact.docs[0], matchedVariant: false } : null;
+}
+
+async function findProduct(uid: string, sku: string) {
+  const match = await findProductMatch(uid, sku);
+  return match?.doc || null;
 }
 
 async function findInstallationByPhoneAndSku(uid: string, phone: string, sku: string) {
@@ -814,22 +858,32 @@ async function upsertCustomer(uid: string, order: StoreWebhookOrder, now: string
 }
 
 async function upsertProduct(uid: string, item: StoreWebhookItem, now: string) {
-  const existing = await findProduct(uid, item.sku);
-  if (existing) {
-    const data = existing.data();
-    await existing.ref.set({
+  const match = await findProductMatch(uid, item.sku);
+  if (match) {
+    const data = match.doc.data();
+    if (match.matchedVariant || data.store_product_id) {
+      await match.doc.ref.set({
+        product_type: data.product_type || item.orderType,
+        updatedAt: now,
+      }, { merge: true });
+      return match.doc.id;
+    }
+    await match.doc.ref.set({
       name: item.name,
       interval_months: Number(data.interval_months || item.maintenanceMonths || defaultMaintenanceMonths),
       category: data.category || "متجر",
       sku: item.sku,
       remind_text: data.remind_text || "",
       source: data.source || "salla",
+      catalog_visible: false,
+      store_status: data.store_status || "historical",
+      is_available: false,
       product_type: data.product_type || item.orderType,
       createdBy: uid,
       createdAt: data.createdAt || now,
       updatedAt: now,
     }, { merge: true });
-    return existing.id;
+    return match.doc.id;
   }
 
   const ref = adminDb.collection("products").doc();
@@ -840,6 +894,9 @@ async function upsertProduct(uid: string, item: StoreWebhookItem, now: string) {
     sku: item.sku,
     remind_text: "",
     source: "salla",
+    catalog_visible: false,
+    store_status: "historical",
+    is_available: false,
     product_type: item.orderType,
     createdBy: uid,
     createdAt: now,

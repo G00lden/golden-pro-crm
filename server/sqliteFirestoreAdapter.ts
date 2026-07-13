@@ -196,6 +196,7 @@ const fieldToColumn: Record<string, string> = {
   imageUrl: "image_url",
   stockQuantity: "stock_quantity",
   storeStatus: "store_status",
+  catalogVisible: "catalog_visible",
   lastSyncedAt: "last_synced_at",
   notificationType: "notification_type",
   orderStatus: "order_status",

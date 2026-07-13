@@ -381,3 +381,58 @@ test("an offline product snapshot uses the canonical importer without calling Sa
   assert.equal(stored.size, 2);
   assert.deepEqual(stored.docs.map((doc) => doc.data().store_product_id).sort(), ["offline-1", "offline-2"]);
 });
+
+test("a complete product snapshot hides historical Salla rows without deleting references", async () => {
+  const uid = "owner-products-catalog-visibility";
+  await linkOwner(uid);
+  await adminDb.collection("products").doc("historical-order-product").set({
+    createdBy: uid,
+    name: "Historical order item",
+    sku: "OLD-ORDER-SKU",
+    source: "salla",
+    catalog_visible: true,
+  });
+  await adminDb.collection("products").doc("stale-remote-product").set({
+    createdBy: uid,
+    name: "Stale remote product",
+    sku: "STALE-SKU",
+    source: "salla",
+    store_product_id: "stale-remote",
+    catalog_visible: true,
+  });
+  await adminDb.collection("products").doc("manual-product").set({
+    createdBy: uid,
+    name: "Manual product",
+    sku: "MANUAL-SKU",
+    source: "manual",
+  });
+  await adminDb.collection("products").doc("promoted-product").set({
+    createdBy: uid,
+    name: "Legacy row promoted by SKU",
+    sku: "CURRENT-SKU",
+    source: "salla",
+    catalog_visible: false,
+  });
+
+  globalThis.fetch = (async () => {
+    throw new Error("The offline importer must not call Salla.");
+  }) as typeof fetch;
+  const result = await importSallaProductsSnapshotForUser(uid, [
+    { id: "current-remote", name: "Current product", sku: "CURRENT-SKU" },
+  ], { advertisedCount: 1, advertisedPages: 1, syncedAt: "2026-07-13T14:00:00.000Z" });
+
+  assert.equal(result.archived, 2);
+  const historical = await adminDb.collection("products").doc("historical-order-product").get();
+  const stale = await adminDb.collection("products").doc("stale-remote-product").get();
+  const manual = await adminDb.collection("products").doc("manual-product").get();
+  const promoted = await adminDb.collection("products").doc("promoted-product").get();
+  assert.equal(historical.exists, true);
+  assert.ok([false, 0].includes(historical.data()?.catalog_visible));
+  assert.equal(historical.data()?.store_status, "historical");
+  assert.equal(stale.exists, true);
+  assert.ok([false, 0].includes(stale.data()?.catalog_visible));
+  assert.equal(stale.data()?.store_status, "archived");
+  assert.notEqual(manual.data()?.catalog_visible, false);
+  assert.equal(promoted.data()?.store_product_id, "current-remote");
+  assert.ok([true, 1].includes(promoted.data()?.catalog_visible));
+});

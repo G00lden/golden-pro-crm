@@ -130,7 +130,7 @@ export default function ProductsPage({
   const deferredSearch = useDeferredValue(search);
   const [category, setCategory] = useState("all");
   const [status, setStatus] = useState<ProductStatusFilter>("all");
-  const [source, setSource] = useState("all");
+  const [source, setSource] = useState("salla");
   const [sort, setSort] = useState<ProductSort>("store");
   const [syncing, setSyncing] = useState(false);
   const [cleaning, setCleaning] = useState(false);
@@ -237,6 +237,7 @@ export default function ProductsPage({
       const result = await api.syncSallaProductsCatalog();
       const parts = [`جُلب ${result.fetched} منتجاً`, `أضيف ${result.imported}`, `حُدّث ${result.updated}`];
       if (result.deduplicated) parts.push(`دُمج ${result.deduplicated} مكرر`);
+      if (result.archived) parts.push(`أُخفي ${result.archived} سجل تاريخي من الكتالوج`);
       notify(parts.join(" · "), result.success);
       await refreshAll();
     } catch (error) {
