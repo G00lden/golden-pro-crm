@@ -3008,6 +3008,149 @@ export async function syncSallaProductsForUser(currentUid: string): Promise<Sync
   }
 }
 
+type ProductSnapshotImportOptions = {
+  advertisedCount?: number;
+  advertisedPages?: number;
+  syncedAt?: string;
+};
+
+/**
+ * Imports a complete catalog snapshot that was fetched through an approved
+ * relay when the production VPS cannot reach Salla directly. The same mapping,
+ * duplicate protection, reference relinking, and CRM-policy preservation used
+ * by the live sync are applied before the integration status is updated.
+ */
+export async function importSallaProductsSnapshotForUser(
+  currentUid: string,
+  remoteProducts: unknown[],
+  options: ProductSnapshotImportOptions = {},
+): Promise<SyncResult> {
+  if (!configured()) throw new Error("Salla integration is not configured on the server.");
+
+  const integration = await readIntegration(currentUid);
+  if (!integration || integration.status !== "connected") {
+    throw new Error("Salla is not connected for this CRM user.");
+  }
+
+  const syncedAt = options.syncedAt || nowIso();
+  const products = asArray(remoteProducts);
+  const advertisedCount = options.advertisedCount ?? products.length;
+  const advertisedPages = options.advertisedPages ?? (products.length ? Math.ceil(products.length / pageSize()) : 0);
+  const maximumProducts = productMaxSyncPages() * pageSize();
+  let imported = 0;
+  let updated = 0;
+  let failed = 0;
+  let firstFailureMessage: string | null = null;
+
+  try {
+    if (!Number.isInteger(advertisedCount) || advertisedCount < 0 || advertisedCount !== products.length) {
+      throw new Error(`Salla product snapshot is incomplete: received ${products.length} of ${advertisedCount} products.`);
+    }
+    if (!Number.isInteger(advertisedPages) || advertisedPages < 0 || advertisedPages > productMaxSyncPages()) {
+      throw new Error("Salla product snapshot has invalid pagination metadata.");
+    }
+    if (products.length > maximumProducts) {
+      throw new Error(`Salla product snapshot exceeds the ${maximumProducts}-product safety limit.`);
+    }
+
+    const seenRemoteIds = new Set<string>();
+    const mappedProducts = products.map((remoteProduct) => {
+      const mapped = mapSallaProduct(remoteProduct, syncedAt);
+      if (!mapped) throw new Error("Salla product snapshot contains a product without an id.");
+      if (seenRemoteIds.has(mapped.remoteId)) {
+        throw new Error(`Salla product snapshot contains duplicate remote product ${mapped.remoteId}.`);
+      }
+      seenRemoteIds.add(mapped.remoteId);
+      return mapped;
+    });
+
+    const cleanup = await deduplicateProductsForUser(currentUid);
+    const existingProductsSnap = await adminDb
+      .collection("products")
+      .where("createdBy", "==", currentUid)
+      .limit(10_000)
+      .get();
+    const existingByRemoteId = new Map<string, { id: string; data: Record<string, any> }>();
+    const existingBySku = new Map<string, { id: string; data: Record<string, any> }>();
+    for (const doc of existingProductsSnap.docs as Array<{ id: string; data: () => Record<string, any> }>) {
+      const data = doc.data() || {};
+      const remoteId = firstText(data.store_product_id);
+      const sku = normalizeProductSku(data.sku);
+      if (remoteId) existingByRemoteId.set(remoteId, { id: doc.id, data });
+      if (sku && !existingBySku.has(sku)) existingBySku.set(sku, { id: doc.id, data });
+    }
+
+    for (const mapped of mappedProducts) {
+      try {
+        const skuKey = normalizeProductSku(mapped.data.sku);
+        const skuMatch = existingBySku.get(skuKey);
+        const skuMatchRemoteId = firstText(skuMatch?.data?.store_product_id);
+        const safeLegacySkuMatch = skuMatch && (!skuMatchRemoteId || skuMatchRemoteId === mapped.remoteId)
+          ? skuMatch
+          : undefined;
+        const existing = existingByRemoteId.get(mapped.remoteId) || safeLegacySkuMatch;
+        const docId = existing?.id || productDocId(currentUid, mapped.remoteId);
+        await adminDb.collection("products").doc(docId).set({
+          ...(existing ? {} : mapped.defaults),
+          ...mapped.data,
+          createdBy: currentUid,
+          createdAt: existing?.data?.createdAt || existing?.data?.created_at || syncedAt,
+          updatedAt: syncedAt,
+        }, { merge: true });
+
+        const nextEntry = { id: docId, data: { ...(existing?.data || {}), ...mapped.data } };
+        existingByRemoteId.set(mapped.remoteId, nextEntry);
+        if (skuKey) existingBySku.set(skuKey, nextEntry);
+        if (existing) updated += 1;
+        else imported += 1;
+      } catch (productImportError) {
+        failed += 1;
+        if (!firstFailureMessage) {
+          firstFailureMessage = productImportError instanceof Error
+            ? productImportError.message
+            : "Unknown Salla product import failure.";
+        }
+      }
+    }
+
+    const errorMessage = failed
+      ? `${failed} products could not be imported.${firstFailureMessage ? ` First error: ${firstFailureMessage}` : ""}`
+      : null;
+    await writeIntegration(currentUid, {
+      status: "connected",
+      last_product_sync_at: syncedAt,
+      last_product_sync_count: imported + updated,
+      last_product_sync_error: errorMessage,
+    });
+
+    return {
+      success: failed === 0,
+      imported,
+      updated,
+      failed,
+      pages: advertisedPages,
+      fetched: products.length,
+      last_sync_at: syncedAt,
+      last_error: errorMessage,
+      advertised_count: advertisedCount,
+      advertised_pages: advertisedPages,
+      unique_fetched: seenRemoteIds.size,
+      complete: failed === 0,
+      deduplicated: cleanup.deduplicated,
+      relinked: cleanup.relinked,
+    };
+  } catch (snapshotError) {
+    const message = syncFailureMessage(snapshotError, "Salla product snapshot import failed.");
+    await writeIntegration(currentUid, {
+      status: statusAfterSyncFailure(snapshotError),
+      last_product_sync_at: syncedAt,
+      last_product_sync_count: imported + updated,
+      last_product_sync_error: message,
+    });
+    throw snapshotError;
+  }
+}
+
 async function fetchCustomersPage(session: SallaAuthorizedSession, page: number) {
   const url = new URL(`${SALLA_API_BASE}/customers`);
   url.searchParams.set("page", String(page));
