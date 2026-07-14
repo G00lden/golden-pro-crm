@@ -192,3 +192,14 @@ export const gatewayAckSchema = z.object({
   ids: z.array(z.string().max(64)).max(100).optional(),
   failed: z.array(z.string().max(64)).max(100).optional(),
 });
+
+export const gatewayPairSchema = z.object({
+  code: z.string().regex(/^\d{8}$/, "code must contain exactly 8 digits"),
+  deviceName: z.string().trim().min(1, "deviceName is required").max(100),
+  companyNumber: z.string().trim().max(32).optional(),
+  clientNonce: z.string().regex(/^[A-Za-z0-9_-]{16,100}$/, "invalid pairing client nonce"),
+});
+
+export const gatewayDeviceParamsSchema = z.object({
+  id: z.string().regex(/^gwd_[A-Za-z0-9_-]{16}$/, "invalid gateway device id"),
+});

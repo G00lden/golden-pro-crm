@@ -705,6 +705,40 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_gateway_contact_pending
     ON gateway_contact_outbox(owner_uid, status, created_at);
 
+  -- Short-lived, one-time codes used to pair an Android phone without copying
+  -- the server-wide legacy token into the app.
+  CREATE TABLE IF NOT EXISTS gateway_pairing_codes (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_pairing_active
+    ON gateway_pairing_codes(code_hash, used_at, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_gateway_pairing_owner
+    ON gateway_pairing_codes(owner_uid, created_at DESC);
+
+  -- Each paired phone has an independently revocable credential. Only the
+  -- HMAC fingerprint is persisted; the clear token is returned once at pairing.
+  CREATE TABLE IF NOT EXISTS gateway_devices (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    company_number TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL,
+    pairing_code_id TEXT,
+    pairing_nonce_hash TEXT,
+    last_seen_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    revoked_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_devices_owner
+    ON gateway_devices(owner_uid, revoked_at, created_at DESC);
+
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
@@ -722,6 +756,20 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
   CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(tap_charge_id);
+`);
+
+for (const [column, definition] of [
+  ["pairing_code_id", "TEXT"],
+  ["pairing_nonce_hash", "TEXT"],
+] as const) {
+  if (!hasColumn("gateway_devices", column)) {
+    db.exec(`ALTER TABLE gateway_devices ADD COLUMN ${column} ${definition}`);
+  }
+}
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_device_pair_nonce
+    ON gateway_devices(pairing_code_id, pairing_nonce_hash)
+    WHERE pairing_code_id IS NOT NULL AND pairing_nonce_hash IS NOT NULL
 `);
 
 // Backfill caller contacts created before Android contact synchronization was
