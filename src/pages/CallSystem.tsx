@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 import {
   KeyRound,
   PhoneCall,
@@ -95,6 +96,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   const [pairingCode, setPairingCode] = useState<api.GatewayPairingCode | null>(null);
   const [pairingSeconds, setPairingSeconds] = useState(0);
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingQr, setPairingQr] = useState("");
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftDept>(emptyDraft());
   const [savingDept, setSavingDept] = useState(false);
@@ -144,6 +146,27 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
     const timer = window.setInterval(updateRemaining, 1000);
     return () => window.clearInterval(timer);
   }, [pairingCode]);
+
+  const pairingActive = Boolean(pairingCode && pairingSeconds > 0);
+  useEffect(() => {
+    if (!pairingActive || !pairingCode || !baseUrl) {
+      setPairingQr("");
+      return;
+    }
+    let active = true;
+    const payload = `breexe-connect://pair?server=${encodeURIComponent(baseUrl)}&code=${encodeURIComponent(pairingCode.code)}`;
+    QRCode.toDataURL(payload, {
+      width: 320,
+      margin: 2,
+      errorCorrectionLevel: "M",
+      color: { dark: "#0B355C", light: "#FFFFFF" },
+    }).then((dataUrl) => {
+      if (active) setPairingQr(dataUrl);
+    }).catch(() => {
+      if (active) setPairingQr("");
+    });
+    return () => { active = false; };
+  }, [baseUrl, pairingActive, pairingCode]);
 
   const missedCount = useMemo(() => calls.filter((c) => c.missed).length, [calls]);
 
@@ -281,7 +304,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   if (loading) {
     return (
       <div className="empty" dir="rtl">
-        <RefreshCcw className="spin" size={26} />
+        <RefreshCcw className="spin" size={26} aria-hidden="true" />
         <p>جاري تحميل نظام المكالمات…</p>
       </div>
     );
@@ -292,21 +315,21 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
           <h1 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-            <PhoneCall size={22} /> نظام المكالمات والتحويل
+            <PhoneCall size={22} aria-hidden="true" /> نظام المكالمات والتحويل
           </h1>
           <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
             تحويل زين المشروط إلى Unifonic، ثم رد صوتي ورسالة واتساب ومهمة متابعة داخل CRM.
           </p>
         </div>
-        <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} /> تحديث</button>
+        <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} aria-hidden="true" /> تحديث</button>
       </header>
 
       <div className="card" style={{ padding: 16, display: "grid", gap: 10, border: "1px solid rgba(96,165,250,0.35)" }}>
         <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <Smartphone size={18} /> مسار المكالمة التجاري
+          <Smartphone size={18} aria-hidden="true" /> مسار المكالمة التجاري
         </h3>
         <p style={{ margin: 0, opacity: 0.82, fontSize: 13, lineHeight: 1.9 }}>
-          رقم زين يحوّل المكالمة المشروطة بعد 15 ثانية إلى Unifonic. يرد Unifonic صوتياً، ثم يحفظ CRM الحدث ويرسل من واتساب ويب وينشئ مهمة متابعة. تطبيق أندرويد يسجل المكالمات المجابة والصادرة فقط، ولا تعتمد عليه حالات الهاتف المطفأ.
+          رقم زين يحوّل المكالمة المشروطة بعد 15 ثانية إلى Unifonic. يرد Unifonic صوتياً، ثم يحفظ CRM الحدث ويرسل من واتساب ويب وينشئ مهمة متابعة. تطبيق أندرويد يسجل الحالات التي تظهر في سجل الجوال ويحفظ المتصل، بينما تبقى حالات الهاتف المطفأ أو خارج التغطية من مسؤولية Unifonic.
         </p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
           <span>إجراءات مرسلة: <strong>{actions.filter((action) => action.status === "sent").length}</strong></span>
@@ -343,14 +366,28 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
         <div aria-live="polite">
           {pairingCode && pairingSeconds > 0 ? (
-            <div style={{ display: "grid", gap: 7, padding: 14, borderRadius: 12, background: "rgba(34,197,94,0.09)", border: "1px solid rgba(34,197,94,0.24)" }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>رمز الربط لمرة واحدة</span>
-              <code dir="ltr" translate="no" style={{ fontSize: 30, letterSpacing: "0.18em", fontWeight: 800, fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" }}>
-                {pairingCode.code}
-              </code>
-              <span style={{ fontSize: 12 }}>
-                ينتهي خلال {new Intl.NumberFormat("ar-SA").format(Math.ceil(pairingSeconds / 60))} دقيقة — لا ترسله إلا لموظف يملك جوال الشركة.
-              </span>
+            <div style={{ display: "flex", gap: 18, padding: 14, borderRadius: 12, background: "rgba(34,197,94,0.09)", border: "1px solid rgba(34,197,94,0.24)", flexWrap: "wrap", alignItems: "center" }}>
+              {pairingQr && (
+                <img
+                  src={pairingQr}
+                  width={176}
+                  height={176}
+                  loading="lazy"
+                  decoding="async"
+                  alt="رمز QR مؤقت لربط تطبيق BreeXe Connect"
+                  style={{ display: "block", width: 176, height: 176, borderRadius: 12, background: "#fff", padding: 6 }}
+                />
+              )}
+              <div style={{ display: "grid", gap: 8, minWidth: 220, flex: "1 1 260px" }}>
+                <strong>افتح BreeXe Connect واضغط «مسح QR»</strong>
+                <span style={{ fontSize: 12, opacity: 0.75 }}>أو أدخل رمز الربط لمرة واحدة يدويًا</span>
+                <code dir="ltr" translate="no" style={{ fontSize: 30, letterSpacing: "0.18em", fontWeight: 800, fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" }}>
+                  {pairingCode.code}
+                </code>
+                <span style={{ fontSize: 12 }}>
+                  ينتهي خلال {new Intl.NumberFormat("ar-SA").format(Math.ceil(pairingSeconds / 60))} دقيقة — لا ترسله إلا لموظف يملك جوال الشركة.
+                </span>
+              </div>
             </div>
           ) : pairingCode ? (
             <p style={{ margin: 0, color: "#fbbf24", fontSize: 13 }}>انتهت صلاحية الرمز. أنشئ رمزًا جديدًا ثم أعد المحاولة من الجوال.</p>
@@ -391,23 +428,23 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
             <label className="field">
               <span>اسم الشركة في الرسائل</span>
-              <input className="input" value={config.company_name}
+              <input className="input" name="company_name" autoComplete="organization" value={config.company_name}
                 onChange={(e) => setConfig({ ...config, company_name: e.target.value })} />
             </label>
             <label className="field">
               <span>الرقم الأساسي (للإعلانات)</span>
-              <input className="input" value={config.main_number}
+              <input className="input" type="tel" inputMode="tel" name="main_number" autoComplete="tel" value={config.main_number}
                 onChange={(e) => setConfig({ ...config, main_number: e.target.value })}
-                placeholder="9665XXXXXXXX" />
+                placeholder="+9665…" />
             </label>
             <label className="field">
               <span>مهلة الرنين (ثانية)</span>
-              <input className="input" type="number" min={15} max={120} value={config.ring_timeout_sec}
+              <input className="input" type="number" name="ring_timeout_sec" min={15} max={120} value={config.ring_timeout_sec}
                 onChange={(e) => setConfig({ ...config, ring_timeout_sec: Number(e.target.value) || 15 })} />
             </label>
             <label className="field">
               <span>آلية الرد</span>
-              <select className="input" value={config.call_flow_mode}
+              <select className="input" name="call_flow_mode" value={config.call_flow_mode}
                 onChange={(e) => setConfig({ ...config, call_flow_mode: e.target.value as api.TelephonyConfig["call_flow_mode"] })}>
                 <option value="unavailable_reply">رسالة تعذر الرد ثم إنهاء</option>
                 <option value="menu">قائمة صوتية قديمة</option>
@@ -415,7 +452,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             </label>
             <label className="field" style={{ alignSelf: "end" }}>
               <span>تفعيل النظام</span>
-              <select className="input" value={config.enabled ? "1" : "0"}
+              <select className="input" name="system_enabled" value={config.enabled ? "1" : "0"}
                 onChange={(e) => setConfig({ ...config, enabled: e.target.value === "1" })}>
                 <option value="1">مفعّل</option>
                 <option value="0">متوقف</option>
@@ -423,7 +460,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             </label>
             <label className="field" style={{ alignSelf: "end" }}>
               <span>رسائل واتساب التلقائية</span>
-              <select className="input" value={config.auto_reply_enabled ? "1" : "0"}
+              <select className="input" name="auto_reply_enabled" value={config.auto_reply_enabled ? "1" : "0"}
                 onChange={(e) => setConfig({ ...config, auto_reply_enabled: e.target.value === "1" })}>
                 <option value="1">مفعّل</option>
                 <option value="0">متوقف — تسجيل فقط</option>
@@ -435,7 +472,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {BUSINESS_DAYS.map((day) => (
                 <label key={day.value} style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 9px", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }}>
-                  <input type="checkbox" checked={config.business_days.includes(day.value)} onChange={(e) => setConfig({
+                  <input type="checkbox" name="business_days" value={day.value} checked={config.business_days.includes(day.value)} onChange={(e) => setConfig({
                     ...config,
                     business_days: e.target.checked
                       ? [...config.business_days, day.value]
@@ -447,26 +484,26 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
-            <label className="field"><span>بداية الدوام</span><input className="input" type="time" value={config.business_open} onChange={(e) => setConfig({ ...config, business_open: e.target.value })} /></label>
-            <label className="field"><span>نهاية الدوام</span><input className="input" type="time" value={config.business_close} onChange={(e) => setConfig({ ...config, business_close: e.target.value })} /></label>
-            <label className="field"><span>المنطقة الزمنية</span><input className="input" value={config.timezone} onChange={(e) => setConfig({ ...config, timezone: e.target.value })} /></label>
-            <label className="field"><span>منع التكرار (دقيقة)</span><input className="input" type="number" min={0} value={config.reply_cooldown_min} onChange={(e) => setConfig({ ...config, reply_cooldown_min: Number(e.target.value) || 0 })} /></label>
-            <label className="field"><span>مهلة المتابعة داخل الدوام</span><input className="input" type="number" min={1} value={config.follow_up_sla_min} onChange={(e) => setConfig({ ...config, follow_up_sla_min: Number(e.target.value) || 5 })} /></label>
+            <label className="field"><span>بداية الدوام</span><input className="input" type="time" name="business_open" value={config.business_open} onChange={(e) => setConfig({ ...config, business_open: e.target.value })} /></label>
+            <label className="field"><span>نهاية الدوام</span><input className="input" type="time" name="business_close" value={config.business_close} onChange={(e) => setConfig({ ...config, business_close: e.target.value })} /></label>
+            <label className="field"><span>المنطقة الزمنية</span><input className="input" name="timezone" autoComplete="off" value={config.timezone} onChange={(e) => setConfig({ ...config, timezone: e.target.value })} /></label>
+            <label className="field"><span>منع التكرار (دقيقة)</span><input className="input" type="number" name="reply_cooldown_min" min={0} value={config.reply_cooldown_min} onChange={(e) => setConfig({ ...config, reply_cooldown_min: Number(e.target.value) || 0 })} /></label>
+            <label className="field"><span>مهلة المتابعة داخل الدوام</span><input className="input" type="number" name="follow_up_sla_min" min={1} value={config.follow_up_sla_min} onChange={(e) => setConfig({ ...config, follow_up_sla_min: Number(e.target.value) || 5 })} /></label>
           </div>
-          <label className="field"><span>الصوت داخل الدوام</span><textarea className="input" rows={2} value={config.voice_in_hours} onChange={(e) => setConfig({ ...config, voice_in_hours: e.target.value })} /></label>
-          <label className="field"><span>الصوت خارج الدوام</span><textarea className="input" rows={2} value={config.voice_after_hours} onChange={(e) => setConfig({ ...config, voice_after_hours: e.target.value })} /></label>
-          <label className="field"><span>واتساب داخل الدوام</span><textarea className="input" rows={2} value={config.whatsapp_in_hours} onChange={(e) => setConfig({ ...config, whatsapp_in_hours: e.target.value })} /></label>
-          <label className="field"><span>واتساب خارج الدوام</span><textarea className="input" rows={2} value={config.whatsapp_after_hours} onChange={(e) => setConfig({ ...config, whatsapp_after_hours: e.target.value })} /></label>
-          <label className="field"><span>واتساب عند الرد على المكالمة</span><textarea className="input" rows={2} value={config.whatsapp_answered} onChange={(e) => setConfig({ ...config, whatsapp_answered: e.target.value })} /></label>
+          <label className="field"><span>الصوت داخل الدوام</span><textarea className="input" name="voice_in_hours" rows={2} value={config.voice_in_hours} onChange={(e) => setConfig({ ...config, voice_in_hours: e.target.value })} /></label>
+          <label className="field"><span>الصوت خارج الدوام</span><textarea className="input" name="voice_after_hours" rows={2} value={config.voice_after_hours} onChange={(e) => setConfig({ ...config, voice_after_hours: e.target.value })} /></label>
+          <label className="field"><span>واتساب داخل الدوام</span><textarea className="input" name="whatsapp_in_hours" rows={2} value={config.whatsapp_in_hours} onChange={(e) => setConfig({ ...config, whatsapp_in_hours: e.target.value })} /></label>
+          <label className="field"><span>واتساب خارج الدوام</span><textarea className="input" name="whatsapp_after_hours" rows={2} value={config.whatsapp_after_hours} onChange={(e) => setConfig({ ...config, whatsapp_after_hours: e.target.value })} /></label>
+          <label className="field"><span>واتساب عند الرد على المكالمة</span><textarea className="input" name="whatsapp_answered" rows={2} value={config.whatsapp_answered} onChange={(e) => setConfig({ ...config, whatsapp_answered: e.target.value })} /></label>
           {config.call_flow_mode === "menu" && (
             <>
-              <label className="field"><span>رسالة الترحيب للقائمة</span><input className="input" value={config.greeting} onChange={(e) => setConfig({ ...config, greeting: e.target.value })} /></label>
-              <label className="field"><span>نص القائمة</span><input className="input" value={config.menu_prompt} onChange={(e) => setConfig({ ...config, menu_prompt: e.target.value })} /></label>
+              <label className="field"><span>رسالة الترحيب للقائمة</span><input className="input" name="greeting" autoComplete="off" value={config.greeting} onChange={(e) => setConfig({ ...config, greeting: e.target.value })} /></label>
+              <label className="field"><span>نص القائمة</span><input className="input" name="menu_prompt" autoComplete="off" value={config.menu_prompt} onChange={(e) => setConfig({ ...config, menu_prompt: e.target.value })} /></label>
             </>
           )}
           <div>
             <button className="btn primary" type="button" onClick={saveConfig} disabled={savingConfig}>
-              <Save size={14} /> {savingConfig ? "…" : "حفظ الإعدادات"}
+              <Save size={14} aria-hidden="true" /> {savingConfig ? "…" : "حفظ الإعدادات"}
             </button>
           </div>
         </div>
@@ -490,11 +527,11 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
                     </strong>
                     <span style={{ display: "flex", gap: 6 }}>
                       <button className="icon-btn muted" title="تعديل" type="button" onClick={() => editDept(d)}>تعديل</button>
-                      <button className="icon-btn danger" title="حذف" type="button" onClick={() => removeDept(d.id)}><Trash2 size={14} /></button>
+                      <button className="icon-btn danger" title="حذف" aria-label={`حذف قسم ${d.name}`} type="button" onClick={() => removeDept(d.id)}><Trash2 size={14} aria-hidden="true" /></button>
                     </span>
                   </div>
                   <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <UsersIcon size={13} />
+                    <UsersIcon size={13} aria-hidden="true" />
                     {d.agents.length ? d.agents.map((a) => `${a.name || "موظف"} (${a.phone})`).join("، ") : "لا يوجد موظفون"}
                   </div>
                 </div>
@@ -508,18 +545,18 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
           <div style={{ display: "grid", gap: 10 }}>
             <label className="field">
               <span>رقم الاختيار (0-9)</span>
-              <input className="input" maxLength={1} value={draft.digit}
+              <input className="input" name="department_digit" autoComplete="off" inputMode="numeric" maxLength={1} value={draft.digit}
                 onChange={(e) => setDraft({ ...draft, digit: e.target.value.replace(/[^0-9]/g, "") })}
-                placeholder="1" />
+                placeholder="0–9…" />
             </label>
             <label className="field">
               <span>اسم القسم</span>
-              <input className="input" value={draft.name}
-                onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="المبيعات" />
+              <input className="input" name="department_name" autoComplete="off" value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="مثال: المبيعات…" />
             </label>
             <label className="field">
               <span>مهلة الرنين (ثانية)</span>
-              <input className="input" type="number" min={5} max={120} value={draft.ring_timeout_sec}
+              <input className="input" type="number" name="department_ring_timeout" min={5} max={120} value={draft.ring_timeout_sec}
                 onChange={(e) => setDraft({ ...draft, ring_timeout_sec: Number(e.target.value) || 20 })} />
             </label>
 
@@ -527,22 +564,22 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
               <span style={{ fontSize: 13, opacity: 0.8 }}>الموظفون (تُجرّب أرقامهم بالترتيب)</span>
               {draft.agents.map((a, i) => (
                 <div key={i} style={{ display: "flex", gap: 6 }}>
-                  <input className="input" style={{ flex: 1 }} value={a.name} placeholder="الاسم"
+                  <input className="input" style={{ flex: 1 }} name={`agent_name_${i}`} autoComplete="off" aria-label={`اسم الموظف ${i + 1}`} value={a.name} placeholder="اسم الموظف…"
                     onChange={(e) => setDraft({ ...draft, agents: draft.agents.map((x, j) => j === i ? { ...x, name: e.target.value } : x) })} />
-                  <input className="input" style={{ flex: 1 }} value={a.phone} placeholder="9665XXXXXXXX"
+                  <input className="input" style={{ flex: 1 }} type="tel" inputMode="tel" name={`agent_phone_${i}`} autoComplete="off" aria-label={`رقم الموظف ${i + 1}`} value={a.phone} placeholder="+9665…"
                     onChange={(e) => setDraft({ ...draft, agents: draft.agents.map((x, j) => j === i ? { ...x, phone: e.target.value } : x) })} />
-                  <button className="icon-btn danger" title="حذف الموظف" type="button"
-                    onClick={() => setDraft({ ...draft, agents: draft.agents.filter((_, j) => j !== i) })}><Trash2 size={13} /></button>
+                  <button className="icon-btn danger" title="حذف الموظف" aria-label={`حذف الموظف ${i + 1}`} type="button"
+                    onClick={() => setDraft({ ...draft, agents: draft.agents.filter((_, j) => j !== i) })}><Trash2 size={13} aria-hidden="true" /></button>
                 </div>
               ))}
               <button className="btn muted" type="button" onClick={() => setDraft({ ...draft, agents: [...draft.agents, { name: "", phone: "" }] })}>
-                <Plus size={13} /> موظف آخر
+                <Plus size={13} aria-hidden="true" /> موظف آخر
               </button>
             </div>
 
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn primary" type="button" onClick={saveDept} disabled={savingDept}>
-                <Save size={14} /> {savingDept ? "…" : draft.id ? "حفظ التعديل" : "إضافة القسم"}
+                <Save size={14} aria-hidden="true" /> {savingDept ? "…" : draft.id ? "حفظ التعديل" : "إضافة القسم"}
               </button>
               {draft.id && (
                 <button className="btn muted" type="button" onClick={() => setDraft(emptyDraft())}>إلغاء</button>
@@ -573,9 +610,9 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         <h3 style={{ margin: 0 }}>اختبار نتيجة المكالمة</h3>
         <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>محاكاة نتيجة مكالمة واردة لاختبار حفظ جهة الاتصال ووصول رسالة واتساب المناسبة (بدون مكالمة حقيقية).</p>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <input className="input" style={{ flex: 2, minWidth: 180 }} value={testPhone} placeholder="رقم جوال العميل 9665XXXXXXXX"
+          <input className="input" style={{ flex: 2, minWidth: 180 }} type="tel" inputMode="tel" name="test_phone" autoComplete="off" aria-label="رقم جوال العميل للاختبار" value={testPhone} placeholder="رقم جوال العميل +9665…"
             onChange={(e) => setTestPhone(e.target.value)} />
-          <select className="input" style={{ flex: 1, minWidth: 170 }} value={testDisposition}
+          <select className="input" style={{ flex: 1, minWidth: 170 }} name="test_disposition" aria-label="نتيجة المكالمة التجريبية" value={testDisposition}
             onChange={(e) => setTestDisposition(e.target.value as api.AutomatedCallDisposition)}>
             <option value="answered">تم الرد</option>
             <option value="no_answer">لم يُرد خلال 15 ثانية</option>
@@ -584,9 +621,9 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             <option value="rejected">مرفوضة</option>
             <option value="after_hours">خارج الدوام</option>
           </select>
-          <input className="input" style={{ flex: 1, minWidth: 90 }} maxLength={1} value={testDigit} placeholder="القسم (رقم)"
+          <input className="input" style={{ flex: 1, minWidth: 90 }} name="test_department_digit" autoComplete="off" inputMode="numeric" aria-label="رقم القسم التجريبي" maxLength={1} value={testDigit} placeholder="القسم 0–9…"
             onChange={(e) => setTestDigit(e.target.value.replace(/[^0-9]/g, ""))} />
-          <button className="btn primary" type="button" onClick={runTest}><PhoneMissed size={14} /> تشغيل الاختبار</button>
+          <button className="btn primary" type="button" onClick={runTest}><PhoneMissed size={14} aria-hidden="true" /> تشغيل الاختبار</button>
         </div>
       </div>
 
