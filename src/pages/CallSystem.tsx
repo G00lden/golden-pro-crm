@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  KeyRound,
   PhoneCall,
   PhoneMissed,
   Plus,
   RefreshCcw,
   Save,
+  ShieldCheck,
   Smartphone,
   Trash2,
+  Unplug,
   Users as UsersIcon,
 } from "lucide-react";
 import * as api from "../api";
@@ -60,7 +63,13 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   const [config, setConfig] = useState<api.TelephonyConfig | null>(null);
   const [departments, setDepartments] = useState<api.TelephonyDepartment[]>([]);
   const [calls, setCalls] = useState<api.CallLogRow[]>([]);
-  const [gateway, setGateway] = useState<api.GatewayStatus | null>(null);
+  const [gatewayStatus, setGatewayStatus] = useState<api.GatewayStatus | null>(null);
+  const [gatewayDevices, setGatewayDevices] = useState<api.GatewayDevice[]>([]);
+  const [pairingCode, setPairingCode] = useState<api.GatewayPairingCode | null>(null);
+  const [pairingSeconds, setPairingSeconds] = useState(0);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
+  const gateway = gatewayStatus;
   const [draft, setDraft] = useState<DraftDept>(emptyDraft());
   const [savingDept, setSavingDept] = useState(false);
   const [deletingDeptId, setDeletingDeptId] = useState<string | null>(null);
@@ -72,16 +81,18 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, depts, log, gw] = await Promise.all([
+      const [cfg, depts, log, gateway, devices] = await Promise.all([
         api.getTelephonyConfig(),
         api.getTelephonyDepartments(),
         api.getCallLogs({ limit: 100 }),
         api.getGatewayStatus().catch(() => null),
+        api.getGatewayDevices().catch(() => []),
       ]);
       setConfig(cfg);
       setDepartments(depts);
       setCalls(log);
-      setGateway(gw);
+      setGatewayStatus(gateway);
+      setGatewayDevices(devices);
     } catch (error) {
       notify(error instanceof Error ? error.message : "تعذر تحميل نظام المكالمات", false);
     } finally {
@@ -93,6 +104,19 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!pairingCode) {
+      setPairingSeconds(0);
+      return;
+    }
+    const updateRemaining = () => {
+      setPairingSeconds(Math.max(0, Math.ceil((new Date(pairingCode.expiresAt).getTime() - Date.now()) / 1000)));
+    };
+    updateRemaining();
+    const timer = window.setInterval(updateRemaining, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairingCode]);
+
   const missedCount = useMemo(() => calls.filter((c) => c.missed).length, [calls]);
 
   const departmentDeletion = useMemo(
@@ -103,6 +127,35 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
     }),
     [],
   );
+
+  const createPairingCode = async () => {
+    setPairingBusy(true);
+    try {
+      const created = await api.createGatewayPairingCode();
+      setPairingCode(created);
+      notify("تم إنشاء رمز ربط صالح لمدة 10 دقائق", true);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "تعذر إنشاء رمز ربط الجوال", false);
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+
+  const revokeDevice = async (device: api.GatewayDevice) => {
+    if (!window.confirm(`إلغاء ربط «${device.name}»؟ سيتوقف عن إرسال المكالمات فورًا.`)) return;
+    setRevokingDeviceId(device.id);
+    try {
+      await api.revokeGatewayDevice(device.id);
+      notify("تم إلغاء ربط الجهاز", true);
+      const [status, devices] = await Promise.all([api.getGatewayStatus(), api.getGatewayDevices()]);
+      setGatewayStatus(status);
+      setGatewayDevices(devices);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "تعذر إلغاء ربط الجهاز", false);
+    } finally {
+      setRevokingDeviceId(null);
+    }
+  };
 
   const saveConfig = async () => {
     if (!config) return;
@@ -277,6 +330,72 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
             </table>
           </div>
         )}
+      </div>
+
+      <div className="card" aria-labelledby="android-pairing-title" style={{ padding: 16, display: "grid", gap: 14, border: "1px solid rgba(34,197,94,0.38)" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0 }}>
+            <h3 id="android-pairing-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8, textWrap: "balance" }}>
+              <ShieldCheck size={18} aria-hidden="true" /> ربط تطبيق أندرويد مباشرة
+            </h3>
+            <p style={{ margin: "6px 0 0", opacity: 0.78, fontSize: 13, lineHeight: 1.8, textWrap: "pretty" }}>
+              أنشئ رمزًا مؤقتًا هنا، ثم أدخله في التطبيق مع رابط هذا الـCRM. لا حاجة لنسخ توكن طويل، والرمز يعمل مرة واحدة فقط.
+            </p>
+          </div>
+          <span style={{ padding: "5px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700, color: gatewayStatus?.configured ? "var(--teal)" : "var(--orange)", background: gatewayStatus?.configured ? "rgba(40,199,160,0.12)" : "rgba(224,161,79,0.12)" }}>
+            {gatewayStatus ? (gatewayStatus.configured ? "الخادم جاهز للربط" : "سر البوابة غير مُعد") : "يتطلب نشر تحديث الخادم"}
+          </span>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button className="btn primary" type="button" onClick={createPairingCode} disabled={pairingBusy || gatewayStatus?.configured === false}>
+            {pairingBusy ? <RefreshCcw className="spin" size={14} aria-hidden="true" /> : <KeyRound size={14} aria-hidden="true" />}
+            {pairingBusy ? "جارٍ إنشاء الرمز…" : pairingCode && pairingSeconds > 0 ? "إنشاء رمز جديد" : "إنشاء رمز ربط"}
+          </button>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>رابط الخادم في التطبيق: <span dir="ltr" translate="no">{baseUrl}</span></span>
+        </div>
+
+        <div aria-live="polite">
+          {pairingCode && pairingSeconds > 0 ? (
+            <div style={{ display: "grid", gap: 7, padding: 14, borderRadius: 12, background: "rgba(34,197,94,0.09)", border: "1px solid rgba(34,197,94,0.24)" }}>
+              <span style={{ fontSize: 12, opacity: 0.75 }}>رمز الربط لمرة واحدة</span>
+              <code dir="ltr" translate="no" style={{ fontSize: 30, letterSpacing: "0.18em", fontWeight: 800, fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" }}>
+                {pairingCode.code}
+              </code>
+              <span style={{ fontSize: 12 }}>
+                ينتهي خلال {new Intl.NumberFormat("ar-SA").format(Math.ceil(pairingSeconds / 60))} دقيقة — لا ترسله إلا لموظف يملك جوال الشركة.
+              </span>
+            </div>
+          ) : pairingCode ? (
+            <p style={{ margin: 0, color: "#fbbf24", fontSize: 13 }}>انتهت صلاحية الرمز. أنشئ رمزًا جديدًا ثم أعد المحاولة من الجوال.</p>
+          ) : null}
+        </div>
+
+        <div style={{ display: "grid", gap: 9 }}>
+          <h4 style={{ margin: 0 }}>الأجهزة المرتبطة ({new Intl.NumberFormat("ar-SA").format(gatewayStatus?.registered_devices || 0)})</h4>
+          {gatewayDevices.length === 0 ? (
+            <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>لا يوجد جوال مرتبط بعد.</p>
+          ) : (
+            <div style={{ display: "grid", gap: 8 }}>
+              {gatewayDevices.map((device) => (
+                <div key={device.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: 10, borderRadius: 10, background: "rgba(255,255,255,0.035)", opacity: device.revoked_at ? 0.58 : 1, flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+                    <strong>{device.name || "جوال بدون اسم"}</strong>
+                    <div style={{ marginTop: 3, fontSize: 12, opacity: 0.7 }}>
+                      {device.company_number || "لا يوجد رقم شركة"} · {device.revoked_at ? `أُلغي ${fmtDateTime(device.revoked_at)}` : `آخر اتصال ${fmtDateTime(device.last_seen_at)}`}
+                    </div>
+                  </div>
+                  {!device.revoked_at && (
+                    <button className="btn muted" type="button" onClick={() => revokeDevice(device)} disabled={revokingDeviceId === device.id}>
+                      {revokingDeviceId === device.id ? <RefreshCcw className="spin" size={14} aria-hidden="true" /> : <Unplug size={14} aria-hidden="true" />}
+                      {revokingDeviceId === device.id ? "جارٍ الإلغاء…" : "إلغاء الربط"}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Config */}

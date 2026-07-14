@@ -906,6 +906,40 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_campaign_recipients_owner_phone
     ON communication_campaign_recipients(owner_uid, phone, sent_at DESC);
 
+  -- Short-lived, one-time codes used to pair an Android phone without copying
+  -- the server-wide legacy token into the app.
+  CREATE TABLE IF NOT EXISTS gateway_pairing_codes (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_pairing_active
+    ON gateway_pairing_codes(code_hash, used_at, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_gateway_pairing_owner
+    ON gateway_pairing_codes(owner_uid, created_at DESC);
+
+  -- Each paired phone has an independently revocable credential. Only the
+  -- HMAC fingerprint is persisted; the clear token is returned once at pairing.
+  CREATE TABLE IF NOT EXISTS gateway_devices (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    company_number TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL,
+    pairing_code_id TEXT,
+    pairing_nonce_hash TEXT,
+    last_seen_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    revoked_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_devices_owner
+    ON gateway_devices(owner_uid, revoked_at, created_at DESC);
+
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
@@ -939,6 +973,19 @@ for (const col of [
 }
 // Preserve the newest legacy in-flight row if an older release allowed more
 // than one pending payment for the same invoice, then enforce one reservation.
+for (const [column, definition] of [
+  ["pairing_code_id", "TEXT"],
+  ["pairing_nonce_hash", "TEXT"],
+] as const) {
+  if (!hasColumn("gateway_devices", column)) {
+    db.exec(`ALTER TABLE gateway_devices ADD COLUMN ${column} ${definition}`);
+  }
+}
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_device_pair_nonce
+    ON gateway_devices(pairing_code_id, pairing_nonce_hash)
+    WHERE pairing_code_id IS NOT NULL AND pairing_nonce_hash IS NOT NULL
+`);
 db.exec(`
   UPDATE payments
   SET status = 'failed', updated_at = datetime('now')

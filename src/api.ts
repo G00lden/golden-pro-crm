@@ -4704,12 +4704,36 @@ export type GatewayOutboxRow = {
 
 export type GatewayStatus = {
   configured: boolean;
+  registered_devices: number;
   routing_mode: "menu" | "direct";
   pending: number;
   recent: GatewayOutboxRow[];
 };
 
 export const getGatewayStatus = () => apiFetch<GatewayStatus>("/api/gateway/status");
+
+export type GatewayDevice = {
+  id: string;
+  name: string;
+  company_number: string;
+  created_at: string;
+  last_seen_at: string | null;
+  revoked_at: string | null;
+};
+
+export type GatewayPairingCode = {
+  code: string;
+  expiresAt: string;
+};
+
+export const createGatewayPairingCode = () =>
+  apiFetch<GatewayPairingCode>("/api/gateway/pairing-code", { method: "POST" });
+
+export const getGatewayDevices = () =>
+  apiFetch<{ devices: GatewayDevice[] }>("/api/gateway/devices").then((result) => result.devices);
+
+export const revokeGatewayDevice = (id: string) =>
+  apiFetch<{ success: true }>(`/api/gateway/devices/${encodeURIComponent(id)}/revoke`, { method: "POST" });
 
 // ── Tap Payment Gateway ──
 

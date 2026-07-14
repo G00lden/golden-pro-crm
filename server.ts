@@ -201,6 +201,11 @@ async function startServer() {
   });
   const publicLeadRateLimit = createRateLimiter(publicLeadRateLimitOptions());
   const trackingEventRateLimit = createRateLimiter(trackingEventRateLimitOptions());
+  const gatewayPairingRateLimit = createRateLimiter({
+    windowMs: Number(process.env.GATEWAY_PAIRING_RATE_LIMIT_WINDOW_MS || 60_000),
+    max: Number(process.env.GATEWAY_PAIRING_RATE_LIMIT_MAX || 10),
+    name: "gateway-pairing",
+  });
 
   app.disable("x-powered-by");
   app.use(securityHeaders);
@@ -294,7 +299,11 @@ async function startServer() {
 
   // Self-hosted phone gateway (Android automation app, token-auth). Registered
   // BEFORE the /api Firebase guard so the phone can post without a Firebase user.
-  registerGatewayWebhookRoutes(app, { webhookRateLimit, gatewayOwnerUid: __whatsappOwnerUid });
+  registerGatewayWebhookRoutes(app, {
+    webhookRateLimit,
+    pairingRateLimit: gatewayPairingRateLimit,
+    gatewayOwnerUid: __whatsappOwnerUid,
+  });
 
   // Tap payment webhook (authenticated via HMAC signature, not Firebase)
   registerPaymentWebhookRoute(app);
@@ -359,7 +368,11 @@ async function startServer() {
   registerCrmApiRoutes(app);
   registerWhatsAppRoutes(app, { webhookRateLimit, whatsappOwnerUid: __whatsappOwnerUid });
   registerTelephonyRoutes(app, { webhookRateLimit, telephonyOwnerUid: __whatsappOwnerUid });
-  registerGatewayRoutes(app, { webhookRateLimit, gatewayOwnerUid: __whatsappOwnerUid });
+  registerGatewayRoutes(app, {
+    webhookRateLimit,
+    pairingRateLimit: gatewayPairingRateLimit,
+    gatewayOwnerUid: __whatsappOwnerUid,
+  });
   registerOdooCrmRoutes(app);
   registerPublicLeadInboxRoutes(app, {
     database: db,

@@ -29,6 +29,7 @@
     "test:products": "node --import tsx --test server/productCatalog.test.ts",
     "sync:salla-products": "node dist-server/sync-salla-products.mjs",
     "sync:salla-products:dev": "node --import tsx scripts/sync-salla-products.ts",
+    "test:gateway-pairing": "node --import tsx --test server/gatewayPairing.test.ts",
     "doctor": "node scripts/doctor.mjs",
     "doctor:prod": "node scripts/doctor.mjs --production",
     "env:prod": "node scripts/create-production-env.mjs",
