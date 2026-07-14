@@ -360,6 +360,13 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - أضيف `server/callAutomation.test.ts` ودليل التشغيل `docs/zain-unifonic-missed-call-whatsapp.md`.
 - تطبيق أندرويد المكمّل يبني APK ويقرأ سجل المكالمات الفعلي للمجابة/الصادرة/الفائتة/المرفوضة/المحظورة؛ Unifonic يبقى المصدر عند إطفاء الهاتف أو خروجه من التغطية.
 - بوابة إطلاق إلزامية بقيت خارجية: شراء رقم Unifonic، تفعيل تحويل زين المشروط، وإثبات احتفاظ التحويل برقم المتصل الأصلي في الحالات الأربع قبل تفعيل الإرسال التجاري.
+
+## إضافة 2026-07-14 — رسالة لكل نتيجة واردة ومزامنة جهات الاتصال [Codex]
+
+- الحالة `answered` ترسل رسالة واتساب تأكيد مخصصة، لكنها لا تُسجل كمكالمة فائتة ولا تنشئ مهمة متابعة.
+- حالات `no_answer/busy/unreachable/rejected/after_hours` تبقى برسالة الاعتذار ومهمة المتابعة وتنبيه الموظف.
+- كل رقم وارد معروف يُنشأ تلقائيًا في جهات اتصال CRM دون تكرار؛ `blocked/outgoing` لا تنشئ جهة جديدة، و`unknown` لا ترسل رسالة حتى تُراجع.
+- أضيف `gateway_contact_outbox` ومسارا `/api/gateway/contacts` و`/api/gateway/contacts/ack` لحفظ أرقام Unifonic في جهات اتصال الهاتف عند عودته للاتصال.
 # 2026-07-13 — Asset maintenance, QR activation and warranty
 
 - Added independent customer assets with pre-printed unassigned QR labels and authenticated technician activation.

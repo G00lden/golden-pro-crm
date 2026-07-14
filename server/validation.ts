@@ -151,12 +151,13 @@ export const telephonyConfigSchema = z.object({
   voice_after_hours: z.string().min(1).max(2000).optional(),
   whatsapp_in_hours: z.string().min(1).max(2000).optional(),
   whatsapp_after_hours: z.string().min(1).max(2000).optional(),
+  whatsapp_answered: z.string().min(1).max(2000).optional(),
   enabled: z.boolean().optional(),
 });
 
 export const telephonyTestMissedSchema = z.object({
   from_phone: z.string().min(1, 'from_phone is required').max(32),
-  disposition: z.enum(['no_answer', 'busy', 'unreachable', 'rejected', 'after_hours']).optional(),
+  disposition: z.enum(['answered', 'no_answer', 'busy', 'unreachable', 'rejected', 'after_hours']).optional(),
   digit: z.string().regex(/^[0-9]$/, 'digit must be a single 0-9 character').optional(),
   department_id: z.string().max(160).optional(),
 });

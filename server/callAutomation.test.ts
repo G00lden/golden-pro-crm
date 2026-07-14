@@ -90,6 +90,38 @@ test("missed call creates one task and durable dry-run actions without false sen
     assert.equal(storedCall.wa_customer_notified, 0);
     assert.equal(storedCall.wa_agent_notified, 0);
     assert.equal(storedCall.action_state, "dry_run");
+    const missedContact = db.prepare("SELECT name, source FROM customers WHERE owner_uid = ? AND phone LIKE ?")
+      .get(ownerUid, "%500000000") as { name: string; source: string };
+    assert.match(missedContact.name, /^متصل /);
+    assert.equal(missedContact.source, "phone_call");
+
+    const answeredEvent = {
+      eventId: "android-calllog-98",
+      type: "answered",
+      from: "0500000098",
+      to: "0500000000",
+      disposition: "answered",
+      occurredAt: "2026-07-13T12:05:00.000Z",
+      durationSeconds: 45,
+    };
+    const answered = await gateway.handleGatewayEvent(ownerUid, answeredEvent);
+    assert.equal(answered.disposition, "answered");
+    const answeredCall = db.prepare("SELECT id, missed, customer_id FROM call_logs WHERE owner_uid = ? AND event_id = ?")
+      .get(ownerUid, answeredEvent.eventId) as { id: string; missed: number; customer_id: string };
+    assert.equal(answeredCall.missed, 0);
+    assert.ok(answeredCall.customer_id);
+    const answeredActions = db.prepare("SELECT body, status FROM call_action_runs WHERE call_id = ?")
+      .all(answeredCall.id) as Array<{ body: string; status: string }>;
+    assert.equal(answeredActions.length, 1);
+    assert.match(answeredActions[0].body, /تم الرد على مكالمتك/);
+    assert.equal(answeredActions[0].status, "dry_run");
+    const answeredTasks = (db.prepare("SELECT COUNT(*) AS count FROM crm_tasks WHERE related_type = 'call' AND related_id = ?")
+      .get(answeredCall.id) as { count: number }).count;
+    assert.equal(answeredTasks, 0);
+    const pendingContacts = gateway.listPendingContacts(ownerUid, 10) as Array<{ id: string }>;
+    assert.equal(pendingContacts.length, 2);
+    assert.equal(gateway.ackContacts(ownerUid, pendingContacts.map((row) => row.id)), 2);
+    assert.equal(gateway.listPendingContacts(ownerUid, 10).length, 0);
 
     const androidEvent = {
       eventId: "android-calllog-99",

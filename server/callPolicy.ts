@@ -20,6 +20,12 @@ export const AUTOMATION_DISPOSITIONS = new Set<CallDisposition>([
   "after_hours",
 ]);
 
+/** Confirmed inbound outcomes that receive a customer WhatsApp message. */
+export const CUSTOMER_MESSAGE_DISPOSITIONS = new Set<CallDisposition>([
+  "answered",
+  ...AUTOMATION_DISPOSITIONS,
+]);
+
 export type BusinessSchedule = {
   timezone: string;
   business_days: number[];

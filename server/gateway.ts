@@ -36,7 +36,12 @@ import {
 } from "./smsTemplates";
 import { logError, logEvent } from "./logger";
 import { drainCallActionQueue, prepareCallAutomation } from "./callAutomation";
-import { AUTOMATION_DISPOSITIONS, normalizeDisposition, type CallDisposition } from "./callPolicy";
+import {
+  AUTOMATION_DISPOSITIONS,
+  CUSTOMER_MESSAGE_DISPOSITIONS,
+  normalizeDisposition,
+  type CallDisposition,
+} from "./callPolicy";
 
 function newId(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 18)}`;
@@ -105,6 +110,23 @@ export function listRecentOutbox(ownerUid: string, limit = 50) {
   return db
     .prepare("SELECT * FROM gateway_outbox WHERE owner_uid = ? ORDER BY created_at DESC LIMIT ?")
     .all(ownerUid, Math.min(200, limit)) as Array<Record<string, unknown>>;
+}
+
+export function listPendingContacts(ownerUid: string, limit = 100) {
+  return db.prepare(
+    `SELECT id, customer_id, phone, name FROM gateway_contact_outbox
+     WHERE owner_uid = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?`,
+  ).all(ownerUid, Math.min(500, limit)) as Array<Record<string, unknown>>;
+}
+
+export function ackContacts(ownerUid: string, ids: string[]): number {
+  const markSaved = db.prepare(
+    `UPDATE gateway_contact_outbox SET status = 'saved', saved_at = ?, error = NULL
+     WHERE id = ? AND owner_uid = ? AND status = 'pending'`,
+  );
+  let changed = 0;
+  for (const id of ids) changed += markSaved.run(nowIso(), id, ownerUid).changes;
+  return changed;
 }
 
 // ── Channel-aware dispatch ────────────────────────────────────────────────────
@@ -229,14 +251,15 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
       phoneAccountId: event.phoneAccountId,
       metadata: event as unknown as Record<string, unknown>,
     });
-    const automated = AUTOMATION_DISPOSITIONS.has(disposition);
+    const needsFollowUp = AUTOMATION_DISPOSITIONS.has(disposition);
+    const customerMessage = CUSTOMER_MESSAGE_DISPOSITIONS.has(disposition);
     updateCallById(call.id, {
       status: disposition,
       disposition,
-      missed: automated ? 1 : 0,
+      missed: needsFollowUp ? 1 : 0,
       ended_at: nowIso(),
     });
-    if (automated) {
+    if (customerMessage) {
       const prepared = prepareCallAutomation(call.id, getTelephonyConfig(ownerUid));
       const drained = await drainCallActionQueue(ownerUid);
       return { handled: true, kind: "call", callId: call.id, disposition, prepared, drained };

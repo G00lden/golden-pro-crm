@@ -22,7 +22,13 @@ import type {
 } from "./telephony/types";
 import { logError, logEvent } from "./logger";
 import { drainCallActionQueue, prepareCallAutomation, type CallAutomationConfig } from "./callAutomation";
-import { AUTOMATION_DISPOSITIONS, companyMessage, isBusinessOpen, type CallDisposition } from "./callPolicy";
+import {
+  AUTOMATION_DISPOSITIONS,
+  CUSTOMER_MESSAGE_DISPOSITIONS,
+  companyMessage,
+  isBusinessOpen,
+  type CallDisposition,
+} from "./callPolicy";
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Breexe Pro";
 const DEFAULT_RING_TIMEOUT = Number(process.env.TELEPHONY_RING_TIMEOUT_SEC || 15);
@@ -30,6 +36,7 @@ const DEFAULT_VOICE_IN_HOURS = "شكرًا لاتصالك. يتعذر علينا
 const DEFAULT_VOICE_AFTER_HOURS = "شكرًا لاتصالك بـ{اسم الشركة}. نحن خارج أوقات الدوام حاليًا. ستصلك رسالة على واتساب الآن، وسنتواصل معك في أقرب فرصة.";
 const DEFAULT_WHATSAPP_IN_HOURS = "شكرًا لاتصالك بـ{اسم الشركة}. تعذر علينا الرد الآن. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.";
 const DEFAULT_WHATSAPP_AFTER_HOURS = "شكرًا لاتصالك بـ{اسم الشركة}. نحن خارج أوقات الدوام حاليًا. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.";
+const DEFAULT_WHATSAPP_ANSWERED = "شكرًا لاتصالك بـ{اسم الشركة}. تم الرد على مكالمتك، ويمكنك إرسال أي تفاصيل إضافية هنا عبر واتساب.";
 
 // ── ids / time ──────────────────────────────────────────────────────────────
 function newId(prefix: string) {
@@ -121,6 +128,7 @@ export function getTelephonyConfig(ownerUid: string): TelephonyConfig {
     voice_after_hours: (row?.voice_after_hours as string) || DEFAULT_VOICE_AFTER_HOURS,
     whatsapp_in_hours: (row?.whatsapp_in_hours as string) || DEFAULT_WHATSAPP_IN_HOURS,
     whatsapp_after_hours: (row?.whatsapp_after_hours as string) || DEFAULT_WHATSAPP_AFTER_HOURS,
+    whatsapp_answered: (row?.whatsapp_answered as string) || DEFAULT_WHATSAPP_ANSWERED,
     enabled: row ? row.enabled === 1 : true,
   };
 }
@@ -136,8 +144,8 @@ export function upsertTelephonyConfig(
       (owner_uid, provider, main_number, company_name, call_flow_mode, greeting, menu_prompt,
        ring_timeout_sec, timezone, business_days, business_open, business_close,
        auto_reply_enabled, reply_cooldown_min, follow_up_sla_min, voice_in_hours,
-       voice_after_hours, whatsapp_in_hours, whatsapp_after_hours, enabled, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       voice_after_hours, whatsapp_in_hours, whatsapp_after_hours, whatsapp_answered, enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(owner_uid) DO UPDATE SET
        main_number = excluded.main_number,
        company_name = excluded.company_name,
@@ -156,6 +164,7 @@ export function upsertTelephonyConfig(
        voice_after_hours = excluded.voice_after_hours,
        whatsapp_in_hours = excluded.whatsapp_in_hours,
        whatsapp_after_hours = excluded.whatsapp_after_hours,
+       whatsapp_answered = excluded.whatsapp_answered,
        enabled = excluded.enabled,
        updated_at = excluded.updated_at`,
   ).run(
@@ -178,6 +187,7 @@ export function upsertTelephonyConfig(
     next.voice_after_hours,
     next.whatsapp_in_hours,
     next.whatsapp_after_hours,
+    next.whatsapp_answered,
     next.enabled ? 1 : 0,
     nowIso(),
   );
@@ -394,6 +404,40 @@ export function findCustomerByPhone(ownerUid: string, phone: string): { id: stri
   return row ? { id: row.id, name: row.name || "" } : null;
 }
 
+/** Create a CRM contact for a confirmed inbound caller, without duplicates. */
+export function ensureCustomerContact(
+  ownerUid: string,
+  phone: string,
+  disposition: CallDisposition = "unknown",
+): { id: string; name: string } | null {
+  const existing = findCustomerByPhone(ownerUid, phone);
+  if (existing) return existing;
+  if (disposition === "blocked" || disposition === "outgoing") return null;
+  const normalized = normalizeDialNumber(phone);
+  if (normalized.length < 8) return null;
+  const id = newId("cust");
+  const name = `متصل ${normalized.slice(-4)}`;
+  const now = nowIso();
+  db.prepare(
+    `INSERT INTO customers (id, owner_uid, name, phone, source, notes, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'phone_call', ?, ?, ?)`,
+  ).run(
+    id,
+    ownerUid,
+    name,
+    `+${normalized}`,
+    "أضيف تلقائيًا من مكالمة واردة. يمكن تعديل الاسم من جهات اتصال CRM.",
+    now,
+    now,
+  );
+  db.prepare(
+    `INSERT OR IGNORE INTO gateway_contact_outbox
+      (id, owner_uid, customer_id, phone, name, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+  ).run(newId("gct"), ownerUid, id, `+${normalized}`, name, now);
+  return { id, name };
+}
+
 export function recordCall(input: {
   ownerUid: string;
   provider: string;
@@ -450,7 +494,10 @@ export function recordCall(input: {
   }
 
   const id = newId("call");
-  const customer = findCustomerByPhone(input.ownerUid, input.from);
+  const direction = input.direction || "incoming";
+  const disposition = input.disposition || "unknown";
+  const customer = findCustomerByPhone(input.ownerUid, input.from)
+    || (direction === "incoming" ? ensureCustomerContact(input.ownerUid, input.from, disposition) : null);
   db.prepare(
     `INSERT INTO call_logs
       (id, owner_uid, provider, event_id, call_sid, source, direction, disposition,
@@ -464,8 +511,8 @@ export function recordCall(input: {
     input.eventId || null,
     input.callSid || null,
     source,
-    input.direction || "incoming",
-    input.disposition || "unknown",
+    direction,
+    disposition,
     input.from || null,
     input.to || null,
     input.status || "menu",
@@ -838,11 +885,11 @@ export async function handleCallStatus(
     missed: isMissed ? 1 : 0,
   });
 
-  if (isMissed) {
+  if (CUSTOMER_MESSAGE_DISPOSITIONS.has(disposition as CallDisposition)) {
     const config = getTelephonyConfig(ownerUid);
     const prepared = prepareCallAutomation(callId, config);
     const drained = await drainCallActionQueue(ownerUid);
-    return { handled: true, missed: true, disposition, callId, prepared, drained };
+    return { handled: true, missed: isMissed, disposition, callId, prepared, drained };
   }
   return { handled: true, missed: false, disposition, callId };
 }

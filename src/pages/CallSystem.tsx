@@ -301,7 +301,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
               </select>
             </label>
             <label className="field" style={{ alignSelf: "end" }}>
-              <span>إرسال الاعتذار التلقائي</span>
+              <span>رسائل واتساب التلقائية</span>
               <select className="input" value={config.auto_reply_enabled ? "1" : "0"}
                 onChange={(e) => setConfig({ ...config, auto_reply_enabled: e.target.value === "1" })}>
                 <option value="1">مفعّل</option>
@@ -336,6 +336,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
           <label className="field"><span>الصوت خارج الدوام</span><textarea className="input" rows={2} value={config.voice_after_hours} onChange={(e) => setConfig({ ...config, voice_after_hours: e.target.value })} /></label>
           <label className="field"><span>واتساب داخل الدوام</span><textarea className="input" rows={2} value={config.whatsapp_in_hours} onChange={(e) => setConfig({ ...config, whatsapp_in_hours: e.target.value })} /></label>
           <label className="field"><span>واتساب خارج الدوام</span><textarea className="input" rows={2} value={config.whatsapp_after_hours} onChange={(e) => setConfig({ ...config, whatsapp_after_hours: e.target.value })} /></label>
+          <label className="field"><span>واتساب عند الرد على المكالمة</span><textarea className="input" rows={2} value={config.whatsapp_answered} onChange={(e) => setConfig({ ...config, whatsapp_answered: e.target.value })} /></label>
           {config.call_flow_mode === "menu" && (
             <>
               <label className="field"><span>رسالة الترحيب للقائمة</span><input className="input" value={config.greeting} onChange={(e) => setConfig({ ...config, greeting: e.target.value })} /></label>
@@ -448,13 +449,14 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
       {/* Test missed call */}
       <div className="card" style={{ padding: 16, display: "grid", gap: 10 }}>
-        <h3 style={{ margin: 0 }}>اختبار مكالمة فائتة</h3>
-        <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>محاكاة مكالمة لم يُرد عليها لاختبار وصول الواتساب للعميل والموظف (بدون مكالمة حقيقية).</p>
+        <h3 style={{ margin: 0 }}>اختبار نتيجة المكالمة</h3>
+        <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>محاكاة نتيجة مكالمة واردة لاختبار حفظ جهة الاتصال ووصول رسالة واتساب المناسبة (بدون مكالمة حقيقية).</p>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input className="input" style={{ flex: 2, minWidth: 180 }} value={testPhone} placeholder="رقم جوال العميل 9665XXXXXXXX"
             onChange={(e) => setTestPhone(e.target.value)} />
           <select className="input" style={{ flex: 1, minWidth: 170 }} value={testDisposition}
             onChange={(e) => setTestDisposition(e.target.value as api.AutomatedCallDisposition)}>
+            <option value="answered">تم الرد</option>
             <option value="no_answer">لم يُرد خلال 15 ثانية</option>
             <option value="busy">مشغول</option>
             <option value="unreachable">مغلق أو خارج التغطية</option>

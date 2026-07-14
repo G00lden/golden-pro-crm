@@ -5,6 +5,7 @@ import { logError, logEvent } from "./logger";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
 import {
   AUTOMATION_DISPOSITIONS,
+  CUSTOMER_MESSAGE_DISPOSITIONS,
   companyMessage,
   isBusinessOpen,
   nextBusinessOpen,
@@ -19,6 +20,7 @@ export type CallAutomationConfig = BusinessSchedule & {
   follow_up_sla_min: number;
   whatsapp_in_hours: string;
   whatsapp_after_hours: string;
+  whatsapp_answered: string;
 };
 
 type CallRow = Record<string, unknown> & {
@@ -191,32 +193,43 @@ export function prepareCallAutomation(callId: string, config: CallAutomationConf
   let call = callById(callId);
   if (!call) return { prepared: false, reason: "unknown_call" };
   const disposition = String(call.disposition || "unknown") as CallDisposition;
-  if (!config.auto_reply_enabled || !AUTOMATION_DISPOSITIONS.has(disposition)) {
+  if (!config.auto_reply_enabled || !CUSTOMER_MESSAGE_DISPOSITIONS.has(disposition)) {
     db.prepare("UPDATE call_logs SET action_state = 'not_applicable', updated_at = ? WHERE id = ?")
       .run(nowIso(), call.id);
     return { prepared: false, reason: "disposition_not_automated", disposition };
   }
 
-  call = ensureAgent(call);
+  const needsFollowUp = AUTOMATION_DISPOSITIONS.has(disposition);
+  if (needsFollowUp) call = ensureAgent(call);
   const occurredAt = safeDate(call.occurred_at || call.created_at);
   const inHours = disposition !== "after_hours" && isBusinessOpen(config, occurredAt);
-  ensureFollowUpTask(call, config, inHours);
+  if (needsFollowUp) ensureFollowUpTask(call, config, inHours);
 
   const customerPhone = normalizePhone(call.from_phone);
   const customerBody = companyMessage(
-    inHours ? config.whatsapp_in_hours : config.whatsapp_after_hours,
+    disposition === "answered"
+      ? config.whatsapp_answered
+      : inHours ? config.whatsapp_in_hours : config.whatsapp_after_hours,
     config.company_name,
   );
   const cooled = customerActionInCooldown(call, config.reply_cooldown_min);
   const customerQueued = cooled ? false : queueAction(call, "customer_whatsapp", "customer", customerPhone, customerBody);
 
-  const alertPhone = normalizePhone(call.agent_phone || process.env.MANAGER_WHATSAPP_PHONE);
+  const alertPhone = needsFollowUp
+    ? normalizePhone(call.agent_phone || process.env.MANAGER_WHATSAPP_PHONE)
+    : "";
   const localTime = occurredAt.toLocaleString("ar-SA", { timeZone: config.timezone || "Asia/Riyadh" });
   const agentBody = `تنبيه: مكالمة ${disposition} من ${customerPhone || "رقم غير معروف"} بتاريخ ${localTime}. توجد مهمة متابعة في CRM.`;
-  const agentQueued = queueAction(call, "agent_whatsapp", "agent", alertPhone, agentBody);
+  const agentQueued = needsFollowUp
+    ? queueAction(call, "agent_whatsapp", "agent", alertPhone, agentBody)
+    : false;
 
   db.prepare("UPDATE call_logs SET action_state = ?, updated_at = ? WHERE id = ?")
-    .run(customerQueued || agentQueued ? "queued" : cooled ? "cooldown" : "task_created", nowIso(), call.id);
+    .run(
+      customerQueued || agentQueued ? "queued" : cooled ? "cooldown" : needsFollowUp ? "task_created" : "not_applicable",
+      nowIso(),
+      call.id,
+    );
   logEvent("info", "call.automation.prepared", {
     callId,
     disposition,
@@ -224,8 +237,9 @@ export function prepareCallAutomation(callId: string, config: CallAutomationConf
     cooled,
     customerQueued,
     agentQueued,
+    needsFollowUp,
   });
-  return { prepared: true, inHours, cooled, customerQueued, agentQueued };
+  return { prepared: true, inHours, cooled, customerQueued, agentQueued, needsFollowUp };
 }
 
 export async function drainCallActionQueue(

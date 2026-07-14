@@ -44,7 +44,7 @@ import {
 } from "./validation";
 import { logError } from "./logger";
 import { drainCallActionQueue, listCallActions, prepareCallAutomation } from "./callAutomation";
-import type { CallDisposition } from "./callPolicy";
+import { AUTOMATION_DISPOSITIONS, type CallDisposition } from "./callPolicy";
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -308,7 +308,7 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
         agent_name: agent?.name || null,
         status: disposition,
         disposition,
-        missed: 1,
+        missed: AUTOMATION_DISPOSITIONS.has(disposition) ? 1 : 0,
       });
       const prepared = prepareCallAutomation(call.id, getTelephonyConfig(ownerUid));
       const drained = await drainCallActionQueue(ownerUid);

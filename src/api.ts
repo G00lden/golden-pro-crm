@@ -3496,6 +3496,7 @@ export type TelephonyConfig = {
   voice_after_hours: string;
   whatsapp_in_hours: string;
   whatsapp_after_hours: string;
+  whatsapp_answered: string;
   enabled: boolean;
 };
 
@@ -3568,7 +3569,7 @@ export type CallStats = { missed_unhandled: number; missed_today: number; total_
 
 export const getCallStats = () => apiFetch<CallStats>("/api/telephony/calls/summary");
 
-export type AutomatedCallDisposition = "no_answer" | "busy" | "unreachable" | "rejected" | "after_hours";
+export type AutomatedCallDisposition = "answered" | "no_answer" | "busy" | "unreachable" | "rejected" | "after_hours";
 
 export const testMissedCall = (data: { from_phone: string; disposition?: AutomatedCallDisposition; digit?: string; department_id?: string }) =>
   apiFetch<{ success: boolean; callSid: string; disposition: AutomatedCallDisposition; department: string | null; prepared: unknown; drained: unknown }>(

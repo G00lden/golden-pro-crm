@@ -557,6 +557,7 @@ db.exec(`
     voice_after_hours TEXT DEFAULT '',
     whatsapp_in_hours TEXT DEFAULT '',
     whatsapp_after_hours TEXT DEFAULT '',
+    whatsapp_answered TEXT DEFAULT '',
     enabled INTEGER DEFAULT 1,
     updated_at TEXT DEFAULT (datetime('now'))
   );
@@ -687,6 +688,23 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
 
+  -- Caller contacts captured by CRM/Unifonic and waiting to be saved on the
+  -- company Android phone. This covers calls received while the phone is off.
+  CREATE TABLE IF NOT EXISTS gateway_contact_outbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    customer_id TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    saved_at TEXT,
+    UNIQUE(owner_uid, customer_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_contact_pending
+    ON gateway_contact_outbox(owner_uid, status, created_at);
+
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
@@ -704,6 +722,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
   CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(tap_charge_id);
+`);
+
+// Backfill caller contacts created before Android contact synchronization was
+// introduced. The unique owner/customer constraint keeps this idempotent.
+db.exec(`
+  INSERT OR IGNORE INTO gateway_contact_outbox
+    (id, owner_uid, customer_id, phone, name, status, created_at)
+  SELECT 'gct_' || lower(hex(randomblob(10))), owner_uid, id, phone, name, 'pending', created_at
+  FROM customers
+  WHERE source = 'phone_call' AND phone <> ''
 `);
 
 // Post-schema column migrations. These run AFTER the main schema block above,
@@ -802,6 +830,7 @@ for (const col of [
   ["voice_after_hours", "TEXT DEFAULT ''"],
   ["whatsapp_in_hours", "TEXT DEFAULT ''"],
   ["whatsapp_after_hours", "TEXT DEFAULT ''"],
+  ["whatsapp_answered", "TEXT DEFAULT ''"],
 ] as const) {
   if (!hasColumn("telephony_config", col[0])) {
     db.exec(`ALTER TABLE telephony_config ADD COLUMN ${col[0]} ${col[1]}`);
