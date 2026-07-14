@@ -20,11 +20,23 @@ import type {
   NormalizedCallStatus,
   NormalizedInboundCall,
 } from "./telephony/types";
-import { sendWhatsAppTemplate } from "./whatsapp";
 import { logError, logEvent } from "./logger";
+import { drainCallActionQueue, prepareCallAutomation, type CallAutomationConfig } from "./callAutomation";
+import {
+  AUTOMATION_DISPOSITIONS,
+  CUSTOMER_MESSAGE_DISPOSITIONS,
+  companyMessage,
+  isBusinessOpen,
+  type CallDisposition,
+} from "./callPolicy";
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Breexe Pro";
-const DEFAULT_RING_TIMEOUT = Number(process.env.TELEPHONY_RING_TIMEOUT_SEC || 20);
+const DEFAULT_RING_TIMEOUT = Number(process.env.TELEPHONY_RING_TIMEOUT_SEC || 15);
+const DEFAULT_VOICE_IN_HOURS = "شكرًا لاتصالك. يتعذر علينا الرد الآن. ستصلك رسالة على واتساب، وسنتواصل معك في أقرب فرصة.";
+const DEFAULT_VOICE_AFTER_HOURS = "شكرًا لاتصالك بـ{اسم الشركة}. نحن خارج أوقات الدوام حاليًا. ستصلك رسالة على واتساب الآن، وسنتواصل معك في أقرب فرصة.";
+const DEFAULT_WHATSAPP_IN_HOURS = "شكرًا لاتصالك بـ{اسم الشركة}. تعذر علينا الرد الآن. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.";
+const DEFAULT_WHATSAPP_AFTER_HOURS = "شكرًا لاتصالك بـ{اسم الشركة}. نحن خارج أوقات الدوام حاليًا. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.";
+const DEFAULT_WHATSAPP_ANSWERED = "شكرًا لاتصالك بـ{اسم الشركة}. تم الرد على مكالمتك، ويمكنك إرسال أي تفاصيل إضافية هنا عبر واتساب.";
 
 // ── ids / time ──────────────────────────────────────────────────────────────
 function newId(prefix: string) {
@@ -44,13 +56,16 @@ function normalizeDialNumber(phone: string): string {
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
-export type TelephonyConfig = {
+export type TelephonyConfig = CallAutomationConfig & {
   owner_uid: string;
   provider: string;
   main_number: string;
+  call_flow_mode: "unavailable_reply" | "menu";
   greeting: string;
   menu_prompt: string;
   ring_timeout_sec: number;
+  voice_in_hours: string;
+  voice_after_hours: string;
   enabled: boolean;
 };
 
@@ -83,13 +98,37 @@ export function getTelephonyConfig(ownerUid: string): TelephonyConfig {
   const row = db
     .prepare("SELECT * FROM telephony_config WHERE owner_uid = ?")
     .get(ownerUid) as Record<string, unknown> | undefined;
+  let businessDays = [6, 0, 1, 2, 3, 4];
+  try {
+    const parsed = JSON.parse(String(row?.business_days || "[6,0,1,2,3,4]"));
+    if (Array.isArray(parsed)) {
+      const validDays = parsed.map(Number).filter((day) => day >= 0 && day <= 6);
+      if (validDays.length) businessDays = validDays;
+    }
+  } catch {
+    // Keep the commercial default schedule.
+  }
   return {
     owner_uid: ownerUid,
     provider: (row?.provider as string) || process.env.TELEPHONY_PROVIDER || "unifonic",
     main_number: (row?.main_number as string) || process.env.TELEPHONY_MAIN_NUMBER || "",
+    company_name: (row?.company_name as string) || process.env.COMPANY_NAME || COMPANY_NAME,
+    call_flow_mode: row?.call_flow_mode === "menu" ? "menu" : "unavailable_reply",
     greeting: (row?.greeting as string) || "",
     menu_prompt: (row?.menu_prompt as string) || "",
     ring_timeout_sec: Number(row?.ring_timeout_sec || DEFAULT_RING_TIMEOUT),
+    timezone: (row?.timezone as string) || process.env.APP_TIMEZONE || "Asia/Riyadh",
+    business_days: businessDays,
+    business_open: (row?.business_open as string) || "08:00",
+    business_close: (row?.business_close as string) || "21:00",
+    auto_reply_enabled: row ? row.auto_reply_enabled !== 0 : true,
+    reply_cooldown_min: Number(row?.reply_cooldown_min ?? 10),
+    follow_up_sla_min: Number(row?.follow_up_sla_min ?? 5),
+    voice_in_hours: (row?.voice_in_hours as string) || DEFAULT_VOICE_IN_HOURS,
+    voice_after_hours: (row?.voice_after_hours as string) || DEFAULT_VOICE_AFTER_HOURS,
+    whatsapp_in_hours: (row?.whatsapp_in_hours as string) || DEFAULT_WHATSAPP_IN_HOURS,
+    whatsapp_after_hours: (row?.whatsapp_after_hours as string) || DEFAULT_WHATSAPP_AFTER_HOURS,
+    whatsapp_answered: (row?.whatsapp_answered as string) || DEFAULT_WHATSAPP_ANSWERED,
     enabled: row ? row.enabled === 1 : true,
   };
 }
@@ -101,22 +140,54 @@ export function upsertTelephonyConfig(
   const current = getTelephonyConfig(ownerUid);
   const next = { ...current, ...patch };
   db.prepare(
-    `INSERT INTO telephony_config (owner_uid, provider, main_number, greeting, menu_prompt, ring_timeout_sec, enabled, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO telephony_config
+      (owner_uid, provider, main_number, company_name, call_flow_mode, greeting, menu_prompt,
+       ring_timeout_sec, timezone, business_days, business_open, business_close,
+       auto_reply_enabled, reply_cooldown_min, follow_up_sla_min, voice_in_hours,
+       voice_after_hours, whatsapp_in_hours, whatsapp_after_hours, whatsapp_answered, enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(owner_uid) DO UPDATE SET
        main_number = excluded.main_number,
+       company_name = excluded.company_name,
+       call_flow_mode = excluded.call_flow_mode,
        greeting = excluded.greeting,
        menu_prompt = excluded.menu_prompt,
        ring_timeout_sec = excluded.ring_timeout_sec,
+       timezone = excluded.timezone,
+       business_days = excluded.business_days,
+       business_open = excluded.business_open,
+       business_close = excluded.business_close,
+       auto_reply_enabled = excluded.auto_reply_enabled,
+       reply_cooldown_min = excluded.reply_cooldown_min,
+       follow_up_sla_min = excluded.follow_up_sla_min,
+       voice_in_hours = excluded.voice_in_hours,
+       voice_after_hours = excluded.voice_after_hours,
+       whatsapp_in_hours = excluded.whatsapp_in_hours,
+       whatsapp_after_hours = excluded.whatsapp_after_hours,
+       whatsapp_answered = excluded.whatsapp_answered,
        enabled = excluded.enabled,
        updated_at = excluded.updated_at`,
   ).run(
     ownerUid,
     next.provider,
     next.main_number,
+    next.company_name,
+    next.call_flow_mode,
     next.greeting,
     next.menu_prompt,
     next.ring_timeout_sec,
+    next.timezone,
+    JSON.stringify(next.business_days),
+    next.business_open,
+    next.business_close,
+    next.auto_reply_enabled ? 1 : 0,
+    next.reply_cooldown_min,
+    next.follow_up_sla_min,
+    next.voice_in_hours,
+    next.voice_after_hours,
+    next.whatsapp_in_hours,
+    next.whatsapp_after_hours,
+    next.whatsapp_answered,
     next.enabled ? 1 : 0,
     nowIso(),
   );
@@ -333,6 +404,40 @@ export function findCustomerByPhone(ownerUid: string, phone: string): { id: stri
   return row ? { id: row.id, name: row.name || "" } : null;
 }
 
+/** Create a CRM contact for a confirmed inbound caller, without duplicates. */
+export function ensureCustomerContact(
+  ownerUid: string,
+  phone: string,
+  disposition: CallDisposition = "unknown",
+): { id: string; name: string } | null {
+  const existing = findCustomerByPhone(ownerUid, phone);
+  if (existing) return existing;
+  if (disposition === "blocked" || disposition === "outgoing") return null;
+  const normalized = normalizeDialNumber(phone);
+  if (normalized.length < 8) return null;
+  const id = newId("cust");
+  const name = `متصل ${normalized.slice(-4)}`;
+  const now = nowIso();
+  db.prepare(
+    `INSERT INTO customers (id, owner_uid, name, phone, source, notes, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'phone_call', ?, ?, ?)`,
+  ).run(
+    id,
+    ownerUid,
+    name,
+    `+${normalized}`,
+    "أضيف تلقائيًا من مكالمة واردة. يمكن تعديل الاسم من جهات اتصال CRM.",
+    now,
+    now,
+  );
+  db.prepare(
+    `INSERT OR IGNORE INTO gateway_contact_outbox
+      (id, owner_uid, customer_id, phone, name, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+  ).run(newId("gct"), ownerUid, id, `+${normalized}`, name, now);
+  return { id, name };
+}
+
 export function recordCall(input: {
   ownerUid: string;
   provider: string;
@@ -340,22 +445,83 @@ export function recordCall(input: {
   from: string;
   to: string;
   status?: string;
+  eventId?: string;
+  source?: string;
+  direction?: "incoming" | "outgoing";
+  disposition?: CallDisposition;
+  durationSeconds?: number;
+  occurredAt?: string;
+  phoneAccountId?: string;
+  metadata?: Record<string, unknown>;
 }): CallLog {
+  if (input.eventId) {
+    const duplicate = db.prepare("SELECT id FROM call_logs WHERE owner_uid = ? AND event_id = ? LIMIT 1")
+      .get(input.ownerUid, input.eventId) as { id: string } | undefined;
+    if (duplicate) return { id: duplicate.id };
+  }
+  if (input.callSid) {
+    const duplicate = db.prepare("SELECT id FROM call_logs WHERE owner_uid = ? AND call_sid = ? ORDER BY created_at DESC LIMIT 1")
+      .get(input.ownerUid, input.callSid) as { id: string } | undefined;
+    if (duplicate) return { id: duplicate.id };
+  }
+
+  const occurredAt = input.occurredAt || nowIso();
+  const source = input.source || input.provider || "unknown";
+  const tail = normalizeDialNumber(input.from).slice(-9);
+  if (tail) {
+    const nearby = db.prepare(
+      `SELECT id FROM call_logs
+       WHERE owner_uid = ? AND from_phone LIKE ? AND IFNULL(source, '') <> ?
+         AND ABS(strftime('%s', COALESCE(occurred_at, created_at)) - strftime('%s', ?)) <= 90
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get(input.ownerUid, `%${tail}`, source, occurredAt) as { id: string } | undefined;
+    if (nearby) {
+      db.prepare(
+        `UPDATE call_logs SET call_sid = COALESCE(NULLIF(call_sid, ''), ?),
+         event_id = COALESCE(event_id, ?), source = ?, provider = ?,
+         metadata = COALESCE(metadata, ?), updated_at = ? WHERE id = ?`,
+      ).run(
+        input.callSid || null,
+        input.eventId || null,
+        `${source}+merged`,
+        input.provider,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        nowIso(),
+        nearby.id,
+      );
+      return { id: nearby.id };
+    }
+  }
+
   const id = newId("call");
-  const customer = findCustomerByPhone(input.ownerUid, input.from);
+  const direction = input.direction || "incoming";
+  const disposition = input.disposition || "unknown";
+  const customer = findCustomerByPhone(input.ownerUid, input.from)
+    || (direction === "incoming" ? ensureCustomerContact(input.ownerUid, input.from, disposition) : null);
   db.prepare(
-    `INSERT INTO call_logs (id, owner_uid, provider, call_sid, from_phone, to_phone, status, customer_id, customer_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO call_logs
+      (id, owner_uid, provider, event_id, call_sid, source, direction, disposition,
+       from_phone, to_phone, status, duration_sec, occurred_at, phone_account_id,
+       customer_id, customer_name, metadata, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.ownerUid,
     input.provider,
+    input.eventId || null,
     input.callSid || null,
+    source,
+    direction,
+    disposition,
     input.from || null,
     input.to || null,
     input.status || "menu",
+    input.durationSeconds || 0,
+    occurredAt,
+    input.phoneAccountId || null,
     customer?.id || null,
     customer?.name || null,
+    input.metadata ? JSON.stringify(input.metadata) : null,
     nowIso(),
     nowIso(),
   );
@@ -388,11 +554,18 @@ export function findUnhandledCallForAgent(ownerUid: string, agentPhone: string):
 
 /** Mark a call as handled (resolved follow-up). `by` is 'agent' or a user id. */
 export function markCallHandled(ownerUid: string, callId: string, by: string): boolean {
+  const call = db.prepare("SELECT follow_up_task_id FROM call_logs WHERE owner_uid = ? AND id = ?")
+    .get(ownerUid, callId) as { follow_up_task_id?: string } | undefined;
   const res = db
     .prepare(
       "UPDATE call_logs SET handled = 1, handled_at = ?, handled_by = ?, status = 'handled', updated_at = ? WHERE owner_uid = ? AND id = ?",
     )
     .run(nowIso(), by, nowIso(), ownerUid, callId);
+  if (res.changes > 0 && call?.follow_up_task_id) {
+    db.prepare(
+      "UPDATE crm_tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE owner_uid = ? AND id = ?",
+    ).run(nowIso(), nowIso(), ownerUid, call.follow_up_task_id);
+  }
   return res.changes > 0;
 }
 
@@ -413,6 +586,18 @@ export function updateCallBySid(callSid: string, fields: Record<string, unknown>
     ...keys.map((k) => fields[k]),
     nowIso(),
     callSid,
+  );
+}
+
+export function updateCallById(callId: string, fields: Record<string, unknown>) {
+  if (!callId) return;
+  const keys = Object.keys(fields);
+  if (keys.length === 0) return;
+  const set = keys.map((key) => `${key} = ?`).join(", ");
+  db.prepare(`UPDATE call_logs SET ${set}, updated_at = ? WHERE id = ?`).run(
+    ...keys.map((key) => fields[key]),
+    nowIso(),
+    callId,
   );
 }
 
@@ -462,6 +647,62 @@ export function buildMenuText(ownerUid: string): { greeting: string; prompt: str
 /** Instructions for a fresh inbound call: greet, then gather one digit. */
 export function buildGreeting(ownerUid: string, call: NormalizedInboundCall, baseUrl: string): IvrInstruction[] {
   const config = getTelephonyConfig(ownerUid);
+
+  if (!config.enabled) {
+    const callSid = call.callSid || `unifonic_${crypto.randomUUID().slice(0, 18)}`;
+    recordCall({
+      ownerUid,
+      provider: config.provider,
+      callSid,
+      from: call.from,
+      to: call.to || config.main_number,
+      status: "unknown",
+      source: "unifonic",
+      disposition: "unknown",
+      occurredAt: nowIso(),
+      metadata: call.raw,
+    });
+    return [
+      { action: "say", text: "شكرًا لاتصالك. يتعذر علينا الرد حاليًا. يرجى المحاولة لاحقًا.", language: "ar" },
+      { action: "hangup" },
+    ];
+  }
+
+  // The advertised Zain line forwards only unavailable calls here. In this
+  // mode Unifonic plays one short message, queues the CRM/WhatsApp follow-up,
+  // and ends the call without a keypad menu.
+  if (config.call_flow_mode === "unavailable_reply") {
+    const occurredAt = nowIso();
+    const inHours = isBusinessOpen(config, new Date(occurredAt));
+    const disposition: CallDisposition = inHours ? "no_answer" : "after_hours";
+    const callSid = call.callSid || `unifonic_${crypto.randomUUID().slice(0, 18)}`;
+    const recorded = recordCall({
+      ownerUid,
+      provider: config.provider,
+      callSid,
+      from: call.from,
+      to: call.to || config.main_number,
+      status: disposition,
+      source: "unifonic",
+      direction: "incoming",
+      disposition,
+      occurredAt,
+      metadata: call.raw,
+    });
+    updateCallById(recorded.id, { status: disposition, disposition, missed: 1, ended_at: occurredAt });
+    prepareCallAutomation(recorded.id, config);
+    void drainCallActionQueue(ownerUid).catch((error) => logError("call.automation.initial_drain_failed", error));
+
+    const voice = companyMessage(
+      inHours ? config.voice_in_hours : config.voice_after_hours,
+      config.company_name,
+    );
+    return [
+      { action: "say", text: voice, language: "ar" },
+      { action: "hangup" },
+    ];
+  }
+
   const { greeting, prompt } = buildMenuText(ownerUid);
 
   // Record the call so the status webhook can correlate it later.
@@ -578,27 +819,79 @@ export function handleDigit(ownerUid: string, call: NormalizedInboundCall, baseU
  * Status webhook entry point. Returns a short summary for logging. On a
  * not-connected outcome it triggers the missed-call WhatsApp flow.
  */
-export async function handleCallStatus(status: NormalizedCallStatus): Promise<Record<string, unknown>> {
-  const call = getCallBySid(status.callSid);
-  if (!call) {
-    return { handled: false, reason: "unknown_call_sid", callSid: status.callSid };
+export async function handleCallStatus(
+  ownerUid: string,
+  status: NormalizedCallStatus,
+): Promise<Record<string, unknown>> {
+  if (status.eventId) {
+    const duplicate = db.prepare("SELECT call_id FROM call_status_events WHERE owner_uid = ? AND event_id = ?")
+      .get(ownerUid, status.eventId) as { call_id?: string } | undefined;
+    if (duplicate) return { handled: true, duplicate: true, callId: duplicate.call_id || null };
   }
 
-  const missedStatuses: NormalizedCallStatus["status"][] = ["no_answer", "busy", "failed", "voicemail"];
-  const isMissed = missedStatuses.includes(status.status);
+  let call = status.callSid ? getCallBySid(status.callSid) : null;
+  if (!call && status.from) {
+    const tail = normalizeDialNumber(status.from).slice(-9);
+    call = db.prepare(
+      `SELECT * FROM call_logs WHERE owner_uid = ? AND from_phone LIKE ?
+       AND created_at >= ? ORDER BY created_at DESC LIMIT 1`,
+    ).get(ownerUid, `%${tail}`, new Date(Date.now() - 15 * 60_000).toISOString()) as Record<string, unknown> | undefined || null;
+  }
+  if (!call) {
+    const config = getTelephonyConfig(ownerUid);
+    const generatedSid = status.callSid || `unifonic_${crypto.randomUUID().slice(0, 18)}`;
+    const recorded = recordCall({
+      ownerUid,
+      provider: config.provider,
+      callSid: generatedSid,
+      from: status.from || "",
+      to: status.to || config.main_number,
+      status: status.status,
+      source: "unifonic",
+      disposition: status.status === "ringing" || status.status === "in_progress" ? "unknown" : status.status,
+      durationSeconds: status.durationSec,
+      occurredAt: status.occurredAt,
+      metadata: status.raw,
+    });
+    call = db.prepare("SELECT * FROM call_logs WHERE id = ?").get(recorded.id) as Record<string, unknown>;
+  }
 
-  updateCallBySid(status.callSid, {
-    status: status.status,
+  const callId = String(call.id);
+  if (status.eventId) {
+    db.prepare(
+      `INSERT OR IGNORE INTO call_status_events (id, owner_uid, event_id, call_id, status, occurred_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(newId("cse"), ownerUid, status.eventId, callId, status.status, status.occurredAt || nowIso(), nowIso());
+  }
+
+  if (status.status === "ringing" || status.status === "in_progress") {
+    updateCallById(callId, { status: status.status, duration_sec: status.durationSec ?? Number(call.duration_sec || 0) });
+    return { handled: true, missed: false, status: status.status, callId };
+  }
+
+  const previousDisposition = String(call.disposition || "unknown") as CallDisposition;
+  const unavailableReplyAlreadyStarted =
+    AUTOMATION_DISPOSITIONS.has(previousDisposition) && String(call.action_state || "none") !== "none";
+  const disposition = unavailableReplyAlreadyStarted && status.status === "answered"
+    ? previousDisposition
+    : status.status;
+  const isMissed = AUTOMATION_DISPOSITIONS.has(disposition as CallDisposition);
+  updateCallById(callId, {
+    status: disposition,
+    disposition,
     duration_sec: status.durationSec ?? Number(call.duration_sec || 0),
+    occurred_at: status.occurredAt || call.occurred_at || call.created_at,
     ended_at: nowIso(),
     missed: isMissed ? 1 : 0,
   });
 
-  if (isMissed) {
-    const result = await runMissedCallFlow(status.callSid);
-    return { handled: true, missed: true, ...result };
+  if (CUSTOMER_MESSAGE_DISPOSITIONS.has(disposition as CallDisposition)) {
+    const config = getTelephonyConfig(ownerUid);
+    const prepared = prepareCallAutomation(callId, config);
+    const drained = await drainCallActionQueue(ownerUid);
+    return { handled: true, missed: isMissed, disposition, callId, prepared, drained };
   }
-  return { handled: true, missed: false, status: status.status };
+  return { handled: true, missed: false, disposition, callId };
 }
 
 // ── Missed-call WhatsApp flow ─────────────────────────────────────────────────
@@ -609,57 +902,13 @@ export async function handleCallStatus(status: NormalizedCallStatus): Promise<Re
 export async function runMissedCallFlow(callSid: string): Promise<Record<string, unknown>> {
   const call = getCallBySid(callSid);
   if (!call) return { sent: false, reason: "unknown_call" };
-
   const ownerUid = String(call.owner_uid || "");
-  const customerPhone = String(call.from_phone || "");
-  const agentPhone = String(call.agent_phone || "");
-  const departmentName = String(call.department_name || "");
-  const agentName = String(call.agent_name || "");
-  const callTime = new Date(String(call.created_at || nowIso())).toLocaleString("ar-SA", {
-    timeZone: process.env.APP_TIMEZONE || "Asia/Riyadh",
-  });
-
-  const out: Record<string, unknown> = { sent: true, customer: false, agent: false };
-
-  // 1) Apology to the customer.
-  if (customerPhone && Number(call.wa_customer_notified || 0) === 0) {
-    try {
-      await sendWhatsAppTemplate({
-        phone: customerPhone,
-        template: "missed_call_customer",
-        vars: { department_name: departmentName || "خدمة العملاء", agent_name: agentName || "أحد موظفينا" },
-        owner_uid: ownerUid,
-      });
-      updateCallBySid(callSid, { wa_customer_notified: 1 });
-      out.customer = true;
-    } catch (err) {
-      logError("ivr.missed_call.customer_wa_failed", err);
-    }
-  }
-
-  // 2) Call-back alert to the agent.
-  if (agentPhone && Number(call.wa_agent_notified || 0) === 0) {
-    try {
-      await sendWhatsAppTemplate({
-        phone: agentPhone,
-        template: "missed_call_agent",
-        // Show the agent a canonical number (966… for local; genuine
-        // international numbers are left intact) instead of the raw provider form.
-        vars: { department_name: departmentName || "-", customer_phone: (customerPhone && normalizeDialNumber(customerPhone)) || "-", call_time: callTime },
-        owner_uid: ownerUid,
-      });
-      updateCallBySid(callSid, { wa_agent_notified: 1 });
-      out.agent = true;
-    } catch (err) {
-      logError("ivr.missed_call.agent_wa_failed", err);
-    }
-  }
-
-  logEvent("info", "ivr.missed_call.handled", {
-    callSid,
-    customer: out.customer,
-    agent: out.agent,
-    department: departmentName,
-  });
-  return out;
+  const config = getTelephonyConfig(ownerUid);
+  const current = String(call.disposition || "unknown") as CallDisposition;
+  const disposition = AUTOMATION_DISPOSITIONS.has(current) ? current : "no_answer";
+  updateCallById(String(call.id), { status: disposition, disposition, missed: 1, ended_at: nowIso() });
+  const prepared = prepareCallAutomation(String(call.id), config);
+  const drained = await drainCallActionQueue(ownerUid);
+  logEvent("info", "ivr.missed_call.handled", { callSid, disposition, prepared, drained });
+  return { sent: true, disposition, prepared, drained };
 }

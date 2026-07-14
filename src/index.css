@@ -994,6 +994,24 @@ main {
   border-radius: 8px;
   cursor: pointer;
   font-weight: 800;
+  touch-action: manipulation;
+  transition: filter 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+
+.btn:not(:disabled):hover,
+.icon-btn:not(:disabled):hover {
+  filter: brightness(1.08);
+}
+
+.btn:not(:disabled):active,
+.icon-btn:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.btn:focus-visible,
+.icon-btn:focus-visible {
+  outline: 3px solid rgba(201, 164, 122, 0.42);
+  outline-offset: 2px;
 }
 
 .btn {
@@ -1103,6 +1121,17 @@ main {
   place-items: center;
   padding: 18px;
   background: rgba(0, 0, 0, 0.68);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 .modal {

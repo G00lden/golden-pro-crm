@@ -32,6 +32,7 @@ import type {
   NormalizedInboundCall,
   TelephonyAdapter,
 } from "./types";
+import { normalizeDisposition } from "../callPolicy";
 
 type AnyRecord = Record<string, unknown>;
 
@@ -74,14 +75,27 @@ const F = {
   digit: ["digits", "Digits", "digit", "dtmf", "input"],
   status: ["status", "Status", "callStatus", "CallStatus", "dialStatus", "DialCallStatus", "result", "event"],
   duration: ["duration", "Duration", "callDuration", "durationSec", "seconds"],
-  callSid: ["callSid", "CallSid", "callId", "sessionId", "id"],
+  callSid: ["callSid", "CallSid", "callId", "sessionId", "uniqueCallId", "externalCallsId", "referenceId", "id"],
+  eventId: ["eventId", "EventId", "webhookId", "statusId"],
+  reason: ["failureReason", "FailureReason", "reason", "Reason", "hangupCause", "errorMessage"],
+  occurredAt: ["occurredAt", "completedAt", "requestReceivedAt", "initiatedAt", "timestamp", "Timestamp", "eventTime", "createdAt"],
 } as const;
 
 function correlationId(src: AnyRecord): string {
   const explicit = pick(src, [...F.callSid]);
   if (explicit) return explicit;
-  const caller = normalizeDigits(pick(src, [...F.caller]));
-  return caller ? `caller:${caller}` : "";
+  return "";
+}
+
+function normalizeTimestamp(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (/^\d{10,13}$/.test(value)) {
+    const numeric = Number(value);
+    const date = new Date(value.length === 10 ? numeric * 1000 : numeric);
+    return Number.isNaN(date.getTime()) ? value : date.toISOString();
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toISOString();
 }
 
 function normalizeStatus(raw: string | undefined): NormalizedCallStatus["status"] {
@@ -89,9 +103,10 @@ function normalizeStatus(raw: string | undefined): NormalizedCallStatus["status"
   if (!s) return "unknown";
   if (["noanswer", "noreply", "unanswered", "timeout", "notanswered", "missed"].includes(s)) return "no_answer";
   if (["busy"].includes(s)) return "busy";
-  if (["failed", "error", "rejected", "canceled", "cancelled", "declined"].includes(s)) return "failed";
-  if (["voicemail", "machine", "answeringmachine"].includes(s)) return "voicemail";
-  if (["completed", "answered", "complete", "ended", "hangup", "success"].includes(s)) return "completed";
+  if (["rejected", "canceled", "cancelled", "declined"].includes(s)) return "rejected";
+  if (["unreachable", "unavailable", "outofcoverage", "notreachable", "poweredoff"].includes(s)) return "unreachable";
+  if (["voicemail", "machine", "answeringmachine"].includes(s)) return "no_answer";
+  if (["completed", "answered", "complete", "ended", "hangup", "success"].includes(s)) return "answered";
   if (["inprogress", "ongoing", "bridged", "connected", "transferred"].includes(s)) return "in_progress";
   if (["ringing", "initiated", "started", "queued"].includes(s)) return "ringing";
   return "unknown";
@@ -114,12 +129,21 @@ export const unifonicAdapter: TelephonyAdapter = {
   parseStatus(body: AnyRecord = {}, query: AnyRecord = {}): NormalizedCallStatus {
     const src: AnyRecord = { ...query, ...body };
     const durationRaw = pick(src, [...F.duration]);
+    const rawStatus = pick(src, [...F.status]);
+    const lifecycle = normalizeStatus(rawStatus);
+    const disposition = lifecycle === "unknown"
+      ? normalizeDisposition(rawStatus, pick(src, [...F.reason]))
+      : lifecycle;
+    const callSid = correlationId(src);
+    const occurredAt = normalizeTimestamp(pick(src, [...F.occurredAt]));
     return {
-      callSid: correlationId(src),
+      eventId: pick(src, [...F.eventId]) || (callSid ? `${callSid}:${rawStatus || "unknown"}:${occurredAt || "final"}` : undefined),
+      callSid,
       from: pick(src, [...F.caller]),
       to: pick(src, [...F.recipient]),
-      status: normalizeStatus(pick(src, [...F.status])),
+      status: disposition,
       durationSec: durationRaw ? Number(durationRaw) || 0 : undefined,
+      occurredAt,
       raw: src,
     };
   },

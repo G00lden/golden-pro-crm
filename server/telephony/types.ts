@@ -49,6 +49,7 @@ export type NormalizedInboundCall = {
 
 /** Normalized call-status callback (used to detect missed calls). */
 export type NormalizedCallStatus = {
+  eventId?: string;
   callSid: string;
   from?: string;
   to?: string;
@@ -56,13 +57,17 @@ export type NormalizedCallStatus = {
   status:
     | "ringing"
     | "in_progress"
-    | "completed"
+    | "answered"
     | "no_answer"
     | "busy"
-    | "failed"
-    | "voicemail"
+    | "unreachable"
+    | "rejected"
+    | "after_hours"
+    | "blocked"
+    | "outgoing"
     | "unknown";
   durationSec?: number;
+  occurredAt?: string;
   raw: Record<string, unknown>;
 };
 

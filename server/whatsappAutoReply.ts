@@ -4,12 +4,14 @@
  * Kept separate so whatsapp.ts stays free of any dependency on the gateway
  * engine (this module imports both and breaks the cycle).
  *
- * - Unanswered WhatsApp call → missed-call flow → WhatsApp reply to the caller.
- * - Inbound WhatsApp text → recorded + routed (e.g. caller replies a digit).
+ * WhatsApp calls are intentionally ignored: cellular events come only from
+ * Unifonic or the Android gateway. Inbound WhatsApp text is recorded and tied
+ * back to the latest cellular follow-up task.
  */
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
-import { handleGatewayEvent } from "./gateway";
+import { drainCallActionQueue, handleCustomerWhatsAppReply } from "./callAutomation";
 import { logError, logEvent } from "./logger";
+import { findUnhandledCallForAgent, isAgentAck, markCallHandled } from "./ivrEngine";
 
 let initialized = false;
 
@@ -17,12 +19,12 @@ export function initWhatsAppAutoReply(ownerUid: () => string) {
   if (initialized) return;
   initialized = true;
 
-  whatsappService.onIncomingCall(async (fromPhone) => {
+  whatsappService.onConnected(async () => {
     try {
-      logEvent("info", "whatsapp.incoming_call_missed", { from: fromPhone });
-      await handleGatewayEvent(ownerUid(), { type: "missed_call", from: fromPhone, to: "whatsapp" });
+      const result = await drainCallActionQueue(ownerUid(), 50, true);
+      logEvent("info", "call.automation.queue_resumed", result);
     } catch (err) {
-      logError("whatsapp.incoming_call_handler_failed", err);
+      logError("call.automation.queue_resume_failed", err);
     }
   });
 
@@ -38,7 +40,12 @@ export function initWhatsAppAutoReply(ownerUid: () => string) {
         owner_uid: ownerUid(),
         metadata: { channel: "whatsapp", source: "baileys" },
       });
-      await handleGatewayEvent(ownerUid(), { type: "sms_in", from: fromPhone, text });
+      if (isAgentAck(text)) {
+        const call = findUnhandledCallForAgent(ownerUid(), fromPhone);
+        if (call?.id) markCallHandled(ownerUid(), String(call.id), "agent");
+      } else {
+        handleCustomerWhatsAppReply(ownerUid(), fromPhone, text);
+      }
     } catch (err) {
       logError("whatsapp.inbound_message_handler_failed", err);
     }

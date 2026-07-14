@@ -541,9 +541,23 @@ db.exec(`
     owner_uid TEXT PRIMARY KEY,
     provider TEXT DEFAULT 'unifonic',
     main_number TEXT DEFAULT '',
+    company_name TEXT DEFAULT '',
+    call_flow_mode TEXT DEFAULT 'unavailable_reply',
     greeting TEXT DEFAULT '',
     menu_prompt TEXT DEFAULT '',
-    ring_timeout_sec INTEGER DEFAULT 20,
+    ring_timeout_sec INTEGER DEFAULT 15,
+    timezone TEXT DEFAULT 'Asia/Riyadh',
+    business_days TEXT DEFAULT '[6,0,1,2,3,4]',
+    business_open TEXT DEFAULT '08:00',
+    business_close TEXT DEFAULT '21:00',
+    auto_reply_enabled INTEGER DEFAULT 1,
+    reply_cooldown_min INTEGER DEFAULT 10,
+    follow_up_sla_min INTEGER DEFAULT 5,
+    voice_in_hours TEXT DEFAULT '',
+    voice_after_hours TEXT DEFAULT '',
+    whatsapp_in_hours TEXT DEFAULT '',
+    whatsapp_after_hours TEXT DEFAULT '',
+    whatsapp_answered TEXT DEFAULT '',
     enabled INTEGER DEFAULT 1,
     updated_at TEXT DEFAULT (datetime('now'))
   );
@@ -587,7 +601,11 @@ db.exec(`
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
     provider TEXT DEFAULT 'unifonic',
+    event_id TEXT,
     call_sid TEXT,
+    source TEXT DEFAULT 'unifonic',
+    direction TEXT DEFAULT 'incoming',
+    disposition TEXT DEFAULT 'unknown',
     from_phone TEXT,
     to_phone TEXT,
     department_id TEXT,
@@ -603,6 +621,11 @@ db.exec(`
     forwarded_at TEXT,
     ended_at TEXT,
     duration_sec INTEGER DEFAULT 0,
+    occurred_at TEXT,
+    phone_account_id TEXT,
+    action_state TEXT DEFAULT 'none',
+    follow_up_task_id TEXT,
+    last_customer_reply_at TEXT,
     metadata TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
@@ -610,6 +633,41 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_call_logs_owner ON call_logs(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_call_logs_sid ON call_logs(call_sid);
   CREATE INDEX IF NOT EXISTS idx_call_logs_missed ON call_logs(owner_uid, missed, created_at DESC);
+
+  -- Durable WhatsApp actions generated from a cellular call. Pending rows stay
+  -- queued while WhatsApp Web is disconnected and are retried after reconnect.
+  CREATE TABLE IF NOT EXISTS call_action_runs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    action_key TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    recipient TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    provider_message_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    sent_at TEXT,
+    UNIQUE(call_id, action_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_action_runs_pending
+    ON call_action_runs(owner_uid, status, next_attempt_at, created_at);
+
+  CREATE TABLE IF NOT EXISTS call_status_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    call_id TEXT,
+    status TEXT DEFAULT 'unknown',
+    occurred_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, event_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_status_events_call ON call_status_events(call_id, created_at DESC);
 
   -- Self-hosted phone gateway outbox. When a reply must go out as SMS (because
   -- WhatsApp isn't connected), it is queued here; the user's Android automation
@@ -630,6 +688,57 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
 
+  -- Caller contacts captured by CRM/Unifonic and waiting to be saved on the
+  -- company Android phone. This covers calls received while the phone is off.
+  CREATE TABLE IF NOT EXISTS gateway_contact_outbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    customer_id TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    saved_at TEXT,
+    UNIQUE(owner_uid, customer_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_contact_pending
+    ON gateway_contact_outbox(owner_uid, status, created_at);
+
+  -- Short-lived, one-time codes used to pair an Android phone without copying
+  -- the server-wide legacy token into the app.
+  CREATE TABLE IF NOT EXISTS gateway_pairing_codes (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_pairing_active
+    ON gateway_pairing_codes(code_hash, used_at, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_gateway_pairing_owner
+    ON gateway_pairing_codes(owner_uid, created_at DESC);
+
+  -- Each paired phone has an independently revocable credential. Only the
+  -- HMAC fingerprint is persisted; the clear token is returned once at pairing.
+  CREATE TABLE IF NOT EXISTS gateway_devices (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    company_number TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL,
+    pairing_code_id TEXT,
+    pairing_nonce_hash TEXT,
+    last_seen_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    revoked_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_devices_owner
+    ON gateway_devices(owner_uid, revoked_at, created_at DESC);
+
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
@@ -647,6 +756,30 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
   CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(tap_charge_id);
+`);
+
+for (const [column, definition] of [
+  ["pairing_code_id", "TEXT"],
+  ["pairing_nonce_hash", "TEXT"],
+] as const) {
+  if (!hasColumn("gateway_devices", column)) {
+    db.exec(`ALTER TABLE gateway_devices ADD COLUMN ${column} ${definition}`);
+  }
+}
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_device_pair_nonce
+    ON gateway_devices(pairing_code_id, pairing_nonce_hash)
+    WHERE pairing_code_id IS NOT NULL AND pairing_nonce_hash IS NOT NULL
+`);
+
+// Backfill caller contacts created before Android contact synchronization was
+// introduced. The unique owner/customer constraint keeps this idempotent.
+db.exec(`
+  INSERT OR IGNORE INTO gateway_contact_outbox
+    (id, owner_uid, customer_id, phone, name, status, created_at)
+  SELECT 'gct_' || lower(hex(randomblob(10))), owner_uid, id, phone, name, 'pending', created_at
+  FROM customers
+  WHERE source = 'phone_call' AND phone <> ''
 `);
 
 // Post-schema column migrations. These run AFTER the main schema block above,
@@ -728,6 +861,51 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
+
+// Missed-call automation settings. These ALTERs keep existing installations
+// compatible while fresh databases receive the same columns above.
+for (const col of [
+  ["company_name", "TEXT DEFAULT ''"],
+  ["call_flow_mode", "TEXT DEFAULT 'unavailable_reply'"],
+  ["timezone", "TEXT DEFAULT 'Asia/Riyadh'"],
+  ["business_days", "TEXT DEFAULT '[6,0,1,2,3,4]'"],
+  ["business_open", "TEXT DEFAULT '08:00'"],
+  ["business_close", "TEXT DEFAULT '21:00'"],
+  ["auto_reply_enabled", "INTEGER DEFAULT 1"],
+  ["reply_cooldown_min", "INTEGER DEFAULT 10"],
+  ["follow_up_sla_min", "INTEGER DEFAULT 5"],
+  ["voice_in_hours", "TEXT DEFAULT ''"],
+  ["voice_after_hours", "TEXT DEFAULT ''"],
+  ["whatsapp_in_hours", "TEXT DEFAULT ''"],
+  ["whatsapp_after_hours", "TEXT DEFAULT ''"],
+  ["whatsapp_answered", "TEXT DEFAULT ''"],
+] as const) {
+  if (!hasColumn("telephony_config", col[0])) {
+    db.exec(`ALTER TABLE telephony_config ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+for (const col of [
+  ["event_id", "TEXT"],
+  ["source", "TEXT DEFAULT 'unifonic'"],
+  ["direction", "TEXT DEFAULT 'incoming'"],
+  ["disposition", "TEXT DEFAULT 'unknown'"],
+  ["occurred_at", "TEXT"],
+  ["phone_account_id", "TEXT"],
+  ["action_state", "TEXT DEFAULT 'none'"],
+  ["follow_up_task_id", "TEXT"],
+  ["last_customer_reply_at", "TEXT"],
+] as const) {
+  if (!hasColumn("call_logs", col[0])) {
+    db.exec(`ALTER TABLE call_logs ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_call_logs_owner_event_id
+    ON call_logs(owner_uid, event_id) WHERE event_id IS NOT NULL AND event_id <> '';
+  CREATE INDEX IF NOT EXISTS idx_call_logs_phone_time
+    ON call_logs(owner_uid, from_phone, occurred_at DESC);
+`);
 
 for (const col of [
   ["payment_method", "TEXT DEFAULT 'تحويل بنكي'"],

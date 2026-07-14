@@ -15,6 +15,7 @@ import crypto from "crypto";
 import db from "./db";
 import {
   findUnhandledCallForAgent,
+  getTelephonyConfig,
   getDepartmentByDigit,
   isAgentAck,
   listDepartments,
@@ -23,6 +24,7 @@ import {
   recentlyNotifiedCustomer,
   recordCall,
   updateCallBySid,
+  updateCallById,
   type IvrDepartment,
 } from "./ivrEngine";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
@@ -33,6 +35,13 @@ import {
   smsRoutedCustomer,
 } from "./smsTemplates";
 import { logError, logEvent } from "./logger";
+import { drainCallActionQueue, prepareCallAutomation } from "./callAutomation";
+import {
+  AUTOMATION_DISPOSITIONS,
+  CUSTOMER_MESSAGE_DISPOSITIONS,
+  normalizeDisposition,
+  type CallDisposition,
+} from "./callPolicy";
 
 function newId(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 18)}`;
@@ -101,6 +110,23 @@ export function listRecentOutbox(ownerUid: string, limit = 50) {
   return db
     .prepare("SELECT * FROM gateway_outbox WHERE owner_uid = ? ORDER BY created_at DESC LIMIT ?")
     .all(ownerUid, Math.min(200, limit)) as Array<Record<string, unknown>>;
+}
+
+export function listPendingContacts(ownerUid: string, limit = 100) {
+  return db.prepare(
+    `SELECT id, customer_id, phone, name FROM gateway_contact_outbox
+     WHERE owner_uid = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?`,
+  ).all(ownerUid, Math.min(500, limit)) as Array<Record<string, unknown>>;
+}
+
+export function ackContacts(ownerUid: string, ids: string[]): number {
+  const markSaved = db.prepare(
+    `UPDATE gateway_contact_outbox SET status = 'saved', saved_at = ?, error = NULL
+     WHERE id = ? AND owner_uid = ? AND status = 'pending'`,
+  );
+  let changed = 0;
+  for (const id of ids) changed += markSaved.run(nowIso(), id, ownerUid).changes;
+  return changed;
 }
 
 // ── Channel-aware dispatch ────────────────────────────────────────────────────
@@ -174,11 +200,18 @@ function leadingDigit(text: string | undefined): string | null {
 
 // ── Event handling ────────────────────────────────────────────────────────────
 export type GatewayEvent = {
+  eventId?: string;
   type: string;
   from?: string;
   to?: string;
   text?: string;
   ts?: string;
+  callSid?: string;
+  source?: string;
+  disposition?: string;
+  durationSeconds?: number;
+  occurredAt?: string;
+  phoneAccountId?: string;
 };
 
 export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent): Promise<Record<string, unknown>> {
@@ -186,6 +219,53 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
   const from = normPhone(event.from);
 
   if (!from) return { handled: false, reason: "missing_from" };
+
+  // Normalized Android cellular-call events. These complement Unifonic for
+  // answered/outgoing calls, and use the same durable WhatsApp automation for
+  // unavailable calls while the phone is powered on.
+  const normalizedCallTypes = new Set([
+    "answered", "call_answered", "completed", "outgoing", "call_outgoing",
+    "missed_call", "call_missed", "no_answer", "unanswered", "busy",
+    "unreachable", "rejected", "blocked", "unknown",
+  ]);
+  if (normalizedCallTypes.has(type) || event.disposition) {
+    const alias = type === "call_answered" ? "answered"
+      : type === "call_outgoing" ? "outgoing"
+        : ["missed_call", "call_missed", "unanswered"].includes(type) ? "no_answer"
+          : event.disposition || type;
+    const disposition = normalizeDisposition(alias) as CallDisposition;
+    const callSid = event.callSid || `android_${crypto.randomUUID().slice(0, 18)}`;
+    const call = recordCall({
+      ownerUid,
+      provider: "android",
+      eventId: event.eventId,
+      callSid,
+      source: event.source || "android",
+      direction: disposition === "outgoing" ? "outgoing" : "incoming",
+      disposition,
+      from,
+      to: normPhone(event.to),
+      status: disposition,
+      durationSeconds: event.durationSeconds,
+      occurredAt: event.occurredAt || event.ts,
+      phoneAccountId: event.phoneAccountId,
+      metadata: event as unknown as Record<string, unknown>,
+    });
+    const needsFollowUp = AUTOMATION_DISPOSITIONS.has(disposition);
+    const customerMessage = CUSTOMER_MESSAGE_DISPOSITIONS.has(disposition);
+    updateCallById(call.id, {
+      status: disposition,
+      disposition,
+      missed: needsFollowUp ? 1 : 0,
+      ended_at: nowIso(),
+    });
+    if (customerMessage) {
+      const prepared = prepareCallAutomation(call.id, getTelephonyConfig(ownerUid));
+      const drained = await drainCallActionQueue(ownerUid);
+      return { handled: true, kind: "call", callId: call.id, disposition, prepared, drained };
+    }
+    return { handled: true, kind: "call", callId: call.id, disposition, action: "logged_only" };
+  }
 
   // ── Missed / unanswered call ──
   if (["missed_call", "call_missed", "no_answer", "unanswered", "call_ended_unanswered"].includes(type)) {
