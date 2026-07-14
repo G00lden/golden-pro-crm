@@ -367,6 +367,7 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - حالات `no_answer/busy/unreachable/rejected/after_hours` تبقى برسالة الاعتذار ومهمة المتابعة وتنبيه الموظف.
 - كل رقم وارد معروف يُنشأ تلقائيًا في جهات اتصال CRM دون تكرار؛ `blocked/outgoing` لا تنشئ جهة جديدة، و`unknown` لا ترسل رسالة حتى تُراجع.
 - أضيف `gateway_contact_outbox` ومسارا `/api/gateway/contacts` و`/api/gateway/contacts/ack` لحفظ أرقام Unifonic في جهات اتصال الهاتف عند عودته للاتصال.
+- بعد فحص شاشة هاتف فعلية فيها 100 حدث و`Connection reset` وتوكن فارغ، طُوّر APK `1.0.2`: تحقق إلزامي من الإعداد، أخطاء شبكة عربية، محاولتان للشبكة، عامل WorkManager واحد، طابور 1000 مع كشف امتلاء النسخة القديمة، إعادة إرسال آمنة، وحذف للاختبارات فقط.
 # 2026-07-13 — Asset maintenance, QR activation and warranty
 
 - Added independent customer assets with pre-printed unassigned QR labels and authenticated technician activation.
