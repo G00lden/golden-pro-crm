@@ -219,7 +219,7 @@ export function registerGatewayRoutes(app: Express, options: GatewayRouteOptions
     }
   });
 
-  app.get("/api/gateway/devices", requireCapability("mobile.devices.view"), (_req, res) => {
+  app.get("/api/gateway/devices", requireCapability("mobile.devices.manage"), (_req, res) => {
     res.json({ devices: listGatewayDevices(gatewayOwnerUid()) });
   });
 
