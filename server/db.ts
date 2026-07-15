@@ -958,6 +958,111 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_gateway_devices_owner
     ON gateway_devices(owner_uid, revoked_at, created_at DESC);
 
+  -- Mobile operations control-plane. SIM identifiers are opaque hashes created
+  -- on-device; ICCID/IMSI and personal phone numbers are never persisted.
+  CREATE TABLE IF NOT EXISTS mobile_device_sims (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    sim_key TEXT NOT NULL,
+    slot_index INTEGER,
+    carrier_name TEXT DEFAULT '',
+    display_name TEXT DEFAULT '',
+    phone_suffix TEXT DEFAULT '',
+    active INTEGER DEFAULT 1,
+    last_seen_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, device_id, sim_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mobile_device_sims_device
+    ON mobile_device_sims(owner_uid, device_id, active, slot_index);
+
+  CREATE TABLE IF NOT EXISTS mobile_commands (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    actor_uid TEXT,
+    command_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    expires_at TEXT NOT NULL,
+    delivered_at TEXT,
+    confirmed_at TEXT,
+    completed_at TEXT,
+    failed_at TEXT,
+    cancelled_at TEXT,
+    error TEXT,
+    result TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_mobile_commands_device_ready
+    ON mobile_commands(owner_uid, device_id, status, expires_at, created_at);
+  CREATE INDEX IF NOT EXISTS idx_mobile_commands_owner
+    ON mobile_commands(owner_uid, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS mobile_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    event_type TEXT NOT NULL,
+    sim_key TEXT DEFAULT '',
+    occurred_at TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'received',
+    result TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    processed_at TEXT,
+    UNIQUE(owner_uid, device_id, event_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mobile_events_device
+    ON mobile_events(owner_uid, device_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS call_reply_policies (
+    owner_uid TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    mode TEXT NOT NULL DEFAULT 'disabled',
+    selected_device_id TEXT,
+    selected_sim_key TEXT,
+    unifonic_enabled INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS call_reply_policy_numbers (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    list_kind TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    label TEXT DEFAULT '',
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, list_kind, phone)
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_reply_numbers_owner
+    ON call_reply_policy_numbers(owner_uid, list_kind, phone);
+
+  CREATE TABLE IF NOT EXISTS outbound_test_runs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    actor_uid TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    provider_message_id TEXT,
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    sent_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_outbound_test_runs_actor
+    ON outbound_test_runs(owner_uid, actor_uid, created_at DESC);
+
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
@@ -994,6 +1099,24 @@ for (const col of [
 for (const [column, definition] of [
   ["pairing_code_id", "TEXT"],
   ["pairing_nonce_hash", "TEXT"],
+  ["assigned_user_uid", "TEXT"],
+  ["branch_id", "TEXT"],
+  ["management_mode", "TEXT DEFAULT 'byod'"],
+  ["work_sim_key", "TEXT"],
+  ["capabilities_json", "TEXT DEFAULT '{}'"],
+  ["policy_version", "INTEGER DEFAULT 0"],
+  ["app_version", "TEXT"],
+  ["platform_version", "TEXT"],
+  ["manufacturer", "TEXT"],
+  ["model", "TEXT"],
+  ["battery_percent", "INTEGER"],
+  ["network_type", "TEXT"],
+  ["permissions_json", "TEXT DEFAULT '{}'"],
+  ["fcm_token_ciphertext", "TEXT"],
+  ["health_json", "TEXT DEFAULT '{}'"],
+  ["last_health_at", "TEXT"],
+  ["token_rotated_at", "TEXT"],
+  ["updated_at", "TEXT"],
 ] as const) {
   if (!hasColumn("gateway_devices", column)) {
     db.exec(`ALTER TABLE gateway_devices ADD COLUMN ${column} ${definition}`);
@@ -1153,6 +1276,11 @@ for (const col of [
   ["wa_agent_job_id", "TEXT"],
   ["wa_customer_status", "TEXT"],
   ["wa_agent_status", "TEXT"],
+  ["device_id", "TEXT"],
+  ["sim_key", "TEXT"],
+  ["source", "TEXT"],
+  ["disposition", "TEXT"],
+  ["outcome", "TEXT"],
 ] as const) {
   if (!hasColumn("call_logs", col[0])) {
     db.exec(`ALTER TABLE call_logs ADD COLUMN ${col[0]} ${col[1]}`);
@@ -1160,6 +1288,7 @@ for (const col of [
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_correlation ON call_logs(owner_uid, correlation_key, created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_device ON call_logs(owner_uid, device_id, created_at DESC)");
 
 for (const col of [
   ["attempts", "INTEGER DEFAULT 0"],

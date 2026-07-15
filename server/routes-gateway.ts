@@ -44,6 +44,7 @@ import {
   revokeGatewayDevice,
   verifyGatewayDeviceToken,
 } from "./gatewayPairing";
+import { requireCapability } from "./capabilityGuard";
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -196,17 +197,7 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
 export function registerGatewayRoutes(app: Express, options: GatewayRouteOptions) {
   const { gatewayOwnerUid } = options;
 
-  function requireAdmin(req: Request, res: Response, next: NextFunction) {
-    const user = (req as AuthedRequest).user;
-    if (!user?.uid) {
-      res.status(401).json({ error: "Authentication required." });
-      return;
-    }
-    if (user.role === "admin" || user.role === "manager") return next();
-    res.status(403).json({ error: "صلاحيات المسؤول مطلوبة." });
-  }
-
-  app.get("/api/gateway/status", requireAdmin, (_req, res) => {
+  app.get("/api/gateway/status", requireCapability("mobile.devices.view"), (_req, res) => {
     const owner = gatewayOwnerUid();
     res.json({
       configured: Boolean(process.env.GATEWAY_TOKEN) || gatewayDeviceAuthConfigured(),
@@ -217,7 +208,7 @@ export function registerGatewayRoutes(app: Express, options: GatewayRouteOptions
     });
   });
 
-  app.post("/api/gateway/pairing-code", requireAdmin, (req, res) => {
+  app.post("/api/gateway/pairing-code", requireCapability("mobile.devices.pair"), (req, res) => {
     try {
       const user = (req as AuthedRequest).user;
       const result = createGatewayPairingCode(gatewayOwnerUid(), user.uid);
@@ -228,11 +219,11 @@ export function registerGatewayRoutes(app: Express, options: GatewayRouteOptions
     }
   });
 
-  app.get("/api/gateway/devices", requireAdmin, (_req, res) => {
+  app.get("/api/gateway/devices", requireCapability("mobile.devices.view"), (_req, res) => {
     res.json({ devices: listGatewayDevices(gatewayOwnerUid()) });
   });
 
-  app.post("/api/gateway/devices/:id/revoke", requireAdmin, (req, res) => {
+  app.post("/api/gateway/devices/:id/revoke", requireCapability("mobile.devices.manage"), (req, res) => {
     const parsed = gatewayDeviceParamsSchema.safeParse(req.params);
     if (!parsed.success) {
       res.status(400).json({ error: "معرف جهاز البوابة غير صالح." });

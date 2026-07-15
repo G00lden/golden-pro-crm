@@ -41,6 +41,7 @@ export type Page =
   | "messages"
   | "campaigns"
   | "callSystem"
+  | "mobileOperations"
   | "settings"
   | "adminUsers";
 
