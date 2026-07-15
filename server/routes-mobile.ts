@@ -29,6 +29,7 @@ import {
   mobileCustomerCache,
   mobileDashboard,
   processMobileEventBatch,
+  selectDeviceWorkSim,
   updateDeviceProfile,
   updateMobileDevice,
   type MobileEventEnvelope,
@@ -64,6 +65,10 @@ const profileSchema = z.object({
   health: z.record(z.string().max(100), z.unknown()).optional(),
   fcmToken: z.string().max(4096).optional(),
   sims: z.array(simSchema).max(4).optional(),
+});
+
+const workSimSelectionSchema = z.object({
+  workSimKey: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/),
 });
 
 const eventSchema = z.object({
@@ -138,6 +143,15 @@ export function registerMobileDeviceRoutes(app: Express, options: {
     const body = parse(profileSchema, req.body, res);
     if (!body) return;
     res.json({ device: updateDeviceProfile((req as MobileRequest).mobileDevice, body) });
+  });
+
+  app.put("/api/mobile/v1/work-sim", options.webhookRateLimit, requireDevice, (req, res) => {
+    const body = parse(workSimSelectionSchema, req.body, res);
+    if (!body) return;
+    const device = (req as MobileRequest).mobileDevice;
+    selectDeviceWorkSim(device, body.workSimKey);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ policy: getMobileDevicePolicy(device) });
   });
 
   app.post(
@@ -218,6 +232,8 @@ const policySchema = z.object({
   selectedDeviceId: z.string().max(100).nullable().optional(),
   selectedSimKey: z.string().max(160).nullable().optional(),
   unifonicEnabled: z.boolean().optional(),
+  insideHoursMessage: z.string().trim().min(10).max(700).optional(),
+  afterHoursMessage: z.string().trim().min(10).max(700).optional(),
   version: z.number().int().min(0).optional(),
   confirmationPhrase: z.string().max(100).optional(),
   numbers: z.array(z.object({ phone: z.string().max(40), label: z.string().max(80).optional() })).max(500).optional(),
@@ -227,6 +243,8 @@ const previewSchema = z.object({
   phone: z.string().max(40).optional(),
   disposition: z.enum(["no_answer", "busy", "unreachable", "rejected", "after_hours"]).default("no_answer"),
   occurredAt: z.string().datetime({ offset: true }).optional(),
+  insideHoursMessage: z.string().trim().min(10).max(700).optional(),
+  afterHoursMessage: z.string().trim().min(10).max(700).optional(),
 });
 
 const testSchema = previewSchema.extend({ confirm: z.literal(true) });
@@ -325,8 +343,12 @@ export function registerMobileAdminRoutes(app: Express, options: { ownerUid: () 
     const body = parse(previewSchema, req.body, res);
     if (!body) return;
     const date = body.occurredAt ? new Date(body.occurredAt) : new Date();
+    const policy = getCallReplyPolicy(options.ownerUid());
     res.json({
-      message: renderCallReplyMessage(body.disposition as CallReplyDisposition, date),
+      message: renderCallReplyMessage(body.disposition as CallReplyDisposition, date, {
+        insideHoursMessage: body.insideHoursMessage || policy.insideHoursMessage,
+        afterHoursMessage: body.afterHoursMessage || policy.afterHoursMessage,
+      }),
       decision: body.phone ? evaluateCallReplyRecipient(options.ownerUid(), body.phone) : null,
     });
   });
@@ -358,7 +380,11 @@ export function registerMobileAdminRoutes(app: Express, options: { ownerUid: () 
         return;
       }
       const date = body.occurredAt ? new Date(body.occurredAt) : new Date();
-      const message = renderCallReplyMessage(body.disposition as CallReplyDisposition, date);
+      const policy = getCallReplyPolicy(ownerUid);
+      const message = renderCallReplyMessage(body.disposition as CallReplyDisposition, date, {
+        insideHoursMessage: body.insideHoursMessage || policy.insideHoursMessage,
+        afterHoursMessage: body.afterHoursMessage || policy.afterHoursMessage,
+      });
       const id = testId();
       db.prepare(
         `INSERT INTO outbound_test_runs

@@ -762,7 +762,11 @@ export async function runMissedCallFlow(callSid: string): Promise<Record<string,
   const disposition = ["no_answer", "busy", "unreachable", "rejected", "after_hours"].includes(String(call.disposition || call.status))
     ? String(call.disposition || call.status) as CallReplyDisposition
     : "no_answer";
-  const customerMessage = renderCallReplyMessage(disposition, new Date(String(call.ended_at || call.created_at || nowIso())));
+  const customerMessage = renderCallReplyMessage(
+    disposition,
+    new Date(String(call.ended_at || call.created_at || nowIso())),
+    replyDecision.policy,
+  );
 
   // 1) Queue the apology to the customer. The durable worker owns provider I/O,
   // retry and final delivery flags; webhook retries only return the same job.
