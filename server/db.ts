@@ -781,6 +781,24 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_gateway_outbox_pending ON gateway_outbox(owner_uid, status, created_at);
 
+  -- Contacts discovered by the phone/telephony gateway are kept in CRM and
+  -- synchronised back to the paired Android phone. A durable outbox prevents
+  -- contacts from being lost while the phone is offline.
+  CREATE TABLE IF NOT EXISTS gateway_contact_outbox (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    customer_id TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    saved_at TEXT,
+    UNIQUE(owner_uid, customer_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_gateway_contact_pending
+    ON gateway_contact_outbox(owner_uid, status, created_at);
+
   -- Durable inbound event ledger. Provider retries are accepted once and every
   -- downstream side effect uses the same idempotency key.
   CREATE TABLE IF NOT EXISTS communication_events (
@@ -1153,6 +1171,16 @@ for (const col of [
     db.exec(`ALTER TABLE gateway_outbox ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
+// Backfill contacts created from phone calls before Android contact sync was
+// introduced. INSERT OR IGNORE makes every application startup idempotent.
+db.exec(`
+  INSERT OR IGNORE INTO gateway_contact_outbox
+    (id, owner_uid, customer_id, phone, name, status, created_at)
+  SELECT 'gct_' || lower(hex(randomblob(10))), owner_uid, id, phone, name, 'pending', created_at
+  FROM customers
+  WHERE source = 'phone_call' AND TRIM(phone) <> ''
+`);
 
 for (const col of [
   ["customer_vat", "TEXT DEFAULT ''"],
@@ -1636,6 +1664,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10306, '1.3.6');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10307, '1.3.7');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10308, '1.3.7-ledger-hardening');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10309, '1.3.8-android-gateway');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

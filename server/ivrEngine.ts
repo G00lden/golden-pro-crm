@@ -300,7 +300,14 @@ export function recentlyNotifiedCustomer(ownerUid: string, fromPhone: string, mi
        LIMIT 1`,
     )
     .get(ownerUid, `%${tail}`, since);
-  return Boolean(row);
+  if (row) return true;
+  const queued = db.prepare(
+    `SELECT 1 FROM communication_jobs
+     WHERE owner_uid = ? AND recipient_phone LIKE ? AND role = 'customer'
+       AND status IN ('pending','processing','retry','sent') AND created_at >= ?
+     LIMIT 1`,
+  ).get(ownerUid, `%${tail}`, since);
+  return Boolean(queued);
 }
 
 // ── Call logs ─────────────────────────────────────────────────────────────────
@@ -323,6 +330,42 @@ export function findCustomerByPhone(ownerUid: string, phone: string): { id: stri
   return row ? { id: row.id, name: row.name || "" } : null;
 }
 
+/**
+ * Return the CRM customer for an inbound caller, creating it when necessary,
+ * and queue the contact for synchronisation to the paired Android phone.
+ */
+export function ensureCustomerContact(ownerUid: string, phone: string): { id: string; name: string } | null {
+  const normalized = normalizePhoneDigits(phone);
+  if (!/^\d{8,15}$/.test(normalized)) return null;
+
+  let customer = findCustomerByPhone(ownerUid, normalized);
+  if (!customer) {
+    const customerId = newId("customer");
+    const customerName = `متصل CRM ${normalized.slice(-4)}`;
+    const createdAt = nowIso();
+    db.prepare(
+      `INSERT INTO customers (id, owner_uid, name, phone, source, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'phone_call', ?, ?, ?)`,
+    ).run(
+      customerId,
+      ownerUid,
+      customerName,
+      `+${normalized}`,
+      "أُنشئت جهة الاتصال تلقائياً من مكالمة واردة.",
+      createdAt,
+      createdAt,
+    );
+    customer = { id: customerId, name: customerName };
+  }
+
+  db.prepare(
+    `INSERT OR IGNORE INTO gateway_contact_outbox
+      (id, owner_uid, customer_id, phone, name, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+  ).run(newId("gct"), ownerUid, customer.id, `+${normalized}`, customer.name, nowIso());
+  return customer;
+}
+
 export function recordCall(input: {
   ownerUid: string;
   provider: string;
@@ -331,9 +374,16 @@ export function recordCall(input: {
   to: string;
   status?: string;
   correlationKey?: string;
+  saveContact?: boolean;
 }): CallLog {
+  if (input.callSid) {
+    const existing = getCallBySid(input.callSid, input.ownerUid);
+    if (existing?.id) return { id: String(existing.id) };
+  }
   const id = newId("call");
-  const customer = findCustomerByPhone(input.ownerUid, input.from);
+  const customer = input.saveContact === false
+    ? findCustomerByPhone(input.ownerUid, input.from)
+    : ensureCustomerContact(input.ownerUid, input.from);
   db.prepare(
     `INSERT INTO call_logs (id, owner_uid, provider, call_sid, correlation_key, from_phone, to_phone, status, customer_id, customer_name, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -608,11 +658,55 @@ export async function handleCallStatus(ownerUid: string, status: NormalizedCallS
     missed: isMissed ? 1 : 0,
   });
 
+  if ((isMissed || status.status === "completed") && recentlyNotifiedCustomer(
+    ownerUid,
+    String(call.from_phone || status.from || ""),
+    Number(process.env.GATEWAY_REPLY_COOLDOWN_MIN ?? 10),
+  )) {
+    return { handled: true, missed: isMissed, cooled: true, status: status.status };
+  }
+
   if (isMissed) {
     const result = await runMissedCallFlow(callSid);
     return { handled: true, missed: true, ...result };
   }
+  if (status.status === "completed") {
+    const result = await runAnsweredCallFlow(callSid);
+    return { handled: true, missed: false, ...result };
+  }
   return { handled: true, missed: false, status: status.status };
+}
+
+/** Queue one durable WhatsApp follow-up after an answered/completed call. */
+export async function runAnsweredCallFlow(callSid: string): Promise<Record<string, unknown>> {
+  const call = getCallBySid(callSid);
+  if (!call) return { queued: false, reason: "unknown_call" };
+  if (Number(call.wa_customer_notified || 0) === 1) return { queued: false, reason: "already_notified" };
+
+  const ownerUid = String(call.owner_uid || "");
+  const customerPhone = String(call.from_phone || "");
+  const callId = String(call.id || "");
+  if (!ownerUid || !customerPhone || !callId) return { queued: false, reason: "missing_call_data" };
+
+  try {
+    const job = communicationJobStore.enqueue({
+      ownerUid,
+      eventKey: `answered-call:${callId}:customer`,
+      recipientPhone: customerPhone,
+      templateName: "call_answered_customer",
+      payload: { vars: {} },
+      role: "customer",
+      callId,
+      expiresInMinutes: 30,
+    });
+    db.prepare(
+      "UPDATE call_logs SET wa_customer_job_id = ?, wa_customer_status = ?, updated_at = ? WHERE owner_uid = ? AND id = ?",
+    ).run(job.id, job.status, nowIso(), ownerUid, callId);
+    return { queued: true, customer: job.status, customer_job_id: job.id };
+  } catch (err) {
+    logError("ivr.answered_call.customer_queue_failed", err);
+    return { queued: false, reason: "queue_failed" };
+  }
 }
 
 // ── Missed-call WhatsApp flow ─────────────────────────────────────────────────

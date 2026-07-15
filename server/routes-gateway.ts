@@ -15,10 +15,12 @@ import crypto from "crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import type { AuthedRequest } from "./auth";
 import {
+  ackContacts,
   ackSms,
   claimPendingSms,
   getNextPendingSms,
   handleGatewayEvent,
+  listPendingContacts,
   listPendingSms,
   listRecentOutbox,
   routingMode,
@@ -163,6 +165,29 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
     (req, res) => {
       const body = (req.body || {}) as { ids?: string[]; failed?: string[] };
       const acked = ackSms(gatewayOwnerUid(), body.ids || [], body.failed || []);
+      res.json({ success: true, acked });
+    },
+  );
+
+  app.get(
+    "/api/gateway/contacts",
+    webhookRateLimit,
+    requireDevice,
+    validateQuery(gatewayOutboxQuerySchema),
+    (req, res) => {
+      const limit = Number(req.query.limit ?? 100);
+      res.json({ contacts: listPendingContacts(gatewayOwnerUid(), limit) });
+    },
+  );
+
+  app.post(
+    "/api/gateway/contacts/ack",
+    webhookRateLimit,
+    requireDevice,
+    validate(gatewayAckSchema),
+    (req, res) => {
+      const body = (req.body || {}) as { ids?: string[] };
+      const acked = ackContacts(gatewayOwnerUid(), body.ids || []);
       res.json({ success: true, acked });
     },
   );

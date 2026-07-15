@@ -231,11 +231,20 @@ export const telephonyCallsQuerySchema = z.object({
 // Self-hosted phone gateway schemas
 
 export const gatewayEventSchema = z.object({
+  id: z.string().max(100).optional(),
+  eventId: z.string().max(100).optional(),
+  callSid: z.string().max(100).optional(),
   type: z.string().min(1, 'type is required').max(40),
   from: z.string().max(32).optional(),
   to: z.string().max(32).optional(),
   text: z.string().max(2000).optional(),
   ts: z.string().max(40).optional(),
+  occurredAt: z.string().max(40).optional(),
+  device: z.string().max(100).optional(),
+  source: z.string().max(40).optional(),
+  disposition: z.string().max(40).optional(),
+  durationSeconds: z.coerce.number().int().min(0).max(86400).optional(),
+  phoneAccountId: z.string().max(160).optional(),
 }).passthrough();
 
 export const gatewayOutboxQuerySchema = z.object({

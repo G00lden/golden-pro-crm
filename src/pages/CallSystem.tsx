@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 import {
   KeyRound,
   PhoneCall,
@@ -68,6 +69,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
   const [pairingCode, setPairingCode] = useState<api.GatewayPairingCode | null>(null);
   const [pairingSeconds, setPairingSeconds] = useState(0);
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingQr, setPairingQr] = useState("");
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const gateway = gatewayStatus;
   const [draft, setDraft] = useState<DraftDept>(emptyDraft());
@@ -116,6 +118,27 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
     const timer = window.setInterval(updateRemaining, 1000);
     return () => window.clearInterval(timer);
   }, [pairingCode]);
+
+  const pairingActive = Boolean(pairingCode && pairingSeconds > 0);
+  useEffect(() => {
+    if (!pairingActive || !pairingCode || !baseUrl) {
+      setPairingQr("");
+      return;
+    }
+    let active = true;
+    const payload = `breexe-connect://pair?server=${encodeURIComponent(baseUrl)}&code=${encodeURIComponent(pairingCode.code)}`;
+    QRCode.toDataURL(payload, {
+      width: 320,
+      margin: 2,
+      errorCorrectionLevel: "M",
+      color: { dark: "#0B355C", light: "#FFFFFF" },
+    }).then((dataUrl) => {
+      if (active) setPairingQr(dataUrl);
+    }).catch(() => {
+      if (active) setPairingQr("");
+    });
+    return () => { active = false; };
+  }, [baseUrl, pairingActive, pairingCode]);
 
   const missedCount = useMemo(() => calls.filter((c) => c.missed).length, [calls]);
 
@@ -284,28 +307,21 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         <button className="btn muted" type="button" onClick={refresh}><RefreshCcw size={14} /> تحديث</button>
       </header>
 
-      {/* Self-hosted gateway (no external provider, no WhatsApp QR) */}
+      {/* Android gateway health and recent delivery activity */}
       <div className="card" style={{ padding: 16, display: "grid", gap: 10, border: "1px solid rgba(96,165,250,0.35)" }}>
-        <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <Smartphone size={18} /> البوابة الذاتية (جوالك) — بدون مزوّد خارجي
+        <h2 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8, fontSize: 18, textWrap: "balance" }}>
+          <Smartphone size={18} aria-hidden="true" /> حالة ربط الجوال
           <span style={{ fontSize: 12, padding: "2px 10px", borderRadius: 8,
             background: gateway?.configured ? "rgba(15,191,108,0.15)" : "rgba(245,158,11,0.15)",
             color: gateway?.configured ? "#0fbf6c" : "#f59e0b" }}>
-            {gateway?.configured ? "مُفعّلة (التوكن مضبوط)" : "تحتاج ضبط GATEWAY_TOKEN"}
+            {gateway?.configured ? "الخادم جاهز للربط" : "تحتاج إكمال إعداد الخادم"}
           </span>
-        </h3>
+        </h2>
         <p style={{ margin: 0, opacity: 0.8, fontSize: 13, lineHeight: 1.8 }}>
-          ضع شريحة الشركة في جوال أندرويد وشغّل تطبيق أتمتة مجاني (MacroDroid/Tasker) ليرسل أحداث المكالمات لخادمك ويرسل ردود SMS من شريحتك.
-          نمط التوجيه الحالي: <strong>{gateway?.routing_mode === "direct" ? "تحويل مباشر" : "قائمة عبر SMS (يرد العميل برقم)"}</strong> — يُضبط عبر <code>GATEWAY_ROUTING_MODE</code>.
+          ثبّت تطبيق <span dir="ltr" translate="no">BreeXe Connect</span> على جوال الشركة، ثم اربطه من بطاقة رمز QR أدناه. بعد الربط تُرسل أحداث المكالمات تلقائياً إلى الـCRM وتُزامن جهات اتصال المتصلين.
         </p>
-        <div style={{ display: "grid", gap: 4, fontSize: 12 }}>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/event  (ترويسة x-gateway-token)</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>GET  {baseUrl}/api/gateway/outbox   ← الرسائل المنتظرة للإرسال</code>
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "4px 8px", borderRadius: 6 }}>POST {baseUrl}/api/gateway/outbox/ack  ← تأكيد الإرسال</code>
-        </div>
         <p style={{ margin: 0, opacity: 0.7, fontSize: 12 }}>
-          الدليل الكامل لإعداد الجوال في <code>docs/gateway-setup.md</code>. الرسائل المنتظرة الآن: <strong>{gateway?.pending ?? 0}</strong>.
-          {!gateway?.configured && " تظهر الردود محلياً حتى تضبط التوكن."}
+          الأجهزة النشطة: <strong>{gateway?.registered_devices ?? 0}</strong> — العمليات المنتظرة: <strong>{gateway?.pending ?? 0}</strong>.
         </p>
         {gateway && gateway.recent.length > 0 && (
           <div className="scrollable-table-region" role="region" aria-label="رسائل البوابة الذاتية الأخيرة" tabIndex={0}>
@@ -335,9 +351,9 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
       <div className="card" aria-labelledby="android-pairing-title" style={{ padding: 16, display: "grid", gap: 14, border: "1px solid rgba(34,197,94,0.38)" }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div style={{ minWidth: 0 }}>
-            <h3 id="android-pairing-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8, textWrap: "balance" }}>
+            <h2 id="android-pairing-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8, fontSize: 18, textWrap: "balance" }}>
               <ShieldCheck size={18} aria-hidden="true" /> ربط تطبيق أندرويد مباشرة
-            </h3>
+            </h2>
             <p style={{ margin: "6px 0 0", opacity: 0.78, fontSize: 13, lineHeight: 1.8, textWrap: "pretty" }}>
               أنشئ رمزًا مؤقتًا هنا، ثم أدخله في التطبيق مع رابط هذا الـCRM. لا حاجة لنسخ توكن طويل، والرمز يعمل مرة واحدة فقط.
             </p>
@@ -348,7 +364,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <button className="btn primary" type="button" onClick={createPairingCode} disabled={pairingBusy || gatewayStatus?.configured === false}>
+          <button className="btn primary" type="button" onClick={createPairingCode} disabled={pairingBusy || gatewayStatus?.configured === false} aria-busy={pairingBusy}>
             {pairingBusy ? <RefreshCcw className="spin" size={14} aria-hidden="true" /> : <KeyRound size={14} aria-hidden="true" />}
             {pairingBusy ? "جارٍ إنشاء الرمز…" : pairingCode && pairingSeconds > 0 ? "إنشاء رمز جديد" : "إنشاء رمز ربط"}
           </button>
@@ -357,14 +373,27 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
 
         <div aria-live="polite">
           {pairingCode && pairingSeconds > 0 ? (
-            <div style={{ display: "grid", gap: 7, padding: 14, borderRadius: 12, background: "rgba(34,197,94,0.09)", border: "1px solid rgba(34,197,94,0.24)" }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>رمز الربط لمرة واحدة</span>
-              <code dir="ltr" translate="no" style={{ fontSize: 30, letterSpacing: "0.18em", fontWeight: 800, fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" }}>
-                {pairingCode.code}
-              </code>
-              <span style={{ fontSize: 12 }}>
-                ينتهي خلال {new Intl.NumberFormat("ar-SA").format(Math.ceil(pairingSeconds / 60))} دقيقة — لا ترسله إلا لموظف يملك جوال الشركة.
-              </span>
+            <div style={{ display: "flex", gap: 18, padding: 14, borderRadius: 12, background: "rgba(34,197,94,0.09)", border: "1px solid rgba(34,197,94,0.24)", flexWrap: "wrap", alignItems: "center" }}>
+              {pairingQr && (
+                <img
+                  src={pairingQr}
+                  width={176}
+                  height={176}
+                  decoding="async"
+                  alt="رمز QR مؤقت لربط تطبيق BreeXe Connect"
+                  style={{ display: "block", width: 176, height: 176, borderRadius: 12, background: "#fff", padding: 6 }}
+                />
+              )}
+              <div style={{ display: "grid", gap: 8, minWidth: 220, flex: "1 1 260px" }}>
+                <strong>افتح BreeXe Connect واضغط «مسح QR»</strong>
+                <span style={{ fontSize: 12, opacity: 0.75 }}>أو أدخل رمز الربط لمرة واحدة يدويًا</span>
+                <code dir="ltr" translate="no" style={{ fontSize: 30, letterSpacing: "0.18em", fontWeight: 800, fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" }}>
+                  {pairingCode.code}
+                </code>
+                <span style={{ fontSize: 12 }}>
+                  ينتهي خلال {new Intl.NumberFormat("ar-SA").format(Math.ceil(pairingSeconds / 60))} دقيقة — لا ترسله إلا لموظف يملك جوال الشركة.
+                </span>
+              </div>
             </div>
           ) : pairingCode ? (
             <p style={{ margin: 0, color: "#fbbf24", fontSize: 13 }}>انتهت صلاحية الرمز. أنشئ رمزًا جديدًا ثم أعد المحاولة من الجوال.</p>
@@ -372,7 +401,7 @@ export function CallSystemPage({ notify }: { notify: Notifier }) {
         </div>
 
         <div style={{ display: "grid", gap: 9 }}>
-          <h4 style={{ margin: 0 }}>الأجهزة المرتبطة ({new Intl.NumberFormat("ar-SA").format(gatewayStatus?.registered_devices || 0)})</h4>
+          <h3 style={{ margin: 0, fontSize: 16 }}>الأجهزة المرتبطة ({new Intl.NumberFormat("ar-SA").format(gatewayStatus?.registered_devices || 0)})</h3>
           {gatewayDevices.length === 0 ? (
             <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>لا يوجد جوال مرتبط بعد.</p>
           ) : (

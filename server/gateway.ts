@@ -22,6 +22,8 @@ import {
   pickAgentRoundRobin,
   recentlyNotifiedCustomer,
   recordCall,
+  runAnsweredCallFlow,
+  runMissedCallFlow,
   updateCallBySid,
   type IvrDepartment,
 } from "./ivrEngine";
@@ -128,6 +130,27 @@ export function listRecentOutbox(ownerUid: string, limit = 50) {
     .all(ownerUid, Math.min(200, limit)) as Array<Record<string, unknown>>;
 }
 
+export function listPendingContacts(ownerUid: string, limit = 100) {
+  return db.prepare(
+    `SELECT id, customer_id, phone, name
+     FROM gateway_contact_outbox
+     WHERE owner_uid = ? AND status = 'pending'
+     ORDER BY created_at ASC LIMIT ?`,
+  ).all(ownerUid, Math.max(1, Math.min(200, limit))) as Array<Record<string, unknown>>;
+}
+
+export function ackContacts(ownerUid: string, ids: string[]): number {
+  const markSaved = db.prepare(
+    `UPDATE gateway_contact_outbox
+     SET status = 'saved', saved_at = ?, error = NULL
+     WHERE owner_uid = ? AND id = ? AND status = 'pending'`,
+  );
+  let changed = 0;
+  const savedAt = nowIso();
+  for (const id of ids) changed += markSaved.run(savedAt, ownerUid, id).changes;
+  return changed;
+}
+
 // ── Channel-aware dispatch ────────────────────────────────────────────────────
 /**
  * Send `body` to `phone`. Uses WhatsApp when it is connected; otherwise queues
@@ -200,12 +223,46 @@ function leadingDigit(text: string | undefined): string | null {
 
 // ── Event handling ────────────────────────────────────────────────────────────
 export type GatewayEvent = {
+  id?: string;
+  eventId?: string;
+  callSid?: string;
   type: string;
   from?: string;
   to?: string;
   text?: string;
   ts?: string;
+  occurredAt?: string;
+  device?: string;
+  source?: string;
+  disposition?: string;
+  durationSeconds?: number;
+  phoneAccountId?: string;
 };
+
+type GatewayDisposition =
+  | "answered"
+  | "no_answer"
+  | "busy"
+  | "unreachable"
+  | "rejected"
+  | "after_hours"
+  | "outgoing"
+  | "blocked"
+  | "unknown";
+
+function gatewayDisposition(type: string, raw: string | undefined): GatewayDisposition | null {
+  const value = String(raw || type || "").toLowerCase().replace(/[\s-]/g, "_");
+  if (["answered", "call_answered", "completed"].includes(value)) return "answered";
+  if (["missed_call", "call_missed", "no_answer", "unanswered", "call_ended_unanswered"].includes(value)) return "no_answer";
+  if (["busy", "call_busy"].includes(value)) return "busy";
+  if (["unreachable", "phone_off", "out_of_coverage", "failed"].includes(value)) return "unreachable";
+  if (["rejected", "call_rejected"].includes(value)) return "rejected";
+  if (value === "after_hours") return "after_hours";
+  if (["outgoing", "call_outgoing"].includes(value)) return "outgoing";
+  if (["blocked", "call_blocked"].includes(value)) return "blocked";
+  if (["unknown", "incoming_call", "call_incoming"].includes(value)) return "unknown";
+  return null;
+}
 
 export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent): Promise<Record<string, unknown>> {
   const type = String(event.type || "").toLowerCase().replace(/[\s-]/g, "_");
@@ -223,6 +280,58 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
       source,
     });
     if (optOut) return optOut;
+  }
+
+  const disposition = gatewayDisposition(type, event.disposition);
+  if (disposition) {
+    const suppliedId = String(event.callSid || event.eventId || event.id || "").trim();
+    const callSid = suppliedId || `gw_${crypto.randomUUID().slice(0, 12)}`;
+    const duplicate = db.prepare(
+      "SELECT id FROM call_logs WHERE owner_uid = ? AND call_sid = ? LIMIT 1",
+    ).get(ownerUid, callSid) as { id?: string } | undefined;
+    if (duplicate?.id) {
+      return { handled: true, kind: "call", disposition, callSid, duplicate: true };
+    }
+
+    const shouldSaveContact = !["outgoing", "blocked", "unknown"].includes(disposition);
+    const call = recordCall({
+      ownerUid,
+      provider: "gateway",
+      callSid,
+      correlationKey: suppliedId || undefined,
+      from,
+      to: normalizePhoneDigits(event.to),
+      status: disposition,
+      saveContact: shouldSaveContact,
+    });
+    const missed = ["no_answer", "busy", "unreachable", "rejected", "after_hours"].includes(disposition);
+    updateCallBySid(callSid, {
+      status: disposition,
+      missed: missed ? 1 : 0,
+      duration_sec: Math.max(0, Number(event.durationSeconds || 0)),
+      ended_at: event.occurredAt || event.ts || nowIso(),
+      metadata: JSON.stringify({
+        source: event.source || "android",
+        device: event.device || "",
+        phoneAccountId: event.phoneAccountId || "",
+      }),
+    }, ownerUid);
+
+    if (["outgoing", "blocked", "unknown"].includes(disposition)) {
+      return { handled: true, kind: "call", disposition, callSid, notified: false };
+    }
+
+    const cooldownMin = Number(process.env.GATEWAY_REPLY_COOLDOWN_MIN ?? 10);
+    if (recentlyNotifiedCustomer(ownerUid, from, cooldownMin)) {
+      logEvent("info", "gateway.call.cooldown_skip", { from, disposition, cooldownMin });
+      return { handled: true, kind: "call", disposition, callSid, cooled: true };
+    }
+
+    const result = disposition === "answered"
+      ? await runAnsweredCallFlow(callSid)
+      : await runMissedCallFlow(callSid);
+    logEvent("info", "gateway.call.processed", { callId: call.id, callSid, from, disposition });
+    return { handled: true, kind: "call", disposition, callSid, ...result };
   }
 
   // ── Missed / unanswered call ──
