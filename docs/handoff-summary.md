@@ -500,4 +500,14 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - التحقق المنفذ: `npm run lint`، حزمة الوحدة كاملة `382/382`، `npm run build`، وفحص متصفح فعلي على عرض 390 بكسل شمل إنشاء QR؛ وفي أندرويد `testDebugUnitTest assembleDebug` وتحقق توقيع APK ناجحان.
 - شددت حدود البيانات: التحديث الجزئي لا يمس وضع ملكية الجهاز، ولا تُخزن حمولة الشريحة الشخصية، ولا تقبل نتيجة مكالمة من جهاز آخر، وتُعاد مطابقة الجهاز وشريحة العمل عند تنفيذ رسالة واتساب من الطابور.
 - يلزم في الاستضافة ضبط `MOBILE_DATA_ENCRYPTION_KEY`. للإشعار الفوري اضبط متغيرات Firebase الثلاثة وقت بناء APK؛ من دونها يستمر الاسترداد عبر WorkManager عند فتح التطبيق/الدورة الاحتياطية.
-- APK الاختبار المحلي: `C:\Users\owner\AndroidStudioProjects\MyApplication\BreeXe-Connect-2.1.0-test.apk`. لا يُعتمد تجاريًا قبل توقيع Release بمفتاح المالك وتجربة السبعة أيام.
+- APK الاختبار المحلي السابق: `C:\Users\owner\AndroidStudioProjects\MyApplication\BreeXe-Connect-2.1.0-test.apk`. لا يُعتمد تجاريًا قبل توقيع Release بمفتاح المالك وتجربة السبعة أيام.
+
+## آخر تحديث: 2026-07-15 — إصلاح إغلاق BreeXe Connect عند التشغيل 2.1.1 [Codex]
+
+- ثُبت أن الإصدار 2.1.0 كان يستخدم `sqlcipher-android` دون تحميل `libsqlcipher` قبل أول استعلام Room، بينما الواجهة تقرأ الطابور أثناء الإنشاء؛ النتيجة المحتملة إغلاق مباشر قبل ظهور الشاشة.
+- أضيف `BreeXeApplication` واستدعاء `System.loadLibrary("sqlcipher")` قبل Activity، مع حارس ثانٍ داخل `MobileDatabase`.
+- حُدث SQLCipher من 4.6.1 إلى 4.15.0 وAndroidX SQLite إلى 2.6.2 لدعم أجهزة Android الحديثة واصطفاف 16KB.
+- أُصلح فحص API 29 في `BreexeCallScreeningService` وأصبح فشل ذاكرة تعريف المتصل لا يمنع الرد على Android Telecom.
+- رُفع التطبيق إلى `2.1.1 (7)`، وأُدخل مصدر Android كاملًا تحت `android/BreeXeConnect` بدل بقائه مشروعًا محليًا خارج Git.
+- تحقق البناء: `testDebugUnitTest` و`assembleDebug` و`lintDebug` ناجحة، وAPK محاذى 16KB وموقع بتوقيع الاختبار ويحتوي `BreeXeApplication` و`libsqlcipher.so` للمعماريات الأربع.
+- APK المصحح: `C:\Users\owner\AndroidStudioProjects\MyApplication\BreeXe-Connect-2.1.1-startup-fix.apk`، وبصمته SHA-256 هي `B95ED83F6000FDBC407B82F21244F9E0079CBA1373257B71EB5A9D3117506A65`.
