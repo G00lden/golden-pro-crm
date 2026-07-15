@@ -22,6 +22,8 @@ export type DryRunSendResult = {
 
 export type OutboundSendOptions = {
   confirmationCode?: string;
+  /** Server-created, single-request exception for the dedicated admin test route. */
+  oneTimeTestPhone?: string;
 };
 
 const outboundContext = new AsyncLocalStorage<OutboundSendOptions>();
@@ -132,7 +134,8 @@ export function decideOutbound(phone: string, options: OutboundSendOptions = {})
 
   if (mode === "allowlist") {
     const allowlist = allowedPhones();
-    if (allowlist.has(normalizedPhone)) {
+    const oneTimeTestPhone = normalizeOutboundPhone(options.oneTimeTestPhone || "");
+    if (allowlist.has(normalizedPhone) || (oneTimeTestPhone && oneTimeTestPhone === normalizedPhone)) {
       return { allowed: true, dryRun: false, mode, normalizedPhone };
     }
     return {

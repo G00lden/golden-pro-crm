@@ -15,10 +15,12 @@ import crypto from "crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import type { AuthedRequest } from "./auth";
 import {
+  ackContacts,
   ackSms,
   claimPendingSms,
   getNextPendingSms,
   handleGatewayEvent,
+  listPendingContacts,
   listPendingSms,
   listRecentOutbox,
   routingMode,
@@ -29,8 +31,20 @@ import {
   gatewayEventSchema,
   gatewayOutboxQuerySchema,
   gatewayAckSchema,
+  gatewayDeviceParamsSchema,
+  gatewayPairSchema,
 } from "./validation";
 import { logError } from "./logger";
+import {
+  activeGatewayDeviceCount,
+  createGatewayPairingCode,
+  gatewayDeviceAuthConfigured,
+  listGatewayDevices,
+  redeemGatewayPairingCode,
+  revokeGatewayDevice,
+  verifyGatewayDeviceToken,
+} from "./gatewayPairing";
+import { requireCapability } from "./capabilityGuard";
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -44,40 +58,69 @@ function safeEquals(a: string, b: string): boolean {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
-function verifyGatewayToken(req: Request): { status: number; error: string } | null {
-  const token = process.env.GATEWAY_TOKEN || "";
-  if (!token) {
-    return { status: 503, error: "GATEWAY_TOKEN is not configured." };
+function verifyGatewayToken(req: Request, ownerUid: string): { status: number; error: string } | null {
+  const legacyToken = process.env.GATEWAY_TOKEN || "";
+  if (!legacyToken && !gatewayDeviceAuthConfigured()) {
+    return { status: 503, error: "Gateway credential signing is not configured." };
   }
   const provided =
     req.get("x-gateway-token") ||
     (typeof req.query.token === "string" ? req.query.token : "") ||
     "";
-  if (provided && safeEquals(provided, token)) return null;
+  if (provided && legacyToken && safeEquals(provided, legacyToken)) return null;
+  if (provided && verifyGatewayDeviceToken(ownerUid, provided)) return null;
   return { status: 401, error: "Invalid or missing gateway token." };
 }
 
-function requireGatewayToken(req: Request, res: Response, next: NextFunction) {
-  const rejection = verifyGatewayToken(req);
-  if (rejection) {
-    res.status(rejection.status).json({ error: rejection.error });
-    return;
-  }
-  next();
+function requireGatewayToken(gatewayOwnerUid: () => string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const rejection = verifyGatewayToken(req, gatewayOwnerUid());
+    if (rejection) {
+      res.status(rejection.status).json({ error: rejection.error });
+      return;
+    }
+    next();
+  };
 }
 
 export interface GatewayRouteOptions {
   webhookRateLimit: (req: Request, res: Response, next: NextFunction) => void;
+  pairingRateLimit: (req: Request, res: Response, next: NextFunction) => void;
   gatewayOwnerUid: () => string;
 }
 
 export function registerGatewayWebhookRoutes(app: Express, options: GatewayRouteOptions) {
-  const { webhookRateLimit, gatewayOwnerUid } = options;
+  const { webhookRateLimit, pairingRateLimit, gatewayOwnerUid } = options;
+  const requireDevice = requireGatewayToken(gatewayOwnerUid);
+
+  app.post(
+    "/api/gateway/pair",
+    pairingRateLimit,
+    validate(gatewayPairSchema),
+    (req, res) => {
+      const body = (req.body || {}) as { code: string; deviceName: string; companyNumber?: string; clientNonce: string };
+      const paired = redeemGatewayPairingCode({
+        code: body.code,
+        deviceName: body.deviceName,
+        companyNumber: body.companyNumber,
+        clientNonce: body.clientNonce,
+      });
+      if (!paired) {
+        res.status(400).json({ error: "رمز الربط غير صحيح أو منتهي الصلاحية. أنشئ رمزًا جديدًا من CRM." });
+        return;
+      }
+      res.status(201).json({
+        paired: true,
+        token: paired.token,
+        deviceId: paired.deviceId,
+      });
+    },
+  );
 
   app.post(
     "/api/gateway/event",
     webhookRateLimit,
-    requireGatewayToken,
+    requireDevice,
     validate(gatewayEventSchema),
     asyncRoute(async (req, res) => {
       try {
@@ -96,7 +139,7 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
   app.get(
     "/api/gateway/outbox",
     webhookRateLimit,
-    requireGatewayToken,
+    requireDevice,
     validateQuery(gatewayOutboxQuerySchema),
     (req, res) => {
       const limit = Number(req.query.limit ?? 20);
@@ -109,7 +152,7 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
   app.get(
     "/api/gateway/next",
     webhookRateLimit,
-    requireGatewayToken,
+    requireDevice,
     (_req, res) => {
       res.json(getNextPendingSms(gatewayOwnerUid(), _req.get("x-gateway-device-id") || "next"));
     },
@@ -118,11 +161,34 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
   app.post(
     "/api/gateway/outbox/ack",
     webhookRateLimit,
-    requireGatewayToken,
+    requireDevice,
     validate(gatewayAckSchema),
     (req, res) => {
       const body = (req.body || {}) as { ids?: string[]; failed?: string[] };
       const acked = ackSms(gatewayOwnerUid(), body.ids || [], body.failed || []);
+      res.json({ success: true, acked });
+    },
+  );
+
+  app.get(
+    "/api/gateway/contacts",
+    webhookRateLimit,
+    requireDevice,
+    validateQuery(gatewayOutboxQuerySchema),
+    (req, res) => {
+      const limit = Number(req.query.limit ?? 100);
+      res.json({ contacts: listPendingContacts(gatewayOwnerUid(), limit) });
+    },
+  );
+
+  app.post(
+    "/api/gateway/contacts/ack",
+    webhookRateLimit,
+    requireDevice,
+    validate(gatewayAckSchema),
+    (req, res) => {
+      const body = (req.body || {}) as { ids?: string[] };
+      const acked = ackContacts(gatewayOwnerUid(), body.ids || []);
       res.json({ success: true, acked });
     },
   );
@@ -131,23 +197,43 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
 export function registerGatewayRoutes(app: Express, options: GatewayRouteOptions) {
   const { gatewayOwnerUid } = options;
 
-  function requireAdmin(req: Request, res: Response, next: NextFunction) {
-    const user = (req as AuthedRequest).user;
-    if (!user?.uid) {
-      res.status(401).json({ error: "Authentication required." });
-      return;
-    }
-    if (user.role === "admin" || user.role === "manager") return next();
-    res.status(403).json({ error: "صلاحيات المسؤول مطلوبة." });
-  }
-
-  app.get("/api/gateway/status", requireAdmin, (_req, res) => {
+  app.get("/api/gateway/status", requireCapability("mobile.devices.view"), (_req, res) => {
     const owner = gatewayOwnerUid();
     res.json({
-      configured: Boolean(process.env.GATEWAY_TOKEN),
+      configured: Boolean(process.env.GATEWAY_TOKEN) || gatewayDeviceAuthConfigured(),
+      registered_devices: activeGatewayDeviceCount(owner),
       routing_mode: routingMode(),
       pending: listPendingSms(owner, 100).length,
       recent: listRecentOutbox(owner, 50),
     });
+  });
+
+  app.post("/api/gateway/pairing-code", requireCapability("mobile.devices.pair"), (req, res) => {
+    try {
+      const user = (req as AuthedRequest).user;
+      const result = createGatewayPairingCode(gatewayOwnerUid(), user.uid);
+      res.status(201).json(result);
+    } catch (error) {
+      logError("gateway.pairing_code.failed", error);
+      res.status(503).json({ error: "تعذر إنشاء رمز الربط. تأكد من إعداد سر البوابة على الخادم." });
+    }
+  });
+
+  app.get("/api/gateway/devices", requireCapability("mobile.devices.view"), (_req, res) => {
+    res.json({ devices: listGatewayDevices(gatewayOwnerUid()) });
+  });
+
+  app.post("/api/gateway/devices/:id/revoke", requireCapability("mobile.devices.manage"), (req, res) => {
+    const parsed = gatewayDeviceParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      res.status(400).json({ error: "معرف جهاز البوابة غير صالح." });
+      return;
+    }
+    const revoked = revokeGatewayDevice(gatewayOwnerUid(), parsed.data.id);
+    if (!revoked) {
+      res.status(404).json({ error: "الجهاز غير موجود أو تم إلغاؤه مسبقًا." });
+      return;
+    }
+    res.json({ success: true });
   });
 }

@@ -55,6 +55,7 @@ const TEMPLATE_VARIABLE_FIELDS: Record<string, TemplateVariableField[]> = {
   booking_cancelled: fieldsFor("customer_name", "product_name", "maintenance_date"),
   technician_assigned: fieldsFor("technician_name", "customer_name", "product_name", "customer_address", "maintenance_date", "scheduled_time"),
   completion_thanks: fieldsFor("customer_name", "product_name", "next_maintenance_date"),
+  call_answered_customer: fieldsFor(),
   missed_call_customer: fieldsFor("department_name", "agent_name"),
   missed_call_agent: fieldsFor("department_name", "customer_phone", "call_time"),
   general_reminder: fieldsFor("message"),

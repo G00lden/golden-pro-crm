@@ -14,6 +14,20 @@ const ROLE_OPTIONS: Array<{ value: api.AppUserRole; label: string }> = [
   { value: "user", label: "مستخدم" },
 ];
 
+const PERMISSION_OPTIONS = [
+  ["mobile.devices.view", "مشاهدة الأجهزة"],
+  ["mobile.devices.pair", "ربط جهاز جديد"],
+  ["mobile.devices.manage", "إدارة الأجهزة والتعيين"],
+  ["mobile.calls.view", "مشاهدة المكالمات"],
+  ["mobile.calls.execute", "إرسال طلب اتصال للجوال"],
+  ["mobile.contacts.sync", "مزامنة جهات الاتصال"],
+  ["mobile.tasks.update", "تحديث المهام من الجوال"],
+  ["mobile.reply_policy.manage", "إدارة سياسة واتساب"],
+  ["mobile.tests.send", "إرسال تجربة واتساب"],
+  ["mobile.device.lock", "قفل جهاز شركة"],
+  ["mobile.device.wipe", "مسح بيانات الجهاز"],
+] as const;
+
 function fmtDateTime(value?: string | null) {
   if (!value) return "—";
   try {
@@ -79,6 +93,7 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
           email: payload.email,
           phone: payload.phone,
           role: payload.role,
+          permissions: payload.permissions,
           active: payload.active,
         });
         notify("تم حفظ تعديلات المستخدم");
@@ -88,6 +103,7 @@ export function AdminUsersPage({ notify, currentUid }: { notify: Notifier; curre
           email: payload.email || undefined,
           phone: payload.phone || undefined,
           role: (payload.role as api.AppUserRole) || "user",
+          permissions: payload.permissions,
         });
         notify("تم إضافة المستخدم");
       }
@@ -291,7 +307,7 @@ function UserModal({ title, children, onClose }: { title: string; children: Reac
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         ref={dialogRef}
-        className="modal"
+        className="modal wide"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -324,6 +340,7 @@ function UserForm({
   const [phone, setPhone] = useState(initial?.phone || "");
   const [role, setRole] = useState<api.AppUserRole>(initial?.role || "user");
   const [active, setActive] = useState<boolean>(initial?.active ?? true);
+  const [permissions, setPermissions] = useState<Record<string, boolean>>(initial?.permissions || {});
   const [saving, setSaving] = useState(false);
 
   const submit = async (event: FormEvent) => {
@@ -335,6 +352,7 @@ function UserForm({
         email: email.trim() || null,
         phone: phone.trim(),
         role,
+        permissions,
         active,
       });
     } finally {
@@ -373,6 +391,33 @@ function UserForm({
           ))}
         </select>
       </label>
+
+      <fieldset className="managed-permissions">
+        <legend>صلاحيات الجوال المخصصة</legend>
+        <p className="note">اتركها «حسب الدور» لاستخدام التوزيع الافتراضي، أو امنح/امنع صلاحية لهذا المستخدم فقط.</p>
+        <div className="managed-permissions-grid">
+          {PERMISSION_OPTIONS.map(([capability, label]) => (
+            <label className="field" key={capability}>
+              <span>{label}</span>
+              <select
+                className="input"
+                name={`permission_${capability.replaceAll(".", "_")}`}
+                value={Object.prototype.hasOwnProperty.call(permissions, capability) ? String(permissions[capability]) : "inherit"}
+                onChange={(event) => setPermissions((current) => {
+                  const next = { ...current };
+                  if (event.target.value === "inherit") delete next[capability];
+                  else next[capability] = event.target.value === "true";
+                  return next;
+                })}
+              >
+                <option value="inherit">حسب الدور</option>
+                <option value="true">سماح إضافي</option>
+                <option value="false">منع صريح</option>
+              </select>
+            </label>
+          ))}
+        </div>
+      </fieldset>
 
       {initial && (
         <label className="field" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>

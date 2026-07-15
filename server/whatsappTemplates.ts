@@ -17,6 +17,7 @@ export type TemplateName =
   | "booking_cancelled"
   | "technician_assigned"
   | "completion_thanks"
+  | "call_answered_customer"
   | "missed_call_customer"
   | "missed_call_agent"
   | "general_reminder";
@@ -24,6 +25,8 @@ export type TemplateName =
 const DEFAULT_COMPANY = process.env.COMPANY_NAME || "Breexe Pro";
 
 export const TEMPLATES: Record<TemplateName, string> = {
+  call_answered_customer: `شكراً لاتصالك بـ{company_name}.
+تم تسجيل اتصالك بنجاح. يمكنك كتابة ما تحتاجه هنا عبر واتساب، وسنتابع معك في أقرب فرصة.`,
   maintenance_reminder_first: `عزيزي {customer_name}،
 نذكركم بموعد صيانة {product_name} المقرر في {maintenance_date}.
 يرجى تأكيد حضوركم بالرد على هذه الرسالة بكلمة "نعم".

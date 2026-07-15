@@ -9,7 +9,7 @@ export function requireCapability(capability: AppCapability) {
       res.status(401).json({ error: "Authentication required." });
       return;
     }
-    if (!hasAppCapability(user.role, capability)) {
+    if (!hasAppCapability(user.role, capability, user.permissions || {})) {
       res.status(403).json({ error: "ليست لديك الصلاحية الكافية لتنفيذ هذا الإجراء." });
       return;
     }
