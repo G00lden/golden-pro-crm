@@ -43,6 +43,8 @@ test("mobile devices preserve partial settings and reject personal or cross-devi
     assert.deepEqual(updated.capabilities, { callerId: true });
 
     const device = { id: deviceId, owner_uid: ownerUid } as never;
+    assert.equal(mobile.selectDeviceWorkSim(device, workSimKey).work_sim_key, workSimKey);
+    assert.throws(() => mobile.selectDeviceWorkSim(device, personalSimKey), /غير موجودة/);
     const [personal] = await mobile.processMobileEventBatch(device, [{
       schemaVersion: 1,
       eventId: "personal-call-001",

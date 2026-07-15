@@ -12,6 +12,8 @@ export type CallReplyPolicy = {
   selectedDeviceId: string | null;
   selectedSimKey: string | null;
   unifonicEnabled: boolean;
+  insideHoursMessage: string;
+  afterHoursMessage: string;
   version: number;
   numbers: Array<{ phone: string; label: string; kind: "allow" | "exclude" }>;
   updatedAt: string | null;
@@ -23,6 +25,8 @@ type StoredPolicy = {
   selected_device_id: string | null;
   selected_sim_key: string | null;
   unifonic_enabled: number;
+  inside_hours_message: string | null;
+  after_hours_message: string | null;
   version: number;
   updated_at: string | null;
 };
@@ -35,6 +39,22 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+export function defaultCallReplyMessages() {
+  const company = String(process.env.COMPANY_NAME || "BreeXe Pro").trim();
+  return {
+    insideHoursMessage: `شكرًا لاتصالك بـ${company}. تعذر علينا الرد الآن. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.`,
+    afterHoursMessage: `شكرًا لاتصالك بـ${company}. نحن خارج أوقات الدوام حاليًا. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.`,
+  };
+}
+
+function normalizeReplyMessage(value: unknown, fallback: string) {
+  const message = String(value || "").trim();
+  if (!message) return fallback;
+  if (message.length < 10) throw new Error("نص رسالة واتساب قصير جدًا.");
+  if (message.length > 700) throw new Error("الحد الأقصى لنص رسالة واتساب هو 700 حرف.");
+  return message;
+}
+
 export function normalizePolicyPhone(value: string): string {
   const phone = normalizeOutboundPhone(value);
   return /^\d{10,15}$/.test(phone) ? phone : "";
@@ -42,7 +62,8 @@ export function normalizePolicyPhone(value: string): string {
 
 export function getCallReplyPolicy(ownerUid: string): CallReplyPolicy {
   const stored = db.prepare(
-    `SELECT enabled, mode, selected_device_id, selected_sim_key, unifonic_enabled, version, updated_at
+    `SELECT enabled, mode, selected_device_id, selected_sim_key, unifonic_enabled,
+            inside_hours_message, after_hours_message, version, updated_at
      FROM call_reply_policies WHERE owner_uid = ?`,
   ).get(ownerUid) as StoredPolicy | undefined;
   const numbers = db.prepare(
@@ -52,12 +73,15 @@ export function getCallReplyPolicy(ownerUid: string): CallReplyPolicy {
   const mode = CALL_REPLY_MODES.includes(stored?.mode as CallReplyMode)
     ? stored?.mode as CallReplyMode
     : "disabled";
+  const defaults = defaultCallReplyMessages();
   return {
     enabled: Boolean(stored?.enabled) && mode !== "disabled",
     mode,
     selectedDeviceId: stored?.selected_device_id || null,
     selectedSimKey: stored?.selected_sim_key || null,
     unifonicEnabled: stored ? Boolean(stored.unifonic_enabled) : true,
+    insideHoursMessage: stored?.inside_hours_message?.trim() || defaults.insideHoursMessage,
+    afterHoursMessage: stored?.after_hours_message?.trim() || defaults.afterHoursMessage,
     version: Number(stored?.version || 0),
     numbers,
     updatedAt: stored?.updated_at || null,
@@ -70,6 +94,8 @@ export type SaveCallReplyPolicyInput = {
   selectedDeviceId?: string | null;
   selectedSimKey?: string | null;
   unifonicEnabled?: boolean;
+  insideHoursMessage?: string;
+  afterHoursMessage?: string;
   version?: number;
   confirmationPhrase?: string;
   numbers?: Array<{ phone: string; label?: string }>;
@@ -116,6 +142,9 @@ export function saveCallReplyPolicy(
   if (opensEveryone && input.confirmationPhrase !== "فتح الرد للجميع") {
     throw new Error("اكتب «فتح الرد للجميع» لتأكيد هذا التغيير.");
   }
+  const defaults = defaultCallReplyMessages();
+  const insideHoursMessage = normalizeReplyMessage(input.insideHoursMessage, current.insideHoursMessage || defaults.insideHoursMessage);
+  const afterHoursMessage = normalizeReplyMessage(input.afterHoursMessage, current.afterHoursMessage || defaults.afterHoursMessage);
 
   const saved = db.transaction(() => {
     const nextVersion = current.version + 1;
@@ -123,13 +152,15 @@ export function saveCallReplyPolicy(
     db.prepare(
       `INSERT INTO call_reply_policies
         (owner_uid, enabled, mode, selected_device_id, selected_sim_key, unifonic_enabled,
-         version, updated_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         inside_hours_message, after_hours_message, version, updated_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(owner_uid) DO UPDATE SET
          enabled = excluded.enabled, mode = excluded.mode,
          selected_device_id = excluded.selected_device_id,
          selected_sim_key = excluded.selected_sim_key,
          unifonic_enabled = excluded.unifonic_enabled,
+         inside_hours_message = excluded.inside_hours_message,
+         after_hours_message = excluded.after_hours_message,
          version = excluded.version, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
     ).run(
       ownerUid,
@@ -138,6 +169,8 @@ export function saveCallReplyPolicy(
       deviceId || null,
       simKey || null,
       input.unifonicEnabled === false ? 0 : 1,
+      insideHoursMessage,
+      afterHoursMessage,
       nextVersion,
       actorUid,
       now,
@@ -227,10 +260,11 @@ export function isWithinCallBusinessHours(date = new Date()) {
   return weekday !== "Fri" && minutes >= 8 * 60 && minutes < 21 * 60;
 }
 
-export function renderCallReplyMessage(disposition: CallReplyDisposition, date = new Date()) {
-  const company = String(process.env.COMPANY_NAME || "BreeXe Pro").trim();
+export function renderCallReplyMessage(
+  disposition: CallReplyDisposition,
+  date = new Date(),
+  messages: Pick<CallReplyPolicy, "insideHoursMessage" | "afterHoursMessage"> = defaultCallReplyMessages(),
+) {
   const outside = disposition === "after_hours" || !isWithinCallBusinessHours(date);
-  return outside
-    ? `شكرًا لاتصالك بـ${company}. نحن خارج أوقات الدوام حاليًا. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.`
-    : `شكرًا لاتصالك بـ${company}. تعذر علينا الرد الآن. اكتب لنا هنا ماذا تحتاج، وسنتواصل معك في أقرب فرصة.`;
+  return outside ? messages.afterHoursMessage : messages.insideHoursMessage;
 }

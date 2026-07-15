@@ -268,7 +268,10 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (state.message.isNotBlank()) item { MessageCard(state.message) }
+        item { SetupProgressCard(state) }
         item { HealthCard(state) }
+        item { WorkSimSelectionCard(state, viewModel) }
+        item { WhatsAppSetupCard(state.serverUrl) }
         state.pendingCall?.let { call ->
             item {
                 Card {
@@ -332,20 +335,21 @@ private fun HomeScreen(
         item {
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("اختبار حدث", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                    Text("تأكد من وصول حدث تجريبي إلى CRM قبل الاعتماد على المكالمات الحقيقية.")
+                    Text("تجربة تسجيل مكالمة في CRM", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                    Text("التطبيق يسجل الرقم والوقت والمدة والنتيجة، ولا يسجل صوت المكالمة. أرسل حدثًا تجريبيًا قبل الاستخدام الحقيقي.")
                     OutlinedTextField(
                         value = testNumber,
                         onValueChange = { testNumber = it },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("رقم متصل تجريبي") },
+                        supportingText = { Text("مثال: 0535848176") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(onClick = { viewModel.enqueueTest("answered", testNumber) }, modifier = Modifier.weight(1f)) { Text("تم الرد") }
-                        Button(onClick = { viewModel.enqueueTest("missed_call", testNumber) }, modifier = Modifier.weight(1f)) { Text("فائتة") }
-                        OutlinedButton(onClick = { viewModel.enqueueTest("outgoing", testNumber) }, modifier = Modifier.weight(1f)) { Text("صادرة") }
+                        OutlinedButton(enabled = testNumber.isNotBlank(), onClick = { viewModel.enqueueTest("answered", testNumber) }, modifier = Modifier.weight(1f)) { Text("مجاب") }
+                        Button(enabled = testNumber.isNotBlank(), onClick = { viewModel.enqueueTest("missed_call", testNumber) }, modifier = Modifier.weight(1f)) { Text("فائتة") }
+                        OutlinedButton(enabled = testNumber.isNotBlank(), onClick = { viewModel.enqueueTest("outgoing", testNumber) }, modifier = Modifier.weight(1f)) { Text("صادرة") }
                     }
                 }
             }
@@ -525,8 +529,8 @@ private fun ConnectionFields(state: GatewayUiState, viewModel: GatewayViewModel,
         value = state.companyNumber,
         onValueChange = viewModel::updateCompanyNumber,
         modifier = Modifier.fillMaxWidth(),
-        label = { Text("رقم شريحة الشركة") },
-        supportingText = { Text("مثال: +9665…") },
+        label = { Text("رقم جوال الشركة") },
+        supportingText = { Text("للتعريف فقط. ستختار الشريحة الفعلية بعد الربط. مثال: +9665…") },
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
     )
@@ -606,6 +610,122 @@ private fun SetupStepCard(
                 }
             }
             content()
+        }
+    }
+}
+
+@Composable
+private fun SetupProgressCard(state: GatewayUiState) {
+    val crmConnected = state.runtime.lastSuccessAt > 0 && state.runtime.lastError.isBlank()
+    val completed = listOf(
+        state.paired,
+        state.diagnostics.permissionsGranted,
+        state.mobilePolicy.workSimKey.isNotBlank(),
+        crmConnected,
+    ).count { it }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("جاهزية هذا الجوال", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("$completed من 4 خطوات مكتملة", style = MaterialTheme.typography.bodySmall)
+                }
+                Text(if (completed == 4) "جاهز" else "أكمل الإعداد", color = if (completed == 4) Teal else MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+            }
+            HorizontalDivider()
+            SetupStatusRow("1", "ربط الجوال بالـ CRM", state.paired)
+            SetupStatusRow("2", "أذونات المكالمات وجهات الاتصال", state.diagnostics.permissionsGranted)
+            SetupStatusRow("3", "اختيار شريحة العمل", state.mobilePolicy.workSimKey.isNotBlank())
+            SetupStatusRow("4", "وصول أول مزامنة إلى CRM", crmConnected)
+        }
+    }
+}
+
+@Composable
+private fun SetupStatusRow(number: String, label: String, complete: Boolean) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(28.dp).background(if (complete) Teal else MaterialTheme.colorScheme.outlineVariant, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (complete) Icon(Icons.Default.Done, null, tint = Color.White, modifier = Modifier.size(18.dp))
+            else Text(number, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(label, Modifier.weight(1f))
+        Text(if (complete) "مكتمل" else "مطلوب", color = if (complete) Teal else MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun WorkSimSelectionCard(state: GatewayUiState, viewModel: GatewayViewModel) {
+    Card(colors = CardDefaults.cardColors(containerColor = if (state.mobilePolicy.workSimKey.isBlank()) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (state.mobilePolicy.workSimKey.isBlank()) Icons.Default.Warning else Icons.Default.CheckCircle, null)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("اختر شريحة العمل", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("لن تُسجل أي مكالمة قبل اعتماد شريحة واحدة.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            if (!state.diagnostics.permissionsGranted) {
+                Text("امنح إذن الهاتف أولًا حتى تظهر الشرائح الموجودة على الجهاز.")
+            } else if (state.activeSims.isEmpty()) {
+                Text("لم يعثر أندرويد على شريحة نشطة. تأكد من تركيب الشريحة وتفعيلها ثم اضغط تحديث أو أعد فتح التطبيق.")
+            } else {
+                state.activeSims.forEach { sim ->
+                    val selected = sim.simKey == state.mobilePolicy.workSimKey
+                    val carrier = sim.carrierName.ifBlank { sim.displayName.ifBlank { "ناقل غير معروف" } }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("الشريحة ${sim.slotIndex + 1} · $carrier", fontWeight = FontWeight.SemiBold)
+                            Text(if (sim.phoneSuffix.isBlank()) "رقم الشريحة غير متاح من أندرويد" else "تنتهي بـ ••••${sim.phoneSuffix}", style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (selected) {
+                            Text("المعتمدة", color = Teal, fontWeight = FontWeight.Bold)
+                        } else {
+                            OutlinedButton(
+                                enabled = state.busyAction.isBlank(),
+                                onClick = { viewModel.selectWorkSim(sim.simKey) },
+                            ) {
+                                if (state.busyAction == "workSim") SmallProgress() else Text("اعتماد")
+                            }
+                        }
+                    }
+                }
+            }
+            Text("مهم: مكالمات أي شريحة أخرى تُهمل ولا تُرفع إلى CRM.", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun WhatsAppSetupCard(serverUrl: String) {
+    val context = LocalContext.current
+    Card {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.AutoMirrored.Filled.Send, null)
+                Spacer(Modifier.width(8.dp))
+                Text("واتساب ورسائل الرد", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
+            Text("واتساب لا يُرسل من هذا الجوال. التطبيق يرفع نتيجة المكالمة، ثم خادم CRM يرسل الرسالة من جلسة واتساب ويب المتصلة.")
+            Text("من لوحة CRM: اربط واتساب ويب، اكتب رسالتي داخل وخارج الدوام، اختر من يستلم، ثم أرسل تجربة.", style = MaterialTheme.typography.bodySmall)
+            FilledTonalButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    val uri = serverUrl.trimEnd('/').toUri().buildUpon()
+                        .appendQueryParameter("section", "mobileOperations")
+                        .appendQueryParameter("mobileTab", "policy")
+                        .build()
+                    context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                },
+            ) {
+                Icon(Icons.Default.Share, null)
+                Spacer(Modifier.width(8.dp))
+                Text("فتح إعداد واتساب في CRM")
+            }
         }
     }
 }

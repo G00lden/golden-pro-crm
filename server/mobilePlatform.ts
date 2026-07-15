@@ -323,6 +323,16 @@ export function updateMobileDevice(
   return publicDevice(after);
 }
 
+export function selectDeviceWorkSim(device: AuthenticatedGatewayDevice, workSimKey: string) {
+  const selected = String(workSimKey || "").trim();
+  return updateMobileDevice(
+    device.owner_uid,
+    `device:${device.id}`,
+    device.id,
+    { workSimKey: selected || null },
+  );
+}
+
 export function getMobileDevicePolicy(device: AuthenticatedGatewayDevice) {
   const current = deviceRow(device.owner_uid, device.id);
   if (!current || current.revoked_at) throw new Error("Device link was revoked.");

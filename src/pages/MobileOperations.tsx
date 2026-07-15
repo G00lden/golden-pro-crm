@@ -24,7 +24,15 @@ type Props = {
   canExecuteCalls: boolean;
   canManagePolicy: boolean;
   canSendTests: boolean;
+  onOpenWhatsApp: () => void;
 };
+
+type MobileOperationsTab = "devices" | "policy" | "test";
+
+function tabFromLocation(): MobileOperationsTab {
+  const value = new URL(window.location.href).searchParams.get("mobileTab");
+  return value === "policy" || value === "test" ? value : "devices";
+}
 
 const MODE_LABEL: Record<api.CallReplyMode, string> = {
   disabled: "إيقاف الرد التلقائي",
@@ -189,12 +197,14 @@ export default function MobileOperationsPage(props: Props) {
   const devices = useData(api.getMobileDevices, []);
   const users = useData(api.getMobileAssignableUsers, [], props.canManageDevices);
   const policyBundle = useData(api.getCallReplyPolicy, []);
-  const [tab, setTab] = useState<"devices" | "policy" | "test">("devices");
+  const [tab, setTab] = useState<MobileOperationsTab>(tabFromLocation);
   const [enabled, setEnabled] = useState(false);
   const [mode, setMode] = useState<api.CallReplyMode>("disabled");
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [selectedSimKey, setSelectedSimKey] = useState("");
   const [unifonicEnabled, setUnifonicEnabled] = useState(true);
+  const [insideHoursMessage, setInsideHoursMessage] = useState("");
+  const [afterHoursMessage, setAfterHoursMessage] = useState("");
   const [numbersText, setNumbersText] = useState("");
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const [savingPolicy, setSavingPolicy] = useState(false);
@@ -216,8 +226,25 @@ export default function MobileOperationsPage(props: Props) {
     setSelectedDeviceId(policy.selectedDeviceId || "");
     setSelectedSimKey(policy.selectedSimKey || "");
     setUnifonicEnabled(policy.unifonicEnabled);
+    setInsideHoursMessage(policy.insideHoursMessage);
+    setAfterHoursMessage(policy.afterHoursMessage);
     setNumbersText(policy.numbers.map((item) => item.label ? `${item.phone}, ${item.label}` : item.phone).join("\n"));
   }, [policyBundle.data?.policy.version]);
+
+  useEffect(() => {
+    const restoreTab = () => setTab(tabFromLocation());
+    window.addEventListener("popstate", restoreTab);
+    return () => window.removeEventListener("popstate", restoreTab);
+  }, []);
+
+  const selectTab = (next: MobileOperationsTab) => {
+    setTab(next);
+    const url = new URL(window.location.href);
+    url.searchParams.set("section", "mobileOperations");
+    url.searchParams.set("mobileTab", next);
+    window.history.pushState({}, "", url);
+    window.requestAnimationFrame(() => document.getElementById(`mobile-${next}-panel`)?.focus());
+  };
 
   useEffect(() => {
     if (!pairingCode) {
@@ -258,6 +285,9 @@ export default function MobileOperationsPage(props: Props) {
   const waConnected = policyBundle.data?.whatsapp.provider === "web" && policyBundle.data?.whatsapp.status === "connected";
   const policyNumbers = useMemo(() => parseNumberLines(numbersText), [numbersText]);
   const needsOpenAllConfirmation = enabled && (mode === "all" || (mode === "all_except" && policyNumbers.length === 0));
+  const hasWorkSim = activeDevices.some((device) => Boolean(device.work_sim_key));
+  const policyReady = enabled && Boolean(selectedDeviceId) && Boolean(selectedSimKey) && insideHoursMessage.trim().length >= 10 && afterHoursMessage.trim().length >= 10;
+  const setupCompleted = [activeDevices.length > 0, hasWorkSim, waConnected, policyReady].filter(Boolean).length;
 
   const savePolicy = async (event: FormEvent) => {
     event.preventDefault();
@@ -269,6 +299,8 @@ export default function MobileOperationsPage(props: Props) {
         selectedDeviceId: selectedDeviceId || null,
         selectedSimKey: selectedSimKey || null,
         unifonicEnabled,
+        insideHoursMessage,
+        afterHoursMessage,
         version: policyBundle.data?.policy.version || 0,
         confirmationPhrase,
         numbers: policyNumbers,
@@ -285,7 +317,12 @@ export default function MobileOperationsPage(props: Props) {
 
   const runPreview = async () => {
     try {
-      const result = await api.previewCallReply({ phone: previewPhone || undefined, disposition: previewDisposition });
+      const result = await api.previewCallReply({
+        phone: previewPhone || undefined,
+        disposition: previewDisposition,
+        insideHoursMessage,
+        afterHoursMessage,
+      });
       setPreview({ message: result.message, allowed: result.decision?.allowed, reason: result.decision?.reason });
     } catch (error) {
       props.notify(errorMessage(error), false);
@@ -296,7 +333,13 @@ export default function MobileOperationsPage(props: Props) {
     if (!testConfirmed) return;
     setTesting(true);
     try {
-      const result = await api.sendCallReplyTest({ phone: previewPhone, disposition: previewDisposition, confirm: true });
+      const result = await api.sendCallReplyTest({
+        phone: previewPhone,
+        disposition: previewDisposition,
+        confirm: true,
+        insideHoursMessage,
+        afterHoursMessage,
+      });
       setPreview({ message: result.message, allowed: true, reason: `تم الإرسال: ${result.testId}` });
       setTestConfirmed(false);
       props.notify(`تم إرسال تجربة واحدة إلى ${result.phone}.`);
@@ -343,14 +386,38 @@ export default function MobileOperationsPage(props: Props) {
         <div className={waConnected ? "stat" : "stat danger"}><span><MessageCircle size={20} aria-hidden="true" /></span><div><strong>{waConnected ? "جاهز" : "متوقف"}</strong><p>واتساب ويب</p></div></div>
       </div>
 
+      <section className="panel mobile-setup-guide" aria-labelledby="mobile-setup-title">
+        <div className="panel-head">
+          <div>
+            <h2 id="mobile-setup-title">ابدأ من هنا</h2>
+            <p className="note">نفّذ الخطوات بالترتيب. الإرسال يتم من خادم CRM عبر واتساب ويب، وليس من تطبيق واتساب على الجوال.</p>
+          </div>
+          <Badge tone={setupCompleted === 4 ? "success" : "warn"}>{setupCompleted} من 4 مكتملة</Badge>
+        </div>
+        <div className="mobile-setup-steps">
+          <button type="button" className={activeDevices.length ? "complete" : ""} onClick={() => selectTab("devices")}>
+            <span>1</span><strong>اربط الجوال</strong><small>{activeDevices.length ? "تم ربط جهاز" : "أنشئ QR وامسحه من التطبيق"}</small>
+          </button>
+          <button type="button" className={hasWorkSim ? "complete" : ""} onClick={() => selectTab("devices")}>
+            <span>2</span><strong>اختر شريحة العمل</strong><small>{hasWorkSim ? "الشريحة محددة" : "اختر SIM 1 أو SIM 2"}</small>
+          </button>
+          <button type="button" className={waConnected ? "complete" : ""} onClick={props.onOpenWhatsApp}>
+            <span>3</span><strong>اربط واتساب ويب</strong><small>{waConnected ? "الجلسة متصلة" : "افتح QR واتساب"}</small>
+          </button>
+          <button type="button" className={policyReady ? "complete" : ""} onClick={() => selectTab("policy")}>
+            <span>4</span><strong>جهّز الرسائل والسياسة</strong><small>{policyReady ? "جاهزة للإرسال" : "اكتب الرسائل وحدد المستلمين"}</small>
+          </button>
+        </div>
+      </section>
+
       <nav className="tabs" aria-label="أقسام مركز الجوال">
-        <button type="button" className={tab === "devices" ? "active" : ""} aria-current={tab === "devices" ? "page" : undefined} onClick={() => setTab("devices")}>الأجهزة</button>
-        {props.canManagePolicy && <button type="button" className={tab === "policy" ? "active" : ""} aria-current={tab === "policy" ? "page" : undefined} onClick={() => setTab("policy")}>سياسة واتساب</button>}
-        {props.canSendTests && <button type="button" className={tab === "test" ? "active" : ""} aria-current={tab === "test" ? "page" : undefined} onClick={() => setTab("test")}>تجربة رقم</button>}
+        <button type="button" className={tab === "devices" ? "active" : ""} aria-current={tab === "devices" ? "page" : undefined} onClick={() => selectTab("devices")}>1. الجوال والشريحة</button>
+        {props.canManagePolicy && <button type="button" className={tab === "policy" ? "active" : ""} aria-current={tab === "policy" ? "page" : undefined} onClick={() => selectTab("policy")}>2. الرسائل والسياسة</button>}
+        {props.canSendTests && <button type="button" className={tab === "test" ? "active" : ""} aria-current={tab === "test" ? "page" : undefined} onClick={() => selectTab("test")}>3. تجربة الإرسال</button>}
       </nav>
 
       {tab === "devices" && (
-        <div className="mobile-device-list">
+        <div id="mobile-devices-panel" className="mobile-device-list" tabIndex={-1}>
           {props.canPairDevices && (
             <section className="panel mobile-pairing-panel" aria-labelledby="mobile-pairing-title">
               <div className="panel-head">
@@ -383,9 +450,24 @@ export default function MobileOperationsPage(props: Props) {
       )}
 
       {tab === "policy" && (
-        <form className="panel form mobile-policy-form" onSubmit={savePolicy}>
-          <div className="panel-head"><div><h2>من تصله رسالة بعد المكالمة؟</h2><p className="note">الشريحة الشخصية لا تدخل في السياسة ولا تُرفع بياناتها إلى CRM.</p></div><Badge tone={enabled ? "success" : "muted"}>{enabled ? "مفعلة" : "متوقفة"}</Badge></div>
+        <form id="mobile-policy-panel" className="panel form mobile-policy-form" tabIndex={-1} onSubmit={savePolicy}>
+          <div className="panel-head"><div><h2>رسائل واتساب وسياسة الإرسال</h2><p className="note">اكتب النصين أولًا، ثم اختر الجهاز والشريحة ومن يستلم. الشريحة الشخصية لا تدخل في السياسة.</p></div><Badge tone={enabled ? "success" : "muted"}>{enabled ? "مفعلة" : "متوقفة"}</Badge></div>
+          <div className={waConnected ? "mobile-whatsapp-status ready" : "mobile-whatsapp-status blocked"} role="status">
+            <MessageCircle size={20} aria-hidden="true" />
+            <div><strong>{waConnected ? "واتساب ويب متصل وجاهز" : "واتساب ويب غير متصل"}</strong><p>{waConnected ? "بعد حفظ السياسة ستُرسل الرسائل من الخادم تلقائيًا." : "اربط جلسة واتساب أولًا. المكالمات ستُسجل لكن الرسائل لن تُرسل."}</p></div>
+            {!waConnected && <Button tone="muted" onClick={props.onOpenWhatsApp}>فتح ربط واتساب</Button>}
+          </div>
           <label className="mobile-toggle"><input name="policy_enabled" type="checkbox" checked={enabled} disabled={!props.canManagePolicy} onChange={(event) => { const next = event.target.checked; setEnabled(next); if (next && mode === "disabled") setMode("specific"); }} /><span>تفعيل الرد الآلي لمكالمات شريحة العمل غير المجابة</span></label>
+          <div className="mobile-message-editor">
+            <Field label="رسالة داخل أوقات الدوام">
+              <TextArea name="inside_hours_message" autoComplete="off" maxLength={700} disabled={!props.canManagePolicy} value={insideHoursMessage} onChange={(event) => setInsideHoursMessage(event.target.value)} placeholder="شكرًا لاتصالك… اكتب لنا ماذا تحتاج وسنتواصل معك قريبًا." />
+            </Field>
+            <small>{insideHoursMessage.length} من 700 حرف</small>
+            <Field label="رسالة خارج أوقات الدوام">
+              <TextArea name="after_hours_message" autoComplete="off" maxLength={700} disabled={!props.canManagePolicy} value={afterHoursMessage} onChange={(event) => setAfterHoursMessage(event.target.value)} placeholder="نحن خارج أوقات الدوام حاليًا… اكتب لنا ماذا تحتاج." />
+            </Field>
+            <small>{afterHoursMessage.length} من 700 حرف</small>
+          </div>
           <fieldset className="mobile-mode-grid" disabled={!props.canManagePolicy || !enabled}>
             <legend>نطاق الإرسال</legend>
             {(Object.keys(MODE_LABEL) as api.CallReplyMode[]).filter((item) => item !== "disabled").map((item) => (
@@ -421,12 +503,12 @@ export default function MobileOperationsPage(props: Props) {
             <CheckCircle2 size={18} aria-hidden="true" />
             <span>{enabled ? `${MODE_LABEL[mode]} · ${policyNumbers.length} رقم في القائمة · الجمعة مغلق، والدوام 8 ص–9 م بتوقيت الرياض.` : "الرد التلقائي متوقف؛ المكالمات والمهام تبقى مسجلة دون رسالة للعميل."}</span>
           </div>
-          {props.canManagePolicy && <div className="form-actions"><Button type="submit" loading={savingPolicy}>حفظ ونشر السياسة</Button></div>}
+          {props.canManagePolicy && <div className="form-actions"><Button type="submit" loading={savingPolicy}>حفظ الرسائل ونشر السياسة</Button></div>}
         </form>
       )}
 
       {tab === "test" && props.canSendTests && (
-        <section className="panel form mobile-test-panel">
+        <section id="mobile-test-panel" className="panel form mobile-test-panel" tabIndex={-1}>
           <div className="panel-head"><div><h2>تجربة واتساب لمرة واحدة</h2><p className="note">تُرسل فورًا فقط ولا تدخل الطابور إذا كان واتساب غير متصل. الحد: 5 تجارب في الساعة.</p></div><Badge tone={waConnected ? "success" : "danger"}>{waConnected ? "واتساب متصل" : "واتساب غير متصل"}</Badge></div>
           <div className="form-grid">
             <Field label="رقم التجربة">
@@ -442,6 +524,7 @@ export default function MobileOperationsPage(props: Props) {
           {preview && <div className="mobile-message-preview" role="status" aria-live="polite"><MessageCircle size={18} aria-hidden="true" /><div><strong>{preview.allowed === false ? "لن تُرسل وفق السياسة الحالية" : "نص الرسالة"}</strong><p>{preview.message}</p>{preview.reason && <small>{preview.reason}</small>}</div></div>}
           <label className="mobile-test-confirm"><input name="confirm_test" type="checkbox" checked={testConfirmed} onChange={(event) => setTestConfirmed(event.target.checked)} /><span>أؤكد إرسال رسالة حقيقية واحدة الآن إلى الرقم المكتوب.</span></label>
           <div className="form-actions"><Button tone="success" loading={testing} disabled={!waConnected || !previewPhone.trim() || !testConfirmed} onClick={sendTest}><MessageCircle size={16} aria-hidden="true" /> إرسال التجربة الآن</Button></div>
+          {!waConnected && <div className="form-actions"><Button tone="muted" onClick={props.onOpenWhatsApp}>ربط واتساب ويب أولًا</Button></div>}
         </section>
       )}
     </section>

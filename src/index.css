@@ -3714,6 +3714,17 @@ img.quote-cover-logo {
 
 /* Mobile operations center */
 .mobile-operations-page { max-width: 1180px; margin-inline: auto; }
+.mobile-setup-guide { display: grid; gap: 14px; margin-bottom: 14px; border-color: color-mix(in srgb, var(--blue) 32%, var(--line)); }
+.mobile-setup-guide h2 { margin: 0; }
+.mobile-setup-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.mobile-setup-steps button { display: grid; min-width: 0; min-height: 112px; align-content: start; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2); color: var(--text); text-align: start; font: inherit; cursor: pointer; touch-action: manipulation; transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease; }
+.mobile-setup-steps button:hover { border-color: color-mix(in srgb, var(--blue) 55%, var(--line)); background: color-mix(in srgb, var(--blue) 7%, var(--surface)); transform: translateY(-1px); }
+.mobile-setup-steps button:focus-visible { outline: 3px solid rgba(94, 159, 214, .28); outline-offset: 2px; }
+.mobile-setup-steps button.complete { border-color: rgba(30, 174, 116, .38); background: rgba(30, 174, 116, .08); }
+.mobile-setup-steps button > span { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 999px; background: var(--blue); color: #fff; font-size: 12px; font-weight: 900; }
+.mobile-setup-steps button.complete > span { background: #1eae74; }
+.mobile-setup-steps strong { overflow-wrap: anywhere; font-size: 13px; }
+.mobile-setup-steps small { color: var(--muted); line-height: 1.55; }
 .mobile-device-list { display: grid; gap: 12px; }
 .mobile-pairing-panel { display: grid; gap: 14px; border-color: color-mix(in srgb, var(--teal) 38%, var(--line)); }
 .mobile-pairing-panel h2 { display: flex; align-items: center; gap: 8px; }
@@ -3735,6 +3746,15 @@ img.quote-cover-logo {
 .mobile-dial-row { display: flex; flex: 1 1 330px; gap: 8px; }
 .mobile-dial-row .input { min-width: 150px; }
 .mobile-policy-form, .mobile-test-panel { max-width: 920px; }
+.mobile-whatsapp-status { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.mobile-whatsapp-status.ready { border-color: rgba(30, 174, 116, .35); background: rgba(30, 174, 116, .08); }
+.mobile-whatsapp-status.blocked { border-color: rgba(224, 93, 93, .4); background: rgba(224, 93, 93, .08); }
+.mobile-whatsapp-status strong { display: block; margin-bottom: 3px; }
+.mobile-whatsapp-status p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.mobile-message-editor { display: grid; gap: 7px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.mobile-message-editor textarea { min-height: 104px; line-height: 1.75; }
+.mobile-message-editor > small { margin-top: -4px; color: var(--muted); text-align: end; font-variant-numeric: tabular-nums; }
+.mobile-device-list:focus-visible, .mobile-policy-form:focus-visible, .mobile-test-panel:focus-visible { outline: 3px solid rgba(94, 159, 214, .25); outline-offset: 3px; }
 .mobile-toggle, .mobile-test-confirm { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); color: var(--text); font-size: 13px; line-height: 1.6; cursor: pointer; }
 .mobile-toggle input, .mobile-test-confirm input, .mobile-mode-option input { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--gold); }
 .mobile-mode-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; min-width: 0; padding: 0; border: 0; }
@@ -3753,6 +3773,7 @@ img.quote-cover-logo {
 .managed-permissions-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 
 @media (max-width: 760px) {
+  .mobile-setup-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mobile-mode-grid { grid-template-columns: 1fr; }
   .mobile-device-head { grid-template-columns: auto minmax(0, 1fr); }
   .mobile-device-head > .badge { grid-column: 1 / -1; justify-self: start; }
@@ -3763,6 +3784,15 @@ img.quote-cover-logo {
   .mobile-operations-page .page-head { align-items: stretch; }
   .mobile-operations-page .page-head > .btn { width: 100%; }
   .mobile-dial-row { display: grid; grid-template-columns: 1fr; }
+  .mobile-setup-steps { grid-template-columns: 1fr; }
+  .mobile-setup-steps button { min-height: 0; }
+  .mobile-whatsapp-status { grid-template-columns: auto minmax(0, 1fr); }
+  .mobile-whatsapp-status > .btn { grid-column: 1 / -1; width: 100%; }
   .mobile-dial-row .btn { width: 100%; }
   .managed-permissions-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-setup-steps button { transition: none; }
+  .mobile-setup-steps button:hover { transform: none; }
 }
