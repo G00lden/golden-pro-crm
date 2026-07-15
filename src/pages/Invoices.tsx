@@ -1085,9 +1085,6 @@ function InvoicePreview({ invoice, onCopy, onPrint }: { invoice: api.Invoice; on
           </article>
           <aside className="invoice-zatca-card" aria-label="رمز الفاتورة الضريبية">
             <QRCodeDisplay key={qr.data || qr.error} data={qr.data} error={qr.error} size={96} />
-            <small style={{ maxWidth: 190, textAlign: "center", color: "#64748b", lineHeight: 1.5 }}>
-              رمز TLV أساسي للمرحلة الأولى؛ لا يمثل ربط المرحلة الثانية مع منصة فاتورة.
-            </small>
           </aside>
         </section>
 
