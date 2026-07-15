@@ -42,6 +42,7 @@ export type AuthedRequest = Request & {
     permissions: Record<string, boolean>;
     active: boolean;
     local: boolean;
+    authTime?: number;
   };
 };
 
@@ -92,6 +93,7 @@ export async function requireFirebaseUser(
         permissions: record.permissions,
         active: record.active,
         local: true,
+        authTime: Date.now(),
       });
       return next();
     } catch (err) {
@@ -130,6 +132,7 @@ export async function requireFirebaseUser(
       permissions: record.permissions,
       active: record.active,
       local: false,
+      authTime: Number(decoded.auth_time || 0) * 1000,
     });
     return next();
   } catch (error) {

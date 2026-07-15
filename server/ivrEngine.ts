@@ -23,6 +23,7 @@ import type {
 import { logError, logEvent } from "./logger";
 import { normalizePhoneDigits, phoneTail } from "../shared/phone";
 import { communicationJobStore } from "./communicationJobs";
+import { evaluateCallReplyRecipient, evaluateCallReplySource, renderCallReplyMessage, type CallReplyDisposition } from "./callReplyPolicy";
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Breexe Pro";
 const DEFAULT_RING_TIMEOUT = Number(process.env.TELEPHONY_RING_TIMEOUT_SEC || 20);
@@ -688,13 +689,34 @@ export async function runAnsweredCallFlow(callSid: string): Promise<Record<strin
   const callId = String(call.id || "");
   if (!ownerUid || !customerPhone || !callId) return { queued: false, reason: "missing_call_data" };
 
+  const replyDecision = evaluateCallReplyRecipient(ownerUid, customerPhone);
+  const source = String(call.source || call.provider || "");
+  const sourceDecision = evaluateCallReplySource(replyDecision.policy, {
+    source,
+    deviceId: call.device_id,
+    simKey: call.sim_key,
+  });
+  if (!replyDecision.allowed || !sourceDecision.allowed) {
+    return {
+      queued: false,
+      reason: replyDecision.allowed ? sourceDecision.reason : replyDecision.reason,
+    };
+  }
+
   try {
     const job = communicationJobStore.enqueue({
       ownerUid,
       eventKey: `answered-call:${callId}:customer`,
       recipientPhone: customerPhone,
       templateName: "call_answered_customer",
-      payload: { vars: {} },
+      payload: {
+        purpose: "call_auto",
+        policyVersion: replyDecision.policy.version,
+        source,
+        deviceId: String(call.device_id || ""),
+        simKey: String(call.sim_key || ""),
+        vars: {},
+      },
       role: "customer",
       callId,
       expiresInMinutes: 30,
@@ -729,17 +751,36 @@ export async function runMissedCallFlow(callSid: string): Promise<Record<string,
 
   const callId = String(call.id || "");
   const out: Record<string, unknown> = { queued: true, customer: false, agent: false };
+  const replyDecision = evaluateCallReplyRecipient(ownerUid, customerPhone);
+  const source = String(call.source || call.provider || "");
+  const sourceDecision = evaluateCallReplySource(replyDecision.policy, {
+    source,
+    deviceId: call.device_id,
+    simKey: call.sim_key,
+  });
+  out.customer_policy = replyDecision.allowed ? sourceDecision.reason : replyDecision.reason;
+  const disposition = ["no_answer", "busy", "unreachable", "rejected", "after_hours"].includes(String(call.disposition || call.status))
+    ? String(call.disposition || call.status) as CallReplyDisposition
+    : "no_answer";
+  const customerMessage = renderCallReplyMessage(disposition, new Date(String(call.ended_at || call.created_at || nowIso())));
 
   // 1) Queue the apology to the customer. The durable worker owns provider I/O,
   // retry and final delivery flags; webhook retries only return the same job.
-  if (customerPhone && Number(call.wa_customer_notified || 0) === 0) {
+  if (sourceDecision.allowed && replyDecision.allowed && customerPhone && Number(call.wa_customer_notified || 0) === 0) {
     try {
       const job = communicationJobStore.enqueue({
         ownerUid,
         eventKey: `missed-call:${callId}:customer`,
         recipientPhone: customerPhone,
-        templateName: "missed_call_customer",
-        payload: { vars: { department_name: departmentName || "خدمة العملاء", agent_name: agentName || "أحد موظفينا" } },
+        templateName: "general_reminder",
+        payload: {
+          purpose: "call_auto",
+          policyVersion: replyDecision.policy.version,
+          source,
+          deviceId: String(call.device_id || ""),
+          simKey: String(call.sim_key || ""),
+          vars: { message: customerMessage },
+        },
         role: "customer",
         callId,
         expiresInMinutes: 30,

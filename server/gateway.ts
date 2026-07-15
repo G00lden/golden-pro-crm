@@ -233,10 +233,13 @@ export type GatewayEvent = {
   ts?: string;
   occurredAt?: string;
   device?: string;
+  deviceId?: string;
+  simKey?: string;
   source?: string;
   disposition?: string;
   durationSeconds?: number;
   phoneAccountId?: string;
+  suppressAutomation?: boolean;
 };
 
 type GatewayDisposition =
@@ -310,15 +313,24 @@ export async function handleGatewayEvent(ownerUid: string, event: GatewayEvent):
       missed: missed ? 1 : 0,
       duration_sec: Math.max(0, Number(event.durationSeconds || 0)),
       ended_at: event.occurredAt || event.ts || nowIso(),
+      device_id: event.deviceId || event.device || null,
+      sim_key: event.simKey || null,
+      source: event.source || "android",
+      disposition,
       metadata: JSON.stringify({
         source: event.source || "android",
-        device: event.device || "",
+        device: event.deviceId || event.device || "",
+        simKey: event.simKey || "",
         phoneAccountId: event.phoneAccountId || "",
       }),
     }, ownerUid);
 
     if (["outgoing", "blocked", "unknown"].includes(disposition)) {
       return { handled: true, kind: "call", disposition, callSid, notified: false };
+    }
+
+    if (event.suppressAutomation) {
+      return { handled: true, kind: "call", disposition, callSid, notified: false, suppressed: true };
     }
 
     const cooldownMin = Number(process.env.GATEWAY_REPLY_COOLDOWN_MIN ?? 10);

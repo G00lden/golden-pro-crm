@@ -59,6 +59,7 @@ import OdooCrmPage from "./pages/OdooCrm";
 import TechniciansPage from "./pages/Technicians";
 import SettingsPage from "./pages/Settings";
 import CallSystemPage from "./pages/CallSystem";
+import MobileOperationsPage from "./pages/MobileOperations";
 import { hasAppCapability, normalizeAppRole } from "../shared/accessControl";
 import { useDialogAccessibility } from "./dialogAccessibility";
 import {
@@ -93,6 +94,7 @@ const pageIds = new Set<Page>([
   "messages",
   "campaigns",
   "callSystem",
+  "mobileOperations",
   "settings",
   "adminUsers",
 ]);
@@ -364,13 +366,20 @@ export default function App() {
 
   const me = useData(api.getMe, [], authed && authReady);
   const currentRole = normalizeAppRole(me.data?.role);
-  const canManageUsers = hasAppCapability(currentRole, "users.manage");
-  const canManageWhatsApp = hasAppCapability(currentRole, "whatsapp.manage");
-  const canManageCampaigns = hasAppCapability(currentRole, "campaigns.manage");
-  const canManageCalls = hasAppCapability(currentRole, "calls.manage");
-  const canManagePublicLeads = hasAppCapability(currentRole, "public_leads.manage");
-  const canPrepareOperations = hasAppCapability(currentRole, "operations.prepare");
-  const canSeedDemoData = hasAppCapability(currentRole, "demo.seed");
+  const permissions = me.data?.permissions || {};
+  const canManageUsers = hasAppCapability(currentRole, "users.manage", permissions);
+  const canManageWhatsApp = hasAppCapability(currentRole, "whatsapp.manage", permissions);
+  const canManageCampaigns = hasAppCapability(currentRole, "campaigns.manage", permissions);
+  const canManageCalls = hasAppCapability(currentRole, "calls.manage", permissions);
+  const canManagePublicLeads = hasAppCapability(currentRole, "public_leads.manage", permissions);
+  const canPrepareOperations = hasAppCapability(currentRole, "operations.prepare", permissions);
+  const canSeedDemoData = hasAppCapability(currentRole, "demo.seed", permissions);
+  const canViewMobile = hasAppCapability(currentRole, "mobile.devices.view", permissions);
+  const canPairMobileDevices = hasAppCapability(currentRole, "mobile.devices.pair", permissions);
+  const canManageMobileDevices = hasAppCapability(currentRole, "mobile.devices.manage", permissions);
+  const canExecuteMobileCalls = hasAppCapability(currentRole, "mobile.calls.execute", permissions);
+  const canManageReplyPolicy = hasAppCapability(currentRole, "mobile.reply_policy.manage", permissions);
+  const canSendMobileTests = hasAppCapability(currentRole, "mobile.tests.send", permissions);
   const currentUid = me.data?.uid || null;
 
   const stats = useData(api.getStats, [page], authed && authReady);
@@ -437,6 +446,9 @@ export default function App() {
     ...(canManageCalls
       ? [{ id: "callSystem" as Page, label: "نظام المكالمات", icon: PhoneCall }]
       : []),
+    ...(canViewMobile
+      ? [{ id: "mobileOperations" as Page, label: "مركز الجوال", icon: Smartphone }]
+      : []),
     ...(canManageUsers
       ? [{ id: "adminUsers" as Page, label: "إدارة المستخدمين", icon: UserRoundCog }]
       : []),
@@ -485,6 +497,16 @@ export default function App() {
     messages: canManageWhatsApp ? <WhatsAppConsole notify={notify} /> : <AccessDenied />,
     campaigns: canManageCampaigns ? <CampaignsPage notify={notify} /> : <AccessDenied />,
     callSystem: canManageCalls ? <CallSystemPage notify={notify} /> : <AccessDenied />,
+    mobileOperations: canViewMobile ? (
+      <MobileOperationsPage
+        notify={notify}
+        canPairDevices={canPairMobileDevices}
+        canManageDevices={canManageMobileDevices}
+        canExecuteCalls={canExecuteMobileCalls}
+        canManagePolicy={canManageReplyPolicy}
+        canSendTests={canSendMobileTests}
+      />
+    ) : <AccessDenied />,
     settings: (
       <SettingsPage
         notify={notify}

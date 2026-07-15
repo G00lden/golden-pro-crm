@@ -33,6 +33,7 @@ import {
   registerGatewayRoutes,
   registerGatewayWebhookRoutes,
 } from "./server/routes-gateway";
+import { registerMobileAdminRoutes, registerMobileDeviceRoutes } from "./server/routes-mobile";
 import { registerPaymentRoutes, registerPaymentWebhookRoute } from "./server/routes-payment";
 import {
   publicLeadRateLimitOptions,
@@ -304,6 +305,11 @@ async function startServer() {
     pairingRateLimit: gatewayPairingRateLimit,
     gatewayOwnerUid: __whatsappOwnerUid,
   });
+  registerMobileDeviceRoutes(app, {
+    ownerUid: __whatsappOwnerUid,
+    webhookRateLimit,
+    pairingRateLimit: gatewayPairingRateLimit,
+  });
 
   // Tap payment webhook (authenticated via HMAC signature, not Firebase)
   registerPaymentWebhookRoute(app);
@@ -373,6 +379,7 @@ async function startServer() {
     pairingRateLimit: gatewayPairingRateLimit,
     gatewayOwnerUid: __whatsappOwnerUid,
   });
+  registerMobileAdminRoutes(app, { ownerUid: __whatsappOwnerUid });
   registerOdooCrmRoutes(app);
   registerPublicLeadInboxRoutes(app, {
     database: db,
