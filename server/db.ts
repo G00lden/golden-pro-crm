@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10308;
+const TARGET_SCHEMA_VERSION = 10310;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -1028,6 +1028,8 @@ db.exec(`
     selected_device_id TEXT,
     selected_sim_key TEXT,
     unifonic_enabled INTEGER NOT NULL DEFAULT 1,
+    inside_hours_message TEXT,
+    after_hours_message TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     updated_by TEXT,
     created_at TEXT DEFAULT (datetime('now')),
@@ -1084,6 +1086,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
   CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(tap_charge_id);
 `);
+
+for (const [column, definition] of [
+  ["inside_hours_message", "TEXT"],
+  ["after_hours_message", "TEXT"],
+] as const) {
+  if (!hasColumn("call_reply_policies", column)) {
+    db.exec(`ALTER TABLE call_reply_policies ADD COLUMN ${column} ${definition}`);
+  }
+}
 
 for (const col of [
   ["idempotency_key", "TEXT"],
@@ -1794,6 +1805,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10307, '1.3.7');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10308, '1.3.7-ledger-hardening');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10309, '1.3.8-android-gateway');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10310, '2.1.2-mobile-onboarding-clarity');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

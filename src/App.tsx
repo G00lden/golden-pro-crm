@@ -505,6 +505,7 @@ export default function App() {
         canExecuteCalls={canExecuteMobileCalls}
         canManagePolicy={canManageReplyPolicy}
         canSendTests={canSendMobileTests}
+        onOpenWhatsApp={() => openPage("messages")}
       />
     ) : <AccessDenied />,
     settings: (

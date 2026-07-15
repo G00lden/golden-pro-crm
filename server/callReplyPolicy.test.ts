@@ -32,9 +32,12 @@ test("call reply policy is fail-closed, SIM-scoped and supports specific/all-exc
       selectedDeviceId: device,
       selectedSimKey: sim,
       version: 0,
+      insideHoursMessage: "رسالة مخصصة داخل الدوام للاختبار.",
+      afterHoursMessage: "رسالة مخصصة خارج الدوام للاختبار.",
       numbers: [{ phone: "0535848176", label: "رقم التجربة" }],
     });
     assert.equal(specific.version, 1);
+    assert.equal(specific.insideHoursMessage, "رسالة مخصصة داخل الدوام للاختبار.");
     assert.equal(policy.evaluateCallReplyRecipient(owner, "+966535848176").allowed, true);
     assert.equal(policy.evaluateCallReplyRecipient(owner, "+966500000001").reason, "recipient_not_selected");
 
@@ -47,6 +50,7 @@ test("call reply policy is fail-closed, SIM-scoped and supports specific/all-exc
       numbers: [{ phone: "+966535848176", label: "مستثنى" }],
     });
     assert.equal(allExcept.version, 2);
+    assert.equal(allExcept.afterHoursMessage, "رسالة مخصصة خارج الدوام للاختبار.");
     assert.equal(policy.evaluateCallReplyRecipient(owner, "+966535848176").reason, "recipient_excluded");
     assert.equal(policy.evaluateCallReplyRecipient(owner, "+966500000001").allowed, true);
 
@@ -62,10 +66,10 @@ test("call reply policy is fail-closed, SIM-scoped and supports specific/all-exc
     assert.equal(policy.evaluateCallReplySource(all, { source: "android", deviceId: "personal-device", simKey: sim }).reason, "source_not_selected");
     assert.equal(policy.evaluateCallReplySource(all, { source: "unifonic" }).allowed, true);
     assert.equal(policy.evaluateCallReplySource(all, { source: "unknown-provider" }).reason, "unknown_source");
-    const inHours = policy.renderCallReplyMessage("no_answer", new Date("2026-07-15T09:00:00.000Z"));
-    const afterHours = policy.renderCallReplyMessage("after_hours", new Date("2026-07-16T20:00:00.000Z"));
-    assert.match(inHours, /تعذر علينا الرد الآن/);
-    assert.match(afterHours, /خارج أوقات الدوام/);
+    const inHours = policy.renderCallReplyMessage("no_answer", new Date("2026-07-15T09:00:00.000Z"), all);
+    const afterHours = policy.renderCallReplyMessage("after_hours", new Date("2026-07-16T20:00:00.000Z"), all);
+    assert.equal(inHours, "رسالة مخصصة داخل الدوام للاختبار.");
+    assert.equal(afterHours, "رسالة مخصصة خارج الدوام للاختبار.");
   } finally {
     openedDb?.close();
     rmSync(dbPath, { force: true });

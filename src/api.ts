@@ -4801,6 +4801,8 @@ export type CallReplyPolicy = {
   selectedDeviceId: string | null;
   selectedSimKey: string | null;
   unifonicEnabled: boolean;
+  insideHoursMessage: string;
+  afterHoursMessage: string;
   version: number;
   numbers: Array<{ phone: string; label: string; kind: "allow" | "exclude" }>;
   updatedAt: string | null;
@@ -4849,6 +4851,8 @@ export const updateCallReplyPolicy = (data: {
   selectedDeviceId?: string | null;
   selectedSimKey?: string | null;
   unifonicEnabled?: boolean;
+  insideHoursMessage?: string;
+  afterHoursMessage?: string;
   version?: number;
   confirmationPhrase?: string;
   numbers?: Array<{ phone: string; label?: string }>;
@@ -4861,6 +4865,8 @@ export const previewCallReply = (data: {
   phone?: string;
   disposition: CallReplyDisposition;
   occurredAt?: string;
+  insideHoursMessage?: string;
+  afterHoursMessage?: string;
 }) => apiFetch<{
   message: string;
   decision: null | { allowed: boolean; reason: string; phone: string };
@@ -4874,6 +4880,8 @@ export const sendCallReplyTest = (data: {
   disposition: CallReplyDisposition;
   confirm: true;
   occurredAt?: string;
+  insideHoursMessage?: string;
+  afterHoursMessage?: string;
 }) => apiFetch<{
   testId: string;
   status: string;

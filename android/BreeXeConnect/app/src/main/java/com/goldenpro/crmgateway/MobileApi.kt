@@ -56,21 +56,34 @@ object MobileApi {
 
     fun fetchPolicy(context: Context): MobileApiResult<MobilePolicy> {
         return when (val result = request(context, "/api/mobile/v1/policy", "GET", null)) {
+            is MobileApiResult.Success -> MobileApiResult.Success(savePolicy(context, result.value))
+            is MobileApiResult.Retry -> result
+            is MobileApiResult.Failure -> result
+        }
+    }
+
+    fun selectWorkSim(context: Context, simKey: String): MobileApiResult<MobilePolicy> {
+        val body = JSONObject().put("workSimKey", simKey)
+        return when (val result = request(context, "/api/mobile/v1/work-sim", "PUT", body)) {
             is MobileApiResult.Success -> {
-                val json = result.value
-                val policy = MobilePolicy(
-                    version = json.optInt("policyVersion"),
-                    workSimKey = json.optString("workSimKey"),
-                    assignedUserName = json.optString("assignedUserName"),
-                    branchId = json.optString("branchId"),
-                    managementMode = json.optString("managementMode", "byod"),
-                )
-                GatewayPreferences.saveMobilePolicy(context, policy)
-                MobileApiResult.Success(policy)
+                val policyJson = result.value.optJSONObject("policy") ?: result.value
+                MobileApiResult.Success(savePolicy(context, policyJson))
             }
             is MobileApiResult.Retry -> result
             is MobileApiResult.Failure -> result
         }
+    }
+
+    private fun savePolicy(context: Context, json: JSONObject): MobilePolicy {
+        val policy = MobilePolicy(
+            version = json.optInt("policyVersion"),
+            workSimKey = json.optString("workSimKey"),
+            assignedUserName = json.optString("assignedUserName"),
+            branchId = json.optString("branchId"),
+            managementMode = json.optString("managementMode", "byod"),
+        )
+        GatewayPreferences.saveMobilePolicy(context, policy)
+        return policy
     }
 
     fun sendEvents(context: Context, events: List<GatewayEvent>): MobileApiResult<Unit> {

@@ -216,6 +216,9 @@ if (!invoiceIndexes.has("idx_invoices_owner_source")) throw new Error("idx_invoi
 for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
   if (!columns("settings").has(required)) throw new Error(`settings.${required} is missing`);
 }
+for (const required of ["inside_hours_message", "after_hours_message"]) {
+  if (!columns("call_reply_policies").has(required)) throw new Error(`call_reply_policies.${required} is missing`);
+}
 for (const required of ["merged_into", "merged_at"]) {
   if (!columns("products").has(required)) throw new Error(`products.${required} is missing`);
 }
@@ -231,7 +234,7 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10308) throw new Error(`Expected schema 10308, got ${userVersion}`);
+if (userVersion !== 10310) throw new Error(`Expected schema 10310, got ${userVersion}`);
 
 for (const required of [
   "remote_status_id",
@@ -531,6 +534,8 @@ const integrationSafetyMigration = db.prepare("SELECT release FROM schema_migrat
 if (integrationSafetyMigration?.release !== "1.3.7") throw new Error("Integration safety migration ledger was not updated.");
 const ledgerHardeningMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10308").get() as { release?: string };
 if (ledgerHardeningMigration?.release !== "1.3.7-ledger-hardening") throw new Error("Invoice ledger hardening migration was not updated.");
+const mobileOnboardingMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10310").get() as { release?: string };
+if (mobileOnboardingMigration?.release !== "2.1.2-mobile-onboarding-clarity") throw new Error("Mobile onboarding migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();
