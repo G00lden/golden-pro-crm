@@ -4735,6 +4735,165 @@ export const getGatewayDevices = () =>
 export const revokeGatewayDevice = (id: string) =>
   apiFetch<{ success: true }>(`/api/gateway/devices/${encodeURIComponent(id)}/revoke`, { method: "POST" });
 
+/* Mobile operations platform */
+
+export type MobileSim = {
+  sim_key: string;
+  slot_index: number | null;
+  carrier_name: string | null;
+  display_name: string | null;
+  phone_suffix: string | null;
+  active: number | boolean;
+  last_seen_at: string | null;
+};
+
+export type MobileDevice = {
+  id: string;
+  name: string;
+  company_number: string | null;
+  assigned_user_uid: string | null;
+  assigned_user_name: string | null;
+  branch_id: string | null;
+  management_mode: "byod" | "company";
+  work_sim_key: string | null;
+  capabilities: Record<string, boolean>;
+  policy_version: number;
+  app_version: string | null;
+  platform_version: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  battery_percent: number | null;
+  network_type: string | null;
+  permissions: Record<string, boolean>;
+  health: Record<string, unknown>;
+  last_health_at: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+  revoked_at: string | null;
+  sims: MobileSim[];
+};
+
+export type MobileAssignableUser = {
+  uid: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  role: string;
+};
+
+export type MobileCommand = {
+  id: string;
+  device_id: string;
+  command_type: "dial_request" | "open_customer" | "show_task" | "sync_contacts" | "refresh_policy" | "collect_health" | "local_wipe";
+  payload: Record<string, unknown>;
+  status: "pending" | "delivered" | "confirmed" | "completed" | "failed" | "expired" | "cancelled";
+  expires_at: string;
+  created_at: string;
+  error?: string | null;
+};
+
+export type CallReplyMode = "disabled" | "specific" | "all_except" | "all";
+export type CallReplyDisposition = "no_answer" | "busy" | "unreachable" | "rejected" | "after_hours";
+
+export type CallReplyPolicy = {
+  enabled: boolean;
+  mode: CallReplyMode;
+  selectedDeviceId: string | null;
+  selectedSimKey: string | null;
+  unifonicEnabled: boolean;
+  insideHoursMessage: string;
+  afterHoursMessage: string;
+  version: number;
+  numbers: Array<{ phone: string; label: string; kind: "allow" | "exclude" }>;
+  updatedAt: string | null;
+};
+
+export type CallReplyPolicyBundle = {
+  policy: CallReplyPolicy;
+  devices: MobileDevice[];
+  outboundSafety: { mode?: string; [key: string]: unknown };
+  whatsapp: { provider?: string; status?: string; [key: string]: unknown };
+};
+
+export const getMobileDevices = () =>
+  apiFetch<{ devices: MobileDevice[] }>("/api/mobile/devices").then((result) => result.devices);
+
+export const getMobileAssignableUsers = () =>
+  apiFetch<{ users: MobileAssignableUser[] }>("/api/mobile/assignable-users").then((result) => result.users);
+
+export const updateMobileDevice = (id: string, data: {
+  name?: string;
+  assignedUserUid?: string | null;
+  branchId?: string | null;
+  managementMode?: "byod" | "company";
+  workSimKey?: string | null;
+  capabilities?: Record<string, boolean>;
+}) => apiFetch<{ device: MobileDevice }>(`/api/mobile/devices/${encodeURIComponent(id)}`, {
+  method: "PATCH",
+  body: JSON.stringify(data),
+}).then((result) => result.device);
+
+export const createMobileCommand = (deviceId: string, data: {
+  type: MobileCommand["command_type"];
+  payload?: Record<string, unknown>;
+  expiresInSeconds?: number;
+  confirmationDeviceName?: string;
+}) => apiFetch<{ command: MobileCommand }>(`/api/mobile/devices/${encodeURIComponent(deviceId)}/commands`, {
+  method: "POST",
+  body: JSON.stringify(data),
+}).then((result) => result.command);
+
+export const getCallReplyPolicy = () => apiFetch<CallReplyPolicyBundle>("/api/call-reply-policy");
+
+export const updateCallReplyPolicy = (data: {
+  enabled: boolean;
+  mode: CallReplyMode;
+  selectedDeviceId?: string | null;
+  selectedSimKey?: string | null;
+  unifonicEnabled?: boolean;
+  insideHoursMessage?: string;
+  afterHoursMessage?: string;
+  version?: number;
+  confirmationPhrase?: string;
+  numbers?: Array<{ phone: string; label?: string }>;
+}) => apiFetch<{ policy: CallReplyPolicy }>("/api/call-reply-policy", {
+  method: "PUT",
+  body: JSON.stringify(data),
+}).then((result) => result.policy);
+
+export const previewCallReply = (data: {
+  phone?: string;
+  disposition: CallReplyDisposition;
+  occurredAt?: string;
+  insideHoursMessage?: string;
+  afterHoursMessage?: string;
+}) => apiFetch<{
+  message: string;
+  decision: null | { allowed: boolean; reason: string; phone: string };
+}>("/api/call-reply-policy/preview", {
+  method: "POST",
+  body: JSON.stringify(data),
+});
+
+export const sendCallReplyTest = (data: {
+  phone: string;
+  disposition: CallReplyDisposition;
+  confirm: true;
+  occurredAt?: string;
+  insideHoursMessage?: string;
+  afterHoursMessage?: string;
+}) => apiFetch<{
+  testId: string;
+  status: string;
+  sentAt: string;
+  messageId: string;
+  phone: string;
+  message: string;
+}>("/api/call-reply-policy/test", {
+  method: "POST",
+  body: JSON.stringify(data),
+});
+
 // ── Tap Payment Gateway ──
 
 export interface PaymentResponse {

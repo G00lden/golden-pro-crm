@@ -8,9 +8,28 @@ export type GatewayDevice = {
   id: string;
   name: string;
   company_number: string;
+  assigned_user_uid: string | null;
+  branch_id: string | null;
+  management_mode: "byod" | "company";
+  work_sim_key: string | null;
+  capabilities_json: string | null;
+  policy_version: number;
+  app_version: string | null;
+  platform_version: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  battery_percent: number | null;
+  network_type: string | null;
+  permissions_json: string | null;
+  health_json: string | null;
+  last_health_at: string | null;
   created_at: string;
   last_seen_at: string | null;
   revoked_at: string | null;
+};
+
+export type AuthenticatedGatewayDevice = GatewayDevice & {
+  owner_uid: string;
 };
 
 type PairingRow = {
@@ -135,8 +154,9 @@ export function redeemGatewayPairingCode(input: {
 
     db.prepare(`
       INSERT INTO gateway_devices
-        (id, owner_uid, name, company_number, token_hash, pairing_code_id, pairing_nonce_hash, last_seen_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, owner_uid, name, company_number, token_hash, pairing_code_id, pairing_nonce_hash,
+         last_seen_at, token_rotated_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       deviceId,
       row.owner_uid,
@@ -147,6 +167,8 @@ export function redeemGatewayPairingCode(input: {
       nonceHash,
       nowIso,
       nowIso,
+      nowIso,
+      nowIso,
     );
     return true;
   });
@@ -154,17 +176,25 @@ export function redeemGatewayPairingCode(input: {
   return claim() ? { token, deviceId, ownerUid: row.owner_uid } : null;
 }
 
-export function verifyGatewayDeviceToken(ownerUid: string, token: string, now = Date.now()): boolean {
-  if (!gatewayDeviceAuthConfigured()) return false;
+export function authenticateGatewayDeviceToken(
+  ownerUid: string,
+  token: string,
+  now = Date.now(),
+): AuthenticatedGatewayDevice | null {
+  if (!gatewayDeviceAuthConfigured()) return null;
   const match = token.match(/^(gwd_[A-Za-z0-9_-]{16})\.[A-Za-z0-9_-]{40,}$/);
-  if (!match) return false;
+  if (!match) return null;
 
   const row = db.prepare(`
-    SELECT token_hash
+    SELECT id, owner_uid, name, company_number, assigned_user_uid, branch_id,
+      management_mode, work_sim_key, capabilities_json, policy_version,
+      app_version, platform_version, manufacturer, model, battery_percent,
+      network_type, permissions_json, health_json, last_health_at,
+      created_at, last_seen_at, revoked_at, token_hash
     FROM gateway_devices
     WHERE id = ? AND owner_uid = ? AND revoked_at IS NULL
-  `).get(match[1], ownerUid) as { token_hash: string } | undefined;
-  if (!row || !safeEquals(row.token_hash, fingerprint("device", token))) return false;
+  `).get(match[1], ownerUid) as (AuthenticatedGatewayDevice & { token_hash: string }) | undefined;
+  if (!row || !safeEquals(row.token_hash, fingerprint("device", token))) return null;
 
   db.prepare(`
     UPDATE gateway_devices
@@ -173,12 +203,21 @@ export function verifyGatewayDeviceToken(ownerUid: string, token: string, now = 
       last_seen_at IS NULL OR last_seen_at < ?
     )
   `).run(iso(now), match[1], iso(now - DEVICE_TOUCH_INTERVAL_MS));
-  return true;
+  const { token_hash: _tokenHash, ...device } = row;
+  return device;
+}
+
+export function verifyGatewayDeviceToken(ownerUid: string, token: string, now = Date.now()): boolean {
+  return Boolean(authenticateGatewayDeviceToken(ownerUid, token, now));
 }
 
 export function listGatewayDevices(ownerUid: string): GatewayDevice[] {
   return db.prepare(`
-    SELECT id, name, company_number, created_at, last_seen_at, revoked_at
+    SELECT id, name, company_number, assigned_user_uid, branch_id,
+      management_mode, work_sim_key, capabilities_json, policy_version,
+      app_version, platform_version, manufacturer, model, battery_percent,
+      network_type, permissions_json, health_json, last_health_at,
+      created_at, last_seen_at, revoked_at
     FROM gateway_devices
     WHERE owner_uid = ?
     ORDER BY revoked_at IS NULL DESC, created_at DESC
@@ -192,6 +231,16 @@ export function revokeGatewayDevice(ownerUid: string, deviceId: string, now = Da
     WHERE id = ? AND owner_uid = ? AND revoked_at IS NULL
   `).run(iso(now), deviceId, ownerUid);
   return result.changes === 1;
+}
+
+export function rotateGatewayDeviceToken(ownerUid: string, deviceId: string, now = Date.now()): string | null {
+  const token = `${deviceId}.${crypto.randomBytes(48).toString("base64url")}`;
+  const changed = db.prepare(`
+    UPDATE gateway_devices
+    SET token_hash = ?, token_rotated_at = ?, updated_at = ?
+    WHERE id = ? AND owner_uid = ? AND revoked_at IS NULL
+  `).run(fingerprint("device", token), iso(now), iso(now), deviceId, ownerUid);
+  return changed.changes === 1 ? token : null;
 }
 
 export function activeGatewayDeviceCount(ownerUid: string): number {

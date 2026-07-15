@@ -17,6 +17,23 @@ test("Android calls create CRM contacts, queue WhatsApp and remain idempotent", 
     ]);
     openedDb = db;
     const ownerUid = "gateway-call-owner";
+    const deviceId = "gateway-call-device";
+    const simKey = "s".repeat(43);
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO gateway_devices (id, owner_uid, name, company_number, token_hash, work_sim_key, created_at)
+       VALUES (?, ?, 'Work phone', '+966532914371', 'hash', ?, ?)`,
+    ).run(deviceId, ownerUid, simKey, now);
+    db.prepare(
+      `INSERT INTO mobile_device_sims
+        (id, owner_uid, device_id, sim_key, slot_index, active, created_at, updated_at)
+       VALUES ('gateway-call-sim', ?, ?, ?, 0, 1, ?, ?)`,
+    ).run(ownerUid, deviceId, simKey, now, now);
+    db.prepare(
+      `INSERT INTO call_reply_policies
+        (owner_uid, enabled, mode, selected_device_id, selected_sim_key, unifonic_enabled, version)
+       VALUES (?, 1, 'all', ?, ?, 1, 1)`,
+    ).run(ownerUid, deviceId, simKey);
 
     const answered = await gateway.handleGatewayEvent(ownerUid, {
       id: "android-calllog-101",
@@ -29,6 +46,8 @@ test("Android calls create CRM contacts, queue WhatsApp and remain idempotent", 
       occurredAt: "2026-07-15T08:00:00.000Z",
       durationSeconds: 42,
       source: "android",
+      deviceId,
+      simKey,
     });
     assert.equal(answered.disposition, "answered");
     assert.equal(answered.queued, true);
@@ -62,13 +81,16 @@ test("Android calls create CRM contacts, queue WhatsApp and remain idempotent", 
       eventId: "android-calllog-102",
       from: "+966500002222",
       to: "+966532914371",
+      source: "android",
+      deviceId,
+      simKey,
     });
     assert.equal(missed.disposition, "no_answer");
     assert.equal(missed.queued, true);
     const missedJob = db.prepare(
       "SELECT template_name FROM communication_jobs WHERE event_key LIKE 'missed-call:%:customer' ORDER BY created_at DESC LIMIT 1",
     ).get() as { template_name: string };
-    assert.equal(missedJob.template_name, "missed_call_customer");
+    assert.equal(missedJob.template_name, "general_reminder");
 
     const contacts = gateway.listPendingContacts(ownerUid, 100) as Array<{ id: string; phone: string }>;
     assert.equal(contacts.length, 2);

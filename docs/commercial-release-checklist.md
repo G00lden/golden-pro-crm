@@ -36,7 +36,7 @@
 | 2.4 🔒 | Outbound WhatsApp gated in prod | ✓ | n/a | `OUTBOUND_MODE`/`OUTBOUND_CONFIRM_CODE`/`OFFICIAL_LAUNCH_APPROVED` enforced (server/outboundSafety.ts) |
 | 2.5 🔒 | Rate limiting on auth + webhooks + global `/api` | ✓ | codex | verified 2026-06-24: per-IP limiter on webhooks + global `/api`; live 429 confirmed |
 | 2.6 🔒 | Input validation (zod) on every public endpoint | ✓ | codex | verified 2026-06-24: `server/validation.ts` + `validate()` on customers/quotes/whatsapp/webhook/salla; bad input → 400 live |
-|| 2.7 🔒 | npm audit critical=0, high≤1 (or documented exception) | ✓ | supervisor | 2026-07-09: added `overrides.protobufjs` to package.json, `npm audit --omit=dev` now shows 0 critical, 0 high (8 moderate, 1 low — all transitive/minor). |
+| 2.7 🔒 | npm audit critical=0, high≤1 (or documented exception) | ✓ | supervisor | 2026-07-09: added `overrides.protobufjs` to package.json, `npm audit --omit=dev` now shows 0 critical, 0 high (8 moderate, 1 low — all transitive/minor). |
 | 2.8 🔒 | Supabase RLS policies reviewed for every table | ✗ | claude | go table-by-table |
 | 2.9 🔒 | Firestore rules reviewed by Supervisor | ◐ | supervisor | `firestore.rules` exists; do a line-by-line pass |
 | 2.10 🔒 | Logs scrubbed of PII (phone, name, address) | ✓ | codex | verified 2026-06-24: `server/logger.ts` `redactValue()` masks phone/token/secret; used by webhook + event logs |

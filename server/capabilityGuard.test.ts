@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { NextFunction, Request, Response } from "express";
 import { requireCapability } from "./capabilityGuard";
@@ -38,4 +39,16 @@ test("viewer persisted as user receives 403 for every privileged capability", ()
   for (const capability of ["users.manage", "whatsapp.manage", "campaigns.manage", "public_leads.manage", "operations.prepare", "demo.seed"] as const) {
     assert.deepEqual(invoke("user", capability), { continued: false, status: 403 });
   }
+});
+
+test("legacy gateway inventory remains restricted to device managers", () => {
+  const source = readFileSync(new URL("./routes-gateway.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /app\.get\("\/api\/gateway\/devices", requireCapability\("mobile\.devices\.manage"\)/,
+  );
+  assert.doesNotMatch(
+    source,
+    /app\.get\("\/api\/gateway\/devices", requireCapability\("mobile\.devices\.view"\)/,
+  );
 });

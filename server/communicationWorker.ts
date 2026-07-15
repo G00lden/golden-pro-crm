@@ -6,6 +6,7 @@ import { sendWhatsAppTemplate } from "./whatsapp";
 import { logError, logEvent } from "./logger";
 import type { RenderVars } from "./whatsappTemplates";
 import { communicationCampaignStore } from "./communicationCampaigns";
+import { evaluateCallReplyRecipient, evaluateCallReplySource } from "./callReplyPolicy";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -44,6 +45,22 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
   if (job.campaign_id) communicationCampaignStore.updateRecipient(job, "processing");
 
   try {
+    if (job.role === "customer" && job.payload.purpose === "call_auto") {
+      const decision = evaluateCallReplyRecipient(job.owner_uid, job.recipient_phone);
+      const source = evaluateCallReplySource(decision.policy, {
+        source: job.payload.source,
+        deviceId: job.payload.deviceId,
+        simKey: job.payload.simKey,
+      });
+      if (!decision.allowed || !source.allowed) {
+        const blocked = communicationJobStore.markBlocked(
+          job.id,
+          `call_reply_policy:${decision.allowed ? source.reason : decision.reason}`,
+        );
+        if (blocked) updateCall(blocked, "blocked");
+        return blocked;
+      }
+    }
     const guard = communicationCampaignStore.guardJob(job);
     if (guard.action === "defer") {
       const deferred = communicationJobStore.defer(job.id, 60_000, guard.reason);
