@@ -42,6 +42,26 @@ test("mobile devices preserve partial settings and reject personal or cross-devi
     assert.equal(updated.work_sim_key, workSimKey);
     assert.deepEqual(updated.capabilities, { callerId: true });
 
+    const dialCommand = mobile.createMobileCommand({
+      ownerUid,
+      actorUid: "admin-1",
+      deviceId,
+      type: "dial_request",
+      payload: { phone: "0535848176", customerName: "Test customer" },
+    });
+    assert.equal(dialCommand.payload.workSimKey, workSimKey);
+    assert.equal(dialCommand.payload.workSimSlotIndex, 0);
+    assert.equal(dialCommand.payload.phone, "966535848176");
+    db.prepare("UPDATE gateway_devices SET work_sim_key = NULL WHERE owner_uid = ? AND id = ?").run(ownerUid, deviceId);
+    assert.throws(() => mobile.createMobileCommand({
+      ownerUid,
+      actorUid: "admin-1",
+      deviceId,
+      type: "dial_request",
+      payload: { phone: "0535848176" },
+    }), /شريحة العمل/);
+    db.prepare("UPDATE gateway_devices SET work_sim_key = ? WHERE owner_uid = ? AND id = ?").run(workSimKey, ownerUid, deviceId);
+
     const device = { id: deviceId, owner_uid: ownerUid } as never;
     assert.equal(mobile.selectDeviceWorkSim(device, workSimKey).work_sim_key, workSimKey);
     assert.throws(() => mobile.selectDeviceWorkSim(device, personalSimKey), /غير موجودة/);

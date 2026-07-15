@@ -20,6 +20,7 @@ const files = [
   "server/clientIp.test.ts",
   "server/demoDataGuard.test.ts",
   "server/localAuthPolicy.test.ts",
+  "server/outboundSafety.test.ts",
   "server/routes-public-leads.test.ts",
   "server/routes-public-lead-inbox.test.ts",
   "server/routes-tracking.test.ts",

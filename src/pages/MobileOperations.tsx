@@ -208,7 +208,7 @@ export default function MobileOperationsPage(props: Props) {
   const [numbersText, setNumbersText] = useState("");
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const [savingPolicy, setSavingPolicy] = useState(false);
-  const [previewPhone, setPreviewPhone] = useState("0535848176");
+  const [previewPhone, setPreviewPhone] = useState("");
   const [previewDisposition, setPreviewDisposition] = useState<api.CallReplyDisposition>("no_answer");
   const [preview, setPreview] = useState<{ message: string; allowed?: boolean; reason?: string } | null>(null);
   const [testing, setTesting] = useState(false);
@@ -512,7 +512,7 @@ export default function MobileOperationsPage(props: Props) {
           <div className="panel-head"><div><h2>تجربة واتساب لمرة واحدة</h2><p className="note">تُرسل فورًا فقط ولا تدخل الطابور إذا كان واتساب غير متصل. الحد: 5 تجارب في الساعة.</p></div><Badge tone={waConnected ? "success" : "danger"}>{waConnected ? "واتساب متصل" : "واتساب غير متصل"}</Badge></div>
           <div className="form-grid">
             <Field label="رقم التجربة">
-              <TextInput name="test_phone" inputMode="tel" autoComplete="tel" dir="ltr" value={previewPhone} onChange={(event) => setPreviewPhone(event.target.value)} placeholder="0535848176" />
+              <TextInput name="test_phone" inputMode="tel" autoComplete="tel" dir="ltr" value={previewPhone} onChange={(event) => setPreviewPhone(event.target.value)} placeholder="05XXXXXXXX" />
             </Field>
             <Field label="نتيجة المكالمة التجريبية">
               <SelectInput name="test_disposition" value={previewDisposition} onChange={(event) => setPreviewDisposition(event.target.value as api.CallReplyDisposition)}>

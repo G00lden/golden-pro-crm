@@ -88,6 +88,21 @@ export function getCallReplyPolicy(ownerUid: string): CallReplyPolicy {
   };
 }
 
+function auditPolicySnapshot(policy: Pick<
+  CallReplyPolicy,
+  "enabled" | "mode" | "selectedDeviceId" | "selectedSimKey" | "unifonicEnabled" | "version" | "numbers"
+>) {
+  return {
+    enabled: policy.enabled,
+    mode: policy.mode,
+    selectedDeviceId: policy.selectedDeviceId,
+    selectedSimKey: policy.selectedSimKey,
+    unifonicEnabled: policy.unifonicEnabled,
+    version: policy.version,
+    numberCount: policy.numbers.length,
+  };
+}
+
 export type SaveCallReplyPolicyInput = {
   enabled: boolean;
   mode: CallReplyMode;
@@ -190,6 +205,7 @@ export function saveCallReplyPolicy(
       `UPDATE gateway_devices SET policy_version = COALESCE(policy_version, 0) + 1, updated_at = ?
        WHERE owner_uid = ? AND revoked_at IS NULL`,
     ).run(now, ownerUid);
+    const updated = getCallReplyPolicy(ownerUid);
     db.prepare(
       `INSERT INTO audit_logs
         (id, owner_uid, actor_uid, action, entity_type, entity_id, summary, before_data, after_data, created_at)
@@ -200,11 +216,11 @@ export function saveCallReplyPolicy(
       actorUid,
       ownerUid,
       `تحديث سياسة ردود المكالمات إلى ${input.mode}`,
-      JSON.stringify(current),
-      JSON.stringify({ ...input, confirmationPhrase: undefined }),
+      JSON.stringify(auditPolicySnapshot(current)),
+      JSON.stringify(auditPolicySnapshot(updated)),
       now,
     );
-    return getCallReplyPolicy(ownerUid);
+    return updated;
   });
   return saved();
 }

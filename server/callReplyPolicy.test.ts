@@ -40,6 +40,13 @@ test("call reply policy is fail-closed, SIM-scoped and supports specific/all-exc
     assert.equal(specific.insideHoursMessage, "رسالة مخصصة داخل الدوام للاختبار.");
     assert.equal(policy.evaluateCallReplyRecipient(owner, "+966535848176").allowed, true);
     assert.equal(policy.evaluateCallReplyRecipient(owner, "+966500000001").reason, "recipient_not_selected");
+    const specificAudit = db.prepare(
+      "SELECT before_data, after_data FROM audit_logs WHERE owner_uid = ? AND action = 'mobile.call_reply_policy.updated' ORDER BY created_at DESC LIMIT 1",
+    ).get(owner) as { before_data: string; after_data: string };
+    assert.equal(specificAudit.before_data.includes("966535848176"), false);
+    assert.equal(specificAudit.after_data.includes("966535848176"), false);
+    assert.equal(specificAudit.after_data.includes("0535848176"), false);
+    assert.equal(JSON.parse(specificAudit.after_data).numberCount, 1);
 
     const allExcept = policy.saveCallReplyPolicy(owner, "admin", {
       enabled: true,

@@ -21,6 +21,7 @@ data class GatewayDiagnostics(
     val configured: Boolean,
     val pendingEvents: Int,
     val lastSuccessAt: Long,
+    val phonePermissionGranted: Boolean = false,
 )
 
 object GatewayDiagnosticsReader {
@@ -37,6 +38,10 @@ object GatewayDiagnosticsReader {
         val network = connectivity.activeNetwork
         val capabilities = connectivity.getNetworkCapabilities(network)
         val power = context.getSystemService(PowerManager::class.java)
+        val phonePermissionGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_PHONE_STATE,
+        ) == PackageManager.PERMISSION_GRANTED
         return GatewayDiagnostics(
             permissionsGranted = requiredPermissions.all {
                 ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
@@ -46,6 +51,7 @@ object GatewayDiagnosticsReader {
             configured = GatewayConfigValidator.firstError(GatewayPreferences.config(context)) == null,
             pendingEvents = GatewayQueue.size(context),
             lastSuccessAt = GatewayPreferences.runtime(context).lastSuccessAt,
+            phonePermissionGranted = phonePermissionGranted,
         )
     }
 

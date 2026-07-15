@@ -120,8 +120,15 @@ object MobileApi {
         }
     }
 
-    fun acknowledgeCommand(context: Context, commandId: String, status: String, result: JSONObject = JSONObject()): MobileApiResult<Unit> {
+    fun acknowledgeCommand(
+        context: Context,
+        commandId: String,
+        status: String,
+        result: JSONObject = JSONObject(),
+        error: String = "",
+    ): MobileApiResult<Unit> {
         val body = JSONObject().put("status", status).put("result", result)
+        if (error.isNotBlank()) body.put("error", error.take(1000))
         val response = request(context, "/api/mobile/v1/commands/${java.net.URLEncoder.encode(commandId, "UTF-8")}/ack", "POST", body)
         if (response is MobileApiResult.Success) MobileDatabase.get(context).mobileDao().updateCommand(commandId, status)
         return response.mapUnit()

@@ -669,7 +669,7 @@ private fun WorkSimSelectionCard(state: GatewayUiState, viewModel: GatewayViewMo
                     Text("لن تُسجل أي مكالمة قبل اعتماد شريحة واحدة.", style = MaterialTheme.typography.bodySmall)
                 }
             }
-            if (!state.diagnostics.permissionsGranted) {
+            if (!state.diagnostics.phonePermissionGranted) {
                 Text("امنح إذن الهاتف أولًا حتى تظهر الشرائح الموجودة على الجهاز.")
             } else if (state.activeSims.isEmpty()) {
                 Text("لم يعثر أندرويد على شريحة نشطة. تأكد من تركيب الشريحة وتفعيلها ثم اضغط تحديث أو أعد فتح التطبيق.")

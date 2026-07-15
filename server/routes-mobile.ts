@@ -392,7 +392,7 @@ export function registerMobileAdminRoutes(app: Express, options: { ownerUid: () 
          VALUES (?, ?, ?, ?, ?, ?, 'sending', ?)`,
       ).run(id, ownerUid, userReq.user.uid, phone, body.disposition, message, new Date().toISOString());
       try {
-        const result = await whatsappService.sendText(phone, message, { oneTimeTestPhone: phone });
+        const result = await whatsappService.sendText(phone, message);
         if (isDryRunSendResult(result)) {
           db.prepare("UPDATE outbound_test_runs SET status = 'blocked', error = ? WHERE id = ?")
             .run(result.reason, id);

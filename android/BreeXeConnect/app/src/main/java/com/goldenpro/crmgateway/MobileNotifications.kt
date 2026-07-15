@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.telecom.TelecomManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -39,7 +40,15 @@ object MobileNotifications {
         when (command.type) {
             "dial_request" -> {
                 title = "طلب اتصال من CRM"
-                text = listOf(payload.optString("customerName"), payload.optString("phone"), payload.optString("reason")).filter(String::isNotBlank).joinToString(" · ")
+                val slotIndex = payload.optInt("workSimSlotIndex", -1)
+                val simLabel = payload.optString("workSimLabel").ifBlank { "شريحة العمل المعتمدة" }
+                val simInstruction = if (slotIndex >= 0) "$simLabel (الشريحة ${slotIndex + 1})" else simLabel
+                text = listOf(
+                    payload.optString("customerName"),
+                    payload.optString("phone"),
+                    payload.optString("reason"),
+                    "استخدم $simInstruction",
+                ).filter(String::isNotBlank).joinToString(" · ")
             }
             "local_wipe" -> {
                 title = "طلب مسح بيانات BreeXe"
@@ -145,13 +154,45 @@ class MobileCommandActionReceiver : BroadcastReceiver() {
         val payload = runCatching { JSONObject(command.payload) }.getOrDefault(JSONObject())
         val phone = GatewayRepository.normalizePhone(payload.optString("phone"))
         if (phone.isBlank()) {
-            MobileApi.acknowledgeCommand(context, command.id, "failed", JSONObject().put("error", "invalid_phone"))
+            MobileApi.acknowledgeCommand(context, command.id, "failed", error = "invalid_phone")
             return
         }
-        val confirmed = MobileApi.acknowledgeCommand(context, command.id, "confirmed")
-        if (confirmed !is MobileApiResult.Success) return
-        context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        MobileApi.acknowledgeCommand(context, command.id, "completed", JSONObject().put("openedDialer", true))
+        val requiredSimKey = payload.optString("workSimKey").trim()
+        val selectedSimKey = GatewayPreferences.mobilePolicy(context).workSimKey
+        if (requiredSimKey.isBlank() || selectedSimKey.isBlank() || requiredSimKey != selectedSimKey) {
+            MobileApi.acknowledgeCommand(context, command.id, "failed", error = "work_sim_policy_mismatch")
+            return
+        }
+        val activeSims = WorkSimManager.activeSims(context)
+        val selectedSim = activeSims.firstOrNull { it.simKey == requiredSimKey }
+        if (selectedSim == null) {
+            MobileApi.acknowledgeCommand(context, command.id, "failed", error = "work_sim_unavailable")
+            return
+        }
+        val phoneAccountHandle = WorkSimManager.phoneAccountHandleForSimKey(context, requiredSimKey)
+        if (activeSims.size > 1 && phoneAccountHandle == null) {
+            MobileApi.acknowledgeCommand(context, command.id, "failed", error = "work_sim_account_unavailable")
+            return
+        }
+        val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (phoneAccountHandle != null) {
+            dialIntent.putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, phoneAccountHandle)
+        }
+        val opened = runCatching { context.startActivity(dialIntent) }
+        if (opened.isFailure) {
+            MobileApi.acknowledgeCommand(context, command.id, "failed", error = "dialer_open_failed")
+            return
+        }
+        MobileApi.acknowledgeCommand(
+            context,
+            command.id,
+            "confirmed",
+            JSONObject()
+                .put("dialerOpened", true)
+                .put("workSimRequired", true)
+                .put("workSimSlotIndex", selectedSim.slotIndex),
+        )
     }
 
     private fun wipeLocalData(context: Context, command: MobileCommandEntity) {

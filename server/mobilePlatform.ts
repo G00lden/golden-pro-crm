@@ -393,9 +393,21 @@ export function createMobileCommand(input: {
   if (input.type === "dial_request") {
     const phone = normalizePolicyPhone(String(payload.phone || ""));
     if (!phone) throw new Error("أدخل رقم اتصال صالحًا.");
+    const workSimKey = String(device.work_sim_key || "").trim();
+    if (!workSimKey) throw new Error("اعتمد شريحة العمل على الجهاز قبل إرسال طلب الاتصال.");
+    const workSim = db.prepare(
+      `SELECT sim_key, slot_index, carrier_name, display_name
+       FROM mobile_device_sims
+       WHERE owner_uid = ? AND device_id = ? AND sim_key = ? AND active = 1
+       LIMIT 1`,
+    ).get(input.ownerUid, input.deviceId, workSimKey) as Record<string, unknown> | undefined;
+    if (!workSim) throw new Error("شريحة العمل المعتمدة غير نشطة على هذا الجهاز.");
     payload.phone = phone;
     payload.customerName = String(payload.customerName || "").trim().slice(0, 120);
     payload.reason = String(payload.reason || "").trim().slice(0, 300);
+    payload.workSimKey = workSimKey;
+    payload.workSimSlotIndex = Number(workSim.slot_index ?? -1);
+    payload.workSimLabel = String(workSim.carrier_name || workSim.display_name || "").trim().slice(0, 80);
   }
   const createdAt = nowIso();
   const expiresAt = nowIso(new Date(Date.now() + Math.max(30, Math.min(86_400, input.expiresInSeconds || (input.type === "dial_request" ? 300 : 86_400))) * 1000));

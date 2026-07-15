@@ -197,7 +197,7 @@ export function registerGatewayWebhookRoutes(app: Express, options: GatewayRoute
 export function registerGatewayRoutes(app: Express, options: GatewayRouteOptions) {
   const { gatewayOwnerUid } = options;
 
-  app.get("/api/gateway/status", requireCapability("mobile.devices.view"), (_req, res) => {
+  app.get("/api/gateway/status", requireCapability("calls.manage"), (_req, res) => {
     const owner = gatewayOwnerUid();
     res.json({
       configured: Boolean(process.env.GATEWAY_TOKEN) || gatewayDeviceAuthConfigured(),
