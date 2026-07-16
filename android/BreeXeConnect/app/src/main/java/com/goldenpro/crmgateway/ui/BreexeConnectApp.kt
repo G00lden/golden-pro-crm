@@ -716,7 +716,8 @@ private fun WhatsAppSetupCard(serverUrl: String) {
                 modifier = Modifier.fillMaxWidth(),
                 onClick = {
                     val uri = serverUrl.trimEnd('/').toUri().buildUpon()
-                        .appendQueryParameter("section", "mobileOperations")
+                        .appendQueryParameter("section", "callSystem")
+                        .appendQueryParameter("callTab", "devices")
                         .appendQueryParameter("mobileTab", "policy")
                         .build()
                     context.startActivity(Intent(Intent.ACTION_VIEW, uri))

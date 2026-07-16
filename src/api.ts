@@ -4639,7 +4639,192 @@ export type CallLogRow = {
   wa_customer_notified: number;
   wa_agent_notified: number;
   created_at: string;
+  customer_id?: string | null;
+  customer_company?: string | null;
+  contact_needs_name?: number;
+  disposition?: string;
+  direction?: "incoming" | "outgoing" | string;
+  duration_sec?: number;
+  whatsapp_status?: string;
+  wa_customer_status?: string | null;
+  provider?: string | null;
+  device_id?: string | null;
+  device_name?: string | null;
+  assigned_user_uid?: string | null;
+  assigned_user_name?: string | null;
+  sim_key?: string | null;
+  sim_slot_index?: number | null;
+  sim_carrier_name?: string | null;
+  sim_display_name?: string | null;
+  sim_phone_suffix?: string | null;
 };
+
+export type CallCenterFilters = {
+  q?: string;
+  dispositions?: string[];
+  direction?: "incoming" | "outgoing" | "";
+  dateFrom?: string;
+  dateTo?: string;
+  handled?: "true" | "false" | "";
+  whatsappStatus?: "not_sent" | "queued" | "sent" | "failed" | "";
+  contactState?: "known" | "needs_name" | "unknown" | "";
+  deviceId?: string;
+  simKey?: string;
+  employeeUid?: string;
+  provider?: string;
+  page?: number;
+  pageSize?: number;
+  sortBy?: "created_at" | "customer_name" | "disposition" | "duration_sec";
+  sortDirection?: "asc" | "desc";
+};
+
+export type CallCenterFacet = { value: string; label?: string; count?: number };
+export type CallCenterResult = {
+  calls: CallLogRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  facets: {
+    dispositions: CallCenterFacet[];
+    providers: CallCenterFacet[];
+    devices: CallCenterFacet[];
+    sims: Array<CallCenterFacet & {
+      device_id?: string;
+      slot_index?: number | null;
+      carrier_name?: string | null;
+      display_name?: string | null;
+      phone_suffix?: string | null;
+    }>;
+    employees: CallCenterFacet[];
+  };
+};
+
+export type CallSelectionPreview = {
+  selectionId: string;
+  expiresAt: string;
+  count: number;
+  excludedCount: number;
+  capped: boolean;
+  sample: Array<{ id: string; name: string; phone: string; disposition: string }>;
+  excluded: Array<{ callId: string; reason: string }>;
+  outbound?: Record<string, unknown>;
+};
+
+function callCenterSearchParams(filters: CallCenterFilters) {
+  const params = new URLSearchParams();
+  if (filters.q) params.set("q", filters.q);
+  if (filters.dispositions?.length) params.set("dispositions", filters.dispositions.join(","));
+  if (filters.direction) params.set("direction", filters.direction);
+  if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+  if (filters.dateTo) params.set("date_to", filters.dateTo);
+  if (filters.handled) params.set("handled", filters.handled);
+  if (filters.whatsappStatus) params.set("whatsapp_status", filters.whatsappStatus);
+  if (filters.contactState) params.set("contact_state", filters.contactState);
+  if (filters.deviceId) params.set("device_id", filters.deviceId);
+  if (filters.simKey) params.set("sim_key", filters.simKey);
+  if (filters.employeeUid) params.set("employee_uid", filters.employeeUid);
+  if (filters.provider) params.set("provider", filters.provider);
+  params.set("page", String(filters.page || 1));
+  params.set("page_size", String(filters.pageSize || 25));
+  params.set("sort_by", filters.sortBy || "created_at");
+  params.set("sort_direction", filters.sortDirection || "desc");
+  return params;
+}
+
+export const getCallCenterCalls = (filters: CallCenterFilters = {}) =>
+  apiFetch<CallCenterResult>(`/api/telephony/calls?${callCenterSearchParams(filters)}`);
+
+export const sendCallWhatsApp = (id: string, data: { message: string; outboundCode?: string }) =>
+  apiFetch<{ sent: boolean; messageId?: string | null; provider?: string }>(
+    `/api/telephony/calls/${encodeURIComponent(id)}/actions/whatsapp`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+
+export const dialCallFromDevice = (id: string, data: { deviceId: string; reason?: string }) =>
+  apiFetch<{ command: MobileCommand }>(`/api/telephony/calls/${encodeURIComponent(id)}/actions/dial`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export const saveCallContact = (id: string, data: {
+  name: string; phone?: string; company?: string; notes?: string; deviceId?: string;
+}) => apiFetch<{ contact: { customerId: string; name: string; phone: string; company: string; commandId?: string | null } }>(
+  `/api/telephony/calls/${encodeURIComponent(id)}/contact`,
+  { method: "PUT", body: JSON.stringify(data) },
+);
+
+export const previewCallSelection = (data: {
+  action: "whatsapp" | "export";
+  ids?: string[];
+  filters?: CallCenterFilters;
+  excludedIds?: string[];
+  outboundCode?: string;
+}) => apiFetch<CallSelectionPreview>("/api/telephony/calls/selection/preview", {
+  method: "POST",
+  body: JSON.stringify(data),
+});
+
+export const runCallBulkWhatsApp = (data: {
+  selectionId: string; message: string; outboundCode?: string;
+}) => apiFetch<{ runId: string; status: string; total: number; queued: number; skipped: number }>(
+  "/api/telephony/calls/bulk-actions",
+  { method: "POST", body: JSON.stringify({ action: "whatsapp", ...data }) },
+);
+
+export async function downloadCallSelection(selectionId: string, format: "csv" | "excel") {
+  const token = await getApiAuthorizationToken();
+  if (!token) throw new Error("يجب تسجيل الدخول أولًا.");
+  const response = await fetch("/api/telephony/calls/bulk-actions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "export", selectionId, format }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error || `HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    || `breexe-calls.${format === "csv" ? "csv" : "xls"}`;
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(href);
+  return { filename };
+}
+
+export type GoogleContactsStatus = {
+  configured: boolean;
+  connected: boolean;
+  email?: string | null;
+  displayName?: string | null;
+  connectedAt?: string | null;
+  lastSyncedAt?: string | null;
+  lastError?: string | null;
+  redirectUri?: string;
+};
+
+export const getGoogleContactsStatus = () =>
+  apiFetch<GoogleContactsStatus>("/api/integrations/google-contacts/status");
+
+export const beginGoogleContactsConnect = (returnUrl = "/?section=callSystem&callTab=contacts") =>
+  apiFetch<{ url: string }>("/api/integrations/google-contacts/connect", {
+    method: "POST", body: JSON.stringify({ returnUrl }),
+  });
+
+export const disconnectGoogleContacts = () =>
+  apiFetch<{ disconnected: boolean }>("/api/integrations/google-contacts/disconnect", { method: "POST" });
+
+export const syncGoogleContacts = (limit = 100) =>
+  apiFetch<{ synced: number; failed: number; total: number }>("/api/integrations/google-contacts/sync", {
+    method: "POST", body: JSON.stringify({ limit }),
+  });
 
 export const getTelephonyConfig = () =>
   apiFetch<{ config: TelephonyConfig }>("/api/telephony/config").then((r) => r.config);
@@ -4784,7 +4969,7 @@ export type MobileAssignableUser = {
 export type MobileCommand = {
   id: string;
   device_id: string;
-  command_type: "dial_request" | "open_customer" | "show_task" | "sync_contacts" | "refresh_policy" | "collect_health" | "local_wipe";
+  command_type: "dial_request" | "open_customer" | "show_task" | "sync_contacts" | "sync_contact" | "refresh_policy" | "collect_health" | "local_wipe";
   payload: Record<string, unknown>;
   status: "pending" | "delivered" | "confirmed" | "completed" | "failed" | "expired" | "cancelled";
   expires_at: string;

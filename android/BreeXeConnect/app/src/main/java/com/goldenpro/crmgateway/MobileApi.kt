@@ -134,7 +134,7 @@ object MobileApi {
         return response.mapUnit()
     }
 
-    fun syncCallerCache(context: Context): MobileApiResult<Unit> {
+    fun syncCallerCache(context: Context, writeSystemContacts: Boolean = false): MobileApiResult<Unit> {
         return when (val result = request(context, "/api/mobile/v1/customer-cache?limit=1000", "GET", null)) {
             is MobileApiResult.Success -> {
                 val array = result.value.optJSONArray("customers") ?: JSONArray()
@@ -143,9 +143,14 @@ object MobileApi {
                         val item = array.optJSONObject(index) ?: continue
                         val phone = GatewayRepository.normalizePhone(item.optString("phone"))
                         if (phone.isBlank()) continue
+                        val customerId = item.optString("id")
+                        val customerName = item.optString("name")
+                        if (writeSystemContacts && customerName.isNotBlank()) {
+                            ContactSaver.saveCaller(context, phone, customerName, customerId)
+                        }
                         add(CallerCacheEntity(
                             phone = phone,
-                            name = item.optString("name"),
+                            name = customerName,
                             company = item.optString("city"),
                             ownerName = item.optString("assigned_to"),
                             lastDeal = item.optString("latest_deal"),

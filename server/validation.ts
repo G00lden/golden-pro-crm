@@ -226,7 +226,80 @@ export const telephonyTestMissedSchema = z.object({
 export const telephonyCallsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   missed: z.enum(['true', 'false']).optional(),
+  page: z.coerce.number().int().min(1).max(100000).optional(),
+  page_size: z.coerce.number().int().min(10).max(100).optional(),
+  q: z.string().trim().max(120).optional(),
+  dispositions: z.string().max(500).optional(),
+  direction: z.enum(['incoming', 'outgoing']).optional(),
+  date_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  date_to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  handled: z.enum(['true', 'false']).optional(),
+  whatsapp_status: z.enum(['not_sent', 'queued', 'sent', 'failed']).optional(),
+  contact_state: z.enum(['known', 'needs_name', 'unknown']).optional(),
+  device_id: z.string().max(160).optional(),
+  sim_key: z.string().max(180).optional(),
+  employee_uid: z.string().max(160).optional(),
+  provider: z.string().max(80).optional(),
+  sort_by: z.enum(['created_at', 'customer_name', 'disposition', 'duration_sec']).optional(),
+  sort_direction: z.enum(['asc', 'desc']).optional(),
 }).passthrough();
+
+const callCenterFiltersSchema = z.object({
+  q: z.string().trim().max(120).optional(),
+  dispositions: z.array(z.string().max(40)).max(20).optional(),
+  direction: z.enum(['incoming', 'outgoing']).optional(),
+  dateFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  dateTo: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  handled: z.enum(['true', 'false']).optional(),
+  whatsappStatus: z.enum(['not_sent', 'queued', 'sent', 'failed']).optional(),
+  contactState: z.enum(['known', 'needs_name', 'unknown']).optional(),
+  deviceId: z.string().max(160).optional(),
+  simKey: z.string().max(180).optional(),
+  employeeUid: z.string().max(160).optional(),
+  provider: z.string().max(80).optional(),
+  sortBy: z.enum(['created_at', 'customer_name', 'disposition', 'duration_sec']).optional(),
+  sortDirection: z.enum(['asc', 'desc']).optional(),
+}).strict();
+
+export const callWhatsAppActionSchema = z.object({
+  message: z.string().trim().min(1).max(2000),
+  outboundCode: z.string().trim().max(200).optional(),
+}).strict();
+
+export const callDialActionSchema = z.object({
+  deviceId: z.string().trim().min(1).max(160),
+  reason: z.string().trim().max(300).optional(),
+}).strict();
+
+export const callContactActionSchema = z.object({
+  name: z.string().trim().min(2).max(160),
+  phone: z.string().trim().max(40).optional(),
+  company: z.string().trim().max(160).optional(),
+  notes: z.string().trim().max(2000).optional(),
+  deviceId: z.string().trim().max(160).optional(),
+}).strict();
+
+export const callSelectionPreviewSchema = z.object({
+  action: z.enum(['whatsapp', 'export']),
+  ids: z.array(z.string().trim().min(1).max(160)).max(5000).optional(),
+  filters: callCenterFiltersSchema.optional(),
+  excludedIds: z.array(z.string().trim().min(1).max(160)).max(5000).optional(),
+  outboundCode: z.string().trim().max(200).optional(),
+}).refine((value) => Boolean(value.ids?.length || value.filters), 'ids or filters are required');
+
+export const callBulkActionSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('whatsapp'),
+    selectionId: z.string().trim().min(1).max(160),
+    message: z.string().trim().min(1).max(2000),
+    outboundCode: z.string().trim().max(200).optional(),
+  }).strict(),
+  z.object({
+    action: z.literal('export'),
+    selectionId: z.string().trim().min(1).max(160),
+    format: z.enum(['csv', 'excel']),
+  }).strict(),
+]);
 
 // Self-hosted phone gateway schemas
 

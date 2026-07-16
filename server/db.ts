@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10310;
+const TARGET_SCHEMA_VERSION = 10500;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -1065,6 +1065,87 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_outbound_test_runs_actor
     ON outbound_test_runs(owner_uid, actor_uid, created_at DESC);
 
+  -- Immutable, short-lived snapshots make "select all matching" safe even if
+  -- new calls arrive between preview and confirmation.
+  CREATE TABLE IF NOT EXISTS call_selection_snapshots (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    actor_uid TEXT NOT NULL,
+    call_ids TEXT NOT NULL DEFAULT '[]',
+    filters TEXT NOT NULL DEFAULT '{}',
+    excluded_count INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_selection_snapshots_owner
+    ON call_selection_snapshots(owner_uid, actor_uid, expires_at);
+
+  CREATE TABLE IF NOT EXISTS call_bulk_runs (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    actor_uid TEXT NOT NULL,
+    selection_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    total_count INTEGER NOT NULL DEFAULT 0,
+    queued_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_bulk_runs_owner
+    ON call_bulk_runs(owner_uid, created_at DESC);
+
+  -- One Google Contacts connection per employee. OAuth tokens are encrypted;
+  -- contact links retain the People API resource name and etag.
+  CREATE TABLE IF NOT EXISTS google_contact_integrations (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    user_uid TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    access_token_ciphertext TEXT NOT NULL DEFAULT '',
+    refresh_token_ciphertext TEXT NOT NULL DEFAULT '',
+    token_expires_at TEXT,
+    scope TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'disconnected',
+    last_error TEXT,
+    last_synced_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, user_uid)
+  );
+  CREATE INDEX IF NOT EXISTS idx_google_contact_integrations_owner
+    ON google_contact_integrations(owner_uid, user_uid, status);
+
+  CREATE TABLE IF NOT EXISTS google_contact_links (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    user_uid TEXT NOT NULL,
+    customer_id TEXT NOT NULL,
+    resource_name TEXT NOT NULL DEFAULT '',
+    etag TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT,
+    last_synced_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, user_uid, customer_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_google_contact_links_owner
+    ON google_contact_links(owner_uid, user_uid, status, updated_at);
+
+  CREATE TABLE IF NOT EXISTS google_contact_oauth_states (
+    state_hash TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    user_uid TEXT NOT NULL,
+    return_url TEXT NOT NULL DEFAULT '/',
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
   -- Tap payment gateway (online card/Apple Pay/STC Pay payments on invoices).
   CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
@@ -1300,6 +1381,26 @@ for (const col of [
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_handled ON call_logs(owner_uid, handled, created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_correlation ON call_logs(owner_uid, correlation_key, created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_device ON call_logs(owner_uid, device_id, created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_disposition ON call_logs(owner_uid, disposition, created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_call_logs_sim ON call_logs(owner_uid, sim_key, created_at DESC)");
+
+for (const col of [
+  ["company", "TEXT DEFAULT ''"],
+  ["contact_needs_name", "INTEGER DEFAULT 0"],
+] as const) {
+  if (!hasColumn("customers", col[0])) {
+    db.exec(`ALTER TABLE customers ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+db.exec("CREATE INDEX IF NOT EXISTS idx_customers_needs_name ON customers(owner_uid, contact_needs_name, updated_at DESC)");
+
+// Preserve the original outcome when an older release replaced status with
+// "handled". New releases keep disposition and follow-up state independent.
+db.exec(`
+  UPDATE call_logs
+  SET disposition = CASE WHEN missed = 1 THEN 'no_answer' ELSE 'answered' END
+  WHERE status = 'handled' AND (disposition IS NULL OR TRIM(disposition) = '')
+`);
 
 for (const col of [
   ["attempts", "INTEGER DEFAULT 0"],
@@ -1806,6 +1907,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10308, '1.3.7-ledger-hardening');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10309, '1.3.8-android-gateway');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10310, '2.1.2-mobile-onboarding-clarity');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10500, '1.5.0-unified-call-center');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

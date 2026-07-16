@@ -220,7 +220,7 @@ const updateDeviceSchema = z.object({
 });
 
 const createCommandSchema = z.object({
-  type: z.enum(["dial_request", "open_customer", "show_task", "sync_contacts", "refresh_policy", "collect_health", "local_wipe"]),
+  type: z.enum(["dial_request", "open_customer", "show_task", "sync_contacts", "sync_contact", "refresh_policy", "collect_health", "local_wipe"]),
   payload: z.record(z.string().max(100), z.unknown()).optional(),
   expiresInSeconds: z.number().int().min(30).max(86_400).optional(),
   confirmationDeviceName: z.string().trim().max(80).optional(),
@@ -255,7 +255,7 @@ function testId() {
 
 export function registerMobileAdminRoutes(app: Express, options: { ownerUid: () => string }) {
   app.get("/api/mobile/devices", requireCapability("mobile.devices.view"), (req, res) => {
-    const userReq = req as AuthedRequest;
+    const userReq = req as unknown as AuthedRequest;
     const devices = listMobileDevices(options.ownerUid()).filter((device) => userCanSeeDevice(userReq, device));
     res.json({ devices });
   });
@@ -267,10 +267,16 @@ export function registerMobileAdminRoutes(app: Express, options: { ownerUid: () 
     res.json({ users });
   });
 
-  app.patch("/api/mobile/devices/:id", requireCapability("mobile.devices.manage"), (req, res) => {
+  app.patch("/api/mobile/devices/:id", (req, res, next) => {
+    const keys = Object.keys(req.body && typeof req.body === "object" ? req.body : {});
+    const capability = keys.length > 0 && keys.every((key) => key === "workSimKey")
+      ? "mobile.sims.manage"
+      : "mobile.devices.manage";
+    requireCapability(capability)(req, res, next);
+  }, (req, res) => {
     const body = parse(updateDeviceSchema, req.body, res);
     if (!body) return;
-    const userReq = req as AuthedRequest;
+    const userReq = req as unknown as AuthedRequest;
     res.json({ device: updateMobileDevice(options.ownerUid(), userReq.user.uid, String(req.params.id), body) });
   });
 
@@ -279,6 +285,8 @@ export function registerMobileAdminRoutes(app: Express, options: { ownerUid: () 
     if (!body) return;
     const capability = body.type === "dial_request"
       ? "mobile.calls.execute"
+      : body.type === "sync_contact" || body.type === "sync_contacts"
+        ? "mobile.contacts.manage"
       : body.type === "local_wipe"
         ? "mobile.device.wipe"
         : "mobile.devices.manage";
