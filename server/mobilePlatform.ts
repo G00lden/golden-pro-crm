@@ -12,6 +12,7 @@ export const MOBILE_COMMAND_TYPES = [
   "open_customer",
   "show_task",
   "sync_contacts",
+  "sync_contact",
   "refresh_policy",
   "collect_health",
   "local_wipe",
@@ -408,6 +409,15 @@ export function createMobileCommand(input: {
     payload.workSimKey = workSimKey;
     payload.workSimSlotIndex = Number(workSim.slot_index ?? -1);
     payload.workSimLabel = String(workSim.carrier_name || workSim.display_name || "").trim().slice(0, 80);
+  }
+  if (input.type === "sync_contact") {
+    const phone = normalizePolicyPhone(String(payload.phone || ""));
+    const name = String(payload.name || "").trim().slice(0, 160);
+    if (!phone || name.length < 2) throw new Error("بيانات جهة الاتصال غير صالحة للمزامنة.");
+    payload.phone = phone;
+    payload.name = name;
+    payload.customerId = String(payload.customerId || "").trim().slice(0, 160);
+    payload.company = String(payload.company || "").trim().slice(0, 160);
   }
   const createdAt = nowIso();
   const expiresAt = nowIso(new Date(Date.now() + Math.max(30, Math.min(86_400, input.expiresInSeconds || (input.type === "dial_request" ? 300 : 86_400))) * 1000));

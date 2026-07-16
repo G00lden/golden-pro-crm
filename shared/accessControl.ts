@@ -12,7 +12,12 @@ export type AppCapability =
   | "mobile.devices.manage"
   | "mobile.calls.view"
   | "mobile.calls.execute"
+  | "mobile.calls.export"
+  | "mobile.calls.bulk"
+  | "mobile.whatsapp.send"
+  | "mobile.contacts.manage"
   | "mobile.contacts.sync"
+  | "mobile.sims.manage"
   | "mobile.tasks.update"
   | "mobile.reply_policy.manage"
   | "mobile.tests.send"
@@ -32,7 +37,12 @@ const CAPABILITY_ROLES: Record<AppCapability, ReadonlySet<AppRole>> = {
   "mobile.devices.manage": new Set(["admin", "manager"]),
   "mobile.calls.view": new Set(["admin", "manager", "sales", "technician"]),
   "mobile.calls.execute": new Set(["admin", "manager", "sales", "technician"]),
+  "mobile.calls.export": new Set(["admin", "manager", "sales", "technician"]),
+  "mobile.calls.bulk": new Set(["admin", "manager"]),
+  "mobile.whatsapp.send": new Set(["admin", "manager", "sales", "technician"]),
+  "mobile.contacts.manage": new Set(["admin", "manager", "sales", "technician"]),
   "mobile.contacts.sync": new Set(["admin", "manager", "sales", "technician"]),
+  "mobile.sims.manage": new Set(["admin", "manager"]),
   "mobile.tasks.update": new Set(["admin", "manager", "sales", "technician"]),
   "mobile.reply_policy.manage": new Set(["admin", "manager"]),
   "mobile.tests.send": new Set(["admin"]),

@@ -43,6 +43,7 @@ const files = [
   "server/communicationEvents.test.ts",
   "server/communicationPreferences.test.ts",
   "server/callReplyPolicy.test.ts",
+  "server/callCenter.test.ts",
   "server/gatewayCalls.test.ts",
   "server/mobilePlatform.test.ts",
   "server/communicationCampaigns.test.ts",

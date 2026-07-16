@@ -305,8 +305,9 @@ object GatewayHttp {
             val contact = contacts.optJSONObject(index) ?: continue
             val id = contact.optString("id")
             val phone = contact.optString("phone")
+            val name = contact.optString("name")
             if (id.isBlank() || phone.isBlank()) continue
-            if (!ContactSaver.saveCaller(context, phone)) {
+            if (!ContactSaver.saveCaller(context, phone, name, id)) {
                 return HttpResult.RetryableFailure("تعذر حفظ جهة اتصال المتصل. امنح صلاحية جهات الاتصال ثم أعد المحاولة.")
             }
             savedIds += id

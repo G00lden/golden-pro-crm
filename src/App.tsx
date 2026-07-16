@@ -8,14 +8,12 @@ import {
   LogOut,
   Menu,
   Megaphone,
-  MessageCircle,
   Package,
   PhoneCall,
   Plus,
   Receipt,
   RefreshCcw,
   Settings,
-  Smartphone,
   UserPlus,
   UserRoundCog,
   Users,
@@ -45,7 +43,6 @@ import {
 import { AdminUsersPage } from "./pages/AdminUsers";
 import { InvoicesPage } from "./pages/Invoices";
 import { QuotesPage } from "./pages/Quotes";
-import { WhatsAppConsole } from "./pages/WhatsAppConsole";
 import { CampaignsPage } from "./pages/Campaigns";
 import { ReminderDashboard } from "./components/ReminderDashboard";
 import Dashboard from "./pages/Dashboard";
@@ -58,8 +55,7 @@ import CustomerCarePage from "./pages/CustomerCare";
 import OdooCrmPage from "./pages/OdooCrm";
 import TechniciansPage from "./pages/Technicians";
 import SettingsPage from "./pages/Settings";
-import CallSystemPage from "./pages/CallSystem";
-import MobileOperationsPage from "./pages/MobileOperations";
+import CallCenterPage from "./pages/CallCenter";
 import { hasAppCapability, normalizeAppRole } from "../shared/accessControl";
 import { useDialogAccessibility } from "./dialogAccessibility";
 import {
@@ -378,8 +374,15 @@ export default function App() {
   const canPairMobileDevices = hasAppCapability(currentRole, "mobile.devices.pair", permissions);
   const canManageMobileDevices = hasAppCapability(currentRole, "mobile.devices.manage", permissions);
   const canExecuteMobileCalls = hasAppCapability(currentRole, "mobile.calls.execute", permissions);
+  const canViewMobileCalls = hasAppCapability(currentRole, "mobile.calls.view", permissions);
   const canManageReplyPolicy = hasAppCapability(currentRole, "mobile.reply_policy.manage", permissions);
   const canSendMobileTests = hasAppCapability(currentRole, "mobile.tests.send", permissions);
+  const canSendCallWhatsApp = hasAppCapability(currentRole, "mobile.whatsapp.send", permissions);
+  const canManageCallContacts = hasAppCapability(currentRole, "mobile.contacts.manage", permissions);
+  const canExportCalls = hasAppCapability(currentRole, "mobile.calls.export", permissions);
+  const canBulkCalls = hasAppCapability(currentRole, "mobile.calls.bulk", permissions);
+  const canSyncMobileContacts = hasAppCapability(currentRole, "mobile.contacts.sync", permissions);
+  const canManageMobileSims = hasAppCapability(currentRole, "mobile.sims.manage", permissions);
   const currentUid = me.data?.uid || null;
 
   const stats = useData(api.getStats, [page], authed && authReady);
@@ -435,19 +438,13 @@ export default function App() {
     { id: "storeOrders" as Page, label: "طلبات المتجر", icon: ClipboardList },
     { id: "care" as Page, label: "رعاية العملاء", icon: UserPlus, badge: summary.care },
     { id: "technicians" as Page, label: "الفنيون", icon: UserRoundCog },
-    ...(canManageWhatsApp
-      ? [{ id: "messages" as Page, label: "واتساب والسجل", icon: MessageCircle }]
-      : []),
     ...(canManageCampaigns
       ? [
           { id: "campaigns" as Page, label: "الحملات", icon: Megaphone },
         ]
       : []),
-    ...(canManageCalls
-      ? [{ id: "callSystem" as Page, label: "نظام المكالمات", icon: PhoneCall }]
-      : []),
-    ...(canViewMobile
-      ? [{ id: "mobileOperations" as Page, label: "مركز الجوال", icon: Smartphone }]
+    ...(canManageCalls || canViewMobile
+      ? [{ id: "callSystem" as Page, label: "مركز الاتصالات", icon: PhoneCall }]
       : []),
     ...(canManageUsers
       ? [{ id: "adminUsers" as Page, label: "إدارة المستخدمين", icon: UserRoundCog }]
@@ -473,6 +470,27 @@ export default function App() {
     window.requestAnimationFrame(() => menuButtonRef.current?.focus());
   };
 
+  const callCenter = (initialTab?: "calls" | "contacts" | "devices" | "whatsapp" | "settings") => (
+    <CallCenterPage
+      notify={notify}
+      initialTab={initialTab}
+      canManageWhatsApp={canManageWhatsApp}
+      canPairDevices={canPairMobileDevices}
+      canManageDevices={canManageMobileDevices}
+      canManageSims={canManageMobileSims}
+      canExecuteCalls={canExecuteMobileCalls}
+      canViewCalls={canViewMobileCalls}
+      canManageCallSystem={canManageCalls}
+      canManagePolicy={canManageReplyPolicy}
+      canSendTests={canSendMobileTests}
+      canSendWhatsApp={canSendCallWhatsApp}
+      canManageContacts={canManageCallContacts}
+      canExportCalls={canExportCalls}
+      canBulkCalls={canBulkCalls}
+      canSyncContacts={canSyncMobileContacts}
+    />
+  );
+
   const pages: Record<Page, ReactNode> = {
     dash: (
       <Dashboard
@@ -494,20 +512,10 @@ export default function App() {
     storeOrders: <StoreOrdersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     care: <CustomerCarePage notify={notify} refreshStats={stats.refresh} />,
     technicians: <TechniciansPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
-    messages: canManageWhatsApp ? <WhatsAppConsole notify={notify} /> : <AccessDenied />,
+    messages: canManageWhatsApp ? callCenter("whatsapp") : <AccessDenied />,
     campaigns: canManageCampaigns ? <CampaignsPage notify={notify} /> : <AccessDenied />,
-    callSystem: canManageCalls ? <CallSystemPage notify={notify} /> : <AccessDenied />,
-    mobileOperations: canViewMobile ? (
-      <MobileOperationsPage
-        notify={notify}
-        canPairDevices={canPairMobileDevices}
-        canManageDevices={canManageMobileDevices}
-        canExecuteCalls={canExecuteMobileCalls}
-        canManagePolicy={canManageReplyPolicy}
-        canSendTests={canSendMobileTests}
-        onOpenWhatsApp={() => openPage("messages")}
-      />
-    ) : <AccessDenied />,
+    callSystem: canManageCalls || canViewMobile ? callCenter() : <AccessDenied />,
+    mobileOperations: canViewMobile ? callCenter("devices") : <AccessDenied />,
     settings: (
       <SettingsPage
         notify={notify}

@@ -234,7 +234,7 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10310) throw new Error(`Expected schema 10310, got ${userVersion}`);
+if (userVersion !== 10500) throw new Error(`Expected schema 10500, got ${userVersion}`);
 
 for (const required of [
   "remote_status_id",

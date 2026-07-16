@@ -345,8 +345,9 @@ export function ensureCustomerContact(ownerUid: string, phone: string): { id: st
     const customerName = `متصل CRM ${normalized.slice(-4)}`;
     const createdAt = nowIso();
     db.prepare(
-      `INSERT INTO customers (id, owner_uid, name, phone, source, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'phone_call', ?, ?, ?)`,
+      `INSERT INTO customers
+        (id, owner_uid, name, phone, source, notes, contact_needs_name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'phone_call', ?, 1, ?, ?)`,
     ).run(
       customerId,
       ownerUid,
@@ -432,7 +433,7 @@ export function findUnhandledCallForAgent(ownerUid: string, agentPhone: string):
 export function markCallHandled(ownerUid: string, callId: string, by: string): boolean {
   const res = db
     .prepare(
-      "UPDATE call_logs SET handled = 1, handled_at = ?, handled_by = ?, status = 'handled', updated_at = ? WHERE owner_uid = ? AND id = ?",
+      "UPDATE call_logs SET handled = 1, handled_at = ?, handled_by = ?, updated_at = ? WHERE owner_uid = ? AND id = ?",
     )
     .run(nowIso(), by, nowIso(), ownerUid, callId);
   return res.changes > 0;

@@ -18,9 +18,11 @@ import * as api from "../api";
 import { Badge, Button, Field, Loading, SelectInput, TextArea, TextInput, useData } from "../shared";
 
 type Props = {
+  embedded?: boolean;
   notify: (message: string, ok?: boolean) => void;
   canPairDevices: boolean;
   canManageDevices: boolean;
+  canManageSims?: boolean;
   canExecuteCalls: boolean;
   canManagePolicy: boolean;
   canSendTests: boolean;
@@ -74,6 +76,7 @@ function DeviceCard({
   device,
   users,
   canManage,
+  canManageSim,
   canExecuteCalls,
   onChanged,
   notify,
@@ -81,6 +84,7 @@ function DeviceCard({
   device: api.MobileDevice;
   users: api.MobileAssignableUser[];
   canManage: boolean;
+  canManageSim: boolean;
   canExecuteCalls: boolean;
   onChanged: () => Promise<void>;
   notify: Props["notify"];
@@ -101,11 +105,11 @@ function DeviceCard({
   const save = async () => {
     setSaving(true);
     try {
-      await api.updateMobileDevice(device.id, {
+      await api.updateMobileDevice(device.id, canManage ? {
         assignedUserUid: assignedUserUid || null,
         branchId: branchId.trim() || null,
-        workSimKey: workSimKey || null,
-      });
+        ...(canManageSim ? { workSimKey: workSimKey || null } : {}),
+      } : { workSimKey: workSimKey || null });
       await onChanged();
       notify("تم حفظ ربط الموظف وشريحة العمل.");
     } catch (error) {
@@ -150,18 +154,18 @@ function DeviceCard({
       </div>
       <p className="note">آخر نبضة: {formatSeen(device.last_seen_at)} · إصدار التطبيق: {device.app_version || "—"}</p>
 
-      {canManage && !device.revoked_at && (
+      {(canManage || canManageSim) && !device.revoked_at && (
         <div className="form-grid mobile-device-form">
-          <Field label="الموظف المسؤول">
+          {canManage && <Field label="الموظف المسؤول">
             <SelectInput name={`assigned_user_${device.id}`} value={assignedUserUid} onChange={(event) => setAssignedUserUid(event.target.value)}>
               <option value="">غير معيّن</option>
               {users.map((user) => <option key={user.uid} value={user.uid}>{user.name} · {user.role}</option>)}
             </SelectInput>
-          </Field>
-          <Field label="الفرع">
+          </Field>}
+          {canManage && <Field label="الفرع">
             <TextInput name={`branch_${device.id}`} autoComplete="off" value={branchId} onChange={(event) => setBranchId(event.target.value)} placeholder="مثال: الرياض" />
-          </Field>
-          <Field label="شريحة العمل المسموح رفعها">
+          </Field>}
+          {canManageSim && <Field label="شريحة العمل المسموح رفعها">
             <SelectInput name={`work_sim_${device.id}`} value={workSimKey} onChange={(event) => setWorkSimKey(event.target.value)}>
               <option value="">لا توجد شريحة مختارة — إيقاف آمن</option>
               {device.sims.filter((sim) => Boolean(sim.active)).map((sim) => (
@@ -170,7 +174,7 @@ function DeviceCard({
                 </option>
               ))}
             </SelectInput>
-          </Field>
+          </Field>}
           <div className="mobile-field-action"><Button loading={saving} onClick={save}>حفظ الربط</Button></div>
         </div>
       )}
@@ -240,7 +244,8 @@ export default function MobileOperationsPage(props: Props) {
   const selectTab = (next: MobileOperationsTab) => {
     setTab(next);
     const url = new URL(window.location.href);
-    url.searchParams.set("section", "mobileOperations");
+    url.searchParams.set("section", props.embedded ? "callSystem" : "mobileOperations");
+    if (props.embedded) url.searchParams.set("callTab", "devices");
     url.searchParams.set("mobileTab", next);
     window.history.pushState({}, "", url);
     window.requestAnimationFrame(() => document.getElementById(`mobile-${next}-panel`)?.focus());
@@ -442,7 +447,7 @@ export default function MobileOperationsPage(props: Props) {
             </section>
           )}
           {activeDevices.length ? activeDevices.map((device) => (
-            <DeviceCard key={device.id} device={device} users={users.data || []} canManage={props.canManageDevices} canExecuteCalls={props.canExecuteCalls} onChanged={devices.refresh} notify={props.notify} />
+            <DeviceCard key={device.id} device={device} users={users.data || []} canManage={props.canManageDevices} canManageSim={props.canManageSims ?? props.canManageDevices} canExecuteCalls={props.canExecuteCalls} onChanged={devices.refresh} notify={props.notify} />
           )) : (
             <div className="empty" role="status" aria-live="polite"><Smartphone size={28} aria-hidden="true" /><p>لا يوجد جهاز مربوط. أنشئ رمز QR أعلاه ثم امسحه بتطبيق BreeXe Connect.</p></div>
           )}

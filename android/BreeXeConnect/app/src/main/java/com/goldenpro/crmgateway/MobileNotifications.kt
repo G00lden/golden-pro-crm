@@ -31,7 +31,7 @@ object MobileNotifications {
     fun showCommand(context: Context, command: MobileCommandEntity) {
         ensureChannels(context)
         val payload = runCatching { JSONObject(command.payload) }.getOrDefault(JSONObject())
-        if (command.type in setOf("collect_health", "sync_contacts", "refresh_policy")) {
+        if (command.type in setOf("collect_health", "sync_contacts", "sync_contact", "refresh_policy")) {
             MobileCommandProcessor.executeSafe(context, command)
             return
         }
@@ -111,7 +111,8 @@ object MobileCommandProcessor {
         executor.execute {
             val result = when (command.type) {
                 "collect_health" -> MobileApi.syncProfile(context)
-                "sync_contacts" -> MobileApi.syncCallerCache(context)
+                "sync_contacts" -> MobileApi.syncCallerCache(context, writeSystemContacts = true)
+                "sync_contact" -> syncOneContact(context, command)
                 "refresh_policy" -> MobileApi.fetchPolicy(context).mapToUnit()
                 else -> MobileApiResult.Failure("الأمر يحتاج موافقة الموظف.")
             }
@@ -127,6 +128,19 @@ object MobileCommandProcessor {
         is MobileApiResult.Success -> MobileApiResult.Success(Unit)
         is MobileApiResult.Failure -> this
         is MobileApiResult.Retry -> this
+    }
+
+    private fun syncOneContact(context: Context, command: MobileCommandEntity): MobileApiResult<Unit> {
+        val payload = runCatching { JSONObject(command.payload) }.getOrDefault(JSONObject())
+        val phone = payload.optString("phone")
+        val name = payload.optString("name")
+        val customerId = payload.optString("customerId")
+        if (phone.isBlank() || name.isBlank()) return MobileApiResult.Failure("بيانات جهة الاتصال غير مكتملة.")
+        return if (ContactSaver.saveCaller(context, phone, name, customerId)) {
+            MobileApi.syncCallerCache(context)
+        } else {
+            MobileApiResult.Failure("امنح صلاحية جهات الاتصال ثم أعد المزامنة.")
+        }
     }
 }
 

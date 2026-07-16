@@ -42,14 +42,34 @@ import {
   telephonyDepartmentUpdateSchema,
   telephonyTestMissedSchema,
   telephonyCallsQuerySchema,
+  callWhatsAppActionSchema,
+  callDialActionSchema,
+  callContactActionSchema,
+  callSelectionPreviewSchema,
+  callBulkActionSchema,
 } from "./validation";
 import { logError } from "./logger";
 import { requireNonProductionDemoData } from "./demoDataGuard";
+import { requireCapability } from "./capabilityGuard";
+import {
+  dialCallFromDevice,
+  exportCallSelection,
+  listCallCenterCalls,
+  previewCallSelection,
+  queueBulkCallWhatsApp,
+  sendCallWhatsApp,
+  upsertCallContact,
+  type CallCenterFilters,
+} from "./callCenter";
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {
   return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(handler(req, res, next)).catch(next);
   };
+}
+
+function requireCallSelectionCapability(req: Request, res: Response, next: NextFunction) {
+  return requireCapability(req.body?.action === "export" ? "mobile.calls.export" : "mobile.calls.bulk")(req, res, next);
 }
 
 function httpError(status: number, message: string) {
@@ -247,12 +267,36 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
 
   app.get(
     "/api/telephony/calls",
-    requireAdmin,
+    requireCapability("mobile.calls.view"),
     validateQuery(telephonyCallsQuerySchema),
     (req, res) => {
-      const limit = Number(req.query.limit ?? 100);
-      const missedOnly = req.query.missed === "true";
-      res.json({ calls: listCalls({ ownerUid: owner(), limit, missedOnly }) });
+      // Preserve the original minimal response for older clients that only
+      // know limit/missed. The new call-center client always supplies page.
+      if (!req.query.page && !req.query.page_size && !req.query.dispositions && !req.query.q) {
+        const limit = Number(req.query.limit ?? 100);
+        const missedOnly = req.query.missed === "true";
+        res.json({ calls: listCalls({ ownerUid: owner(), limit, missedOnly }) });
+        return;
+      }
+      const filters: CallCenterFilters = {
+        q: String(req.query.q || ""),
+        dispositions: String(req.query.dispositions || "").split(",").map((item) => item.trim()).filter(Boolean),
+        direction: String(req.query.direction || "") as CallCenterFilters["direction"],
+        dateFrom: String(req.query.date_from || ""),
+        dateTo: String(req.query.date_to || ""),
+        handled: String(req.query.handled || "") as CallCenterFilters["handled"],
+        whatsappStatus: String(req.query.whatsapp_status || "") as CallCenterFilters["whatsappStatus"],
+        contactState: String(req.query.contact_state || "") as CallCenterFilters["contactState"],
+        deviceId: String(req.query.device_id || ""),
+        simKey: String(req.query.sim_key || ""),
+        employeeUid: String(req.query.employee_uid || ""),
+        provider: String(req.query.provider || ""),
+        page: Number(req.query.page || 1),
+        pageSize: Number(req.query.page_size || 25),
+        sortBy: String(req.query.sort_by || "created_at") as CallCenterFilters["sortBy"],
+        sortDirection: String(req.query.sort_direction || "desc") as CallCenterFilters["sortDirection"],
+      };
+      res.json(listCallCenterCalls(owner(), filters));
     },
   );
 
@@ -267,6 +311,99 @@ export function registerTelephonyRoutes(app: Express, options: TelephonyRouteOpt
     if (!ok) throw httpError(404, "المكالمة غير موجودة.");
     res.json({ success: true });
   });
+
+  app.post(
+    "/api/telephony/calls/:id/actions/whatsapp",
+    requireCapability("mobile.whatsapp.send"),
+    validate(callWhatsAppActionSchema),
+    asyncRoute(async (req, res) => {
+      try {
+        res.json(await sendCallWhatsApp({
+          ownerUid: owner(), actorUid: (req as AuthedRequest).user.uid,
+          callId: String(req.params.id), message: req.body.message, outboundCode: req.body.outboundCode,
+        }));
+      } catch (error) {
+        throw httpError(409, error instanceof Error ? error.message : String(error));
+      }
+    }),
+  );
+
+  app.post(
+    "/api/telephony/calls/:id/actions/dial",
+    requireCapability("mobile.calls.execute"),
+    validate(callDialActionSchema),
+    (req, res) => {
+      try {
+        res.status(201).json({ command: dialCallFromDevice({
+          ownerUid: owner(), actorUid: (req as AuthedRequest).user.uid,
+          callId: String(req.params.id), deviceId: req.body.deviceId, reason: req.body.reason,
+        }) });
+      } catch (error) {
+        throw httpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  app.put(
+    "/api/telephony/calls/:id/contact",
+    requireCapability("mobile.contacts.manage"),
+    validate(callContactActionSchema),
+    (req, res) => {
+      try {
+        res.json({ contact: upsertCallContact({
+          ownerUid: owner(), actorUid: (req as AuthedRequest).user.uid,
+          callId: String(req.params.id), name: req.body.name, phone: req.body.phone,
+          company: req.body.company, notes: req.body.notes, deviceId: req.body.deviceId,
+          baseUrl: resolveBaseUrl(req),
+        }) });
+      } catch (error) {
+        throw httpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  app.post(
+    "/api/telephony/calls/selection/preview",
+    validate(callSelectionPreviewSchema),
+    requireCallSelectionCapability,
+    (req, res) => {
+      try {
+        res.json(previewCallSelection({
+          ownerUid: owner(), actorUid: (req as AuthedRequest).user.uid,
+          action: req.body.action, ids: req.body.ids, filters: req.body.filters,
+          excludedIds: req.body.excludedIds, outboundCode: req.body.outboundCode,
+        }));
+      } catch (error) {
+        throw httpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
+
+  app.post(
+    "/api/telephony/calls/bulk-actions",
+    validate(callBulkActionSchema),
+    requireCallSelectionCapability,
+    (req, res) => {
+      try {
+        const actorUid = (req as AuthedRequest).user.uid;
+        if (req.body.action === "whatsapp") {
+          res.status(202).json(queueBulkCallWhatsApp({
+            ownerUid: owner(), actorUid, selectionId: req.body.selectionId,
+            message: req.body.message, outboundCode: req.body.outboundCode,
+          }));
+          return;
+        }
+        const file = exportCallSelection({
+          ownerUid: owner(), actorUid, selectionId: req.body.selectionId, format: req.body.format,
+        });
+        res.setHeader("Content-Type", file.contentType);
+        res.setHeader("Content-Disposition", `attachment; filename="${file.filename}"`);
+        res.send(file.body);
+      } catch (error) {
+        throw httpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  );
 
   // Simulate a missed call end-to-end (records a call, marks it missed, fires
   // the WhatsApp flow) so the operator can verify routing without a real call.
