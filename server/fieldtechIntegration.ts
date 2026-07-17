@@ -168,6 +168,11 @@ function checklistFor(type: string) {
   return ["فحص الجهاز", "تنفيذ الصيانة", "اختبار التشغيل", "شرح النتيجة للعميل"];
 }
 
+function requiredByBooking(value: unknown) {
+  if (value === undefined || value === null || value === "") return true;
+  return ![false, 0, "0", "false"].includes(value as never);
+}
+
 export async function buildFieldTechSnapshot(ownerUid: string, updatedSince?: string) {
   const [technicians, bookings, customers, installations] = await Promise.all([
     listOwned("technicians", ownerUid),
@@ -228,6 +233,12 @@ export async function buildFieldTechSnapshot(ownerUid: string, updatedSince?: st
         checklist: Array.isArray(booking.checklist) && booking.checklist.length
           ? booking.checklist.map(String).slice(0, 50)
           : checklistFor(type),
+        parts: Array.isArray(booking.parts) ? booking.parts.map(String).filter(Boolean).slice(0, 100) : [],
+        completionRequirements: {
+          beforePhoto: requiredByBooking(booking.fieldtech_require_before_photo),
+          afterPhoto: requiredByBooking(booking.fieldtech_require_after_photo),
+          signature: requiredByBooking(booking.fieldtech_require_signature),
+        },
         storeOrderId: booking.store_order_id || null,
         storeOrderNumber: booking.store_order_number || null,
         updatedAt: booking.updatedAt || booking.updated_at || booking.createdAt || booking.created_at,

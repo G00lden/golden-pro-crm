@@ -2,6 +2,9 @@
   "name": "golden-pro-crm",
   "private": true,
   "version": "1.5.0",
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-server.mjs --dev",
@@ -72,7 +75,7 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "firebase": "^12.11.0",
-    "firebase-admin": "^14.1.0",
+    "firebase-admin": "^14.2.0",
     "html2canvas": "^1.4.1",
     "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.2.1",
@@ -100,6 +103,10 @@
     "vite": "^6.2.0"
   },
   "overrides": {
-    "protobufjs": "7.6.4"
+    "protobufjs": "7.6.4",
+    "tsx": {
+      "esbuild": "0.28.1"
+    },
+    "uuid": "11.1.1"
   }
 }

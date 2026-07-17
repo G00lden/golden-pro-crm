@@ -50,6 +50,10 @@ test("FieldTech snapshot maps Breexe technicians and bookings and signature matc
     date: "2026-07-17",
     scheduled_time: "10:30",
     booking_type: "installation",
+    parts: ["قطعة اختبار × 1"],
+    fieldtech_require_before_photo: true,
+    fieldtech_require_after_photo: false,
+    fieldtech_require_signature: true,
     status: "confirmed",
     createdAt: "2026-07-17T10:00:00.000Z",
     updatedAt: "2026-07-17T10:00:00.000Z",
@@ -61,6 +65,12 @@ test("FieldTech snapshot maps Breexe technicians and bookings and signature matc
   assert.equal(snapshot.bookings[0].type, "تركيب");
   assert.equal(snapshot.bookings[0].address, "الرياض");
   assert.equal(snapshot.bookings[0].scheduledAt, "2026-07-17T07:30:00.000Z");
+  assert.deepEqual(snapshot.bookings[0].parts, ["قطعة اختبار × 1"]);
+  assert.deepEqual(snapshot.bookings[0].completionRequirements, {
+    beforePhoto: true,
+    afterPhoto: false,
+    signature: true,
+  });
 
   const input = {
     secret: "a-secret-value-that-is-at-least-32-characters",
