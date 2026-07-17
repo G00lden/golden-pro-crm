@@ -196,6 +196,8 @@ export type Booking = {
   status: "confirmed" | "completed" | "cancelled";
   booking_type?: "installation" | "maintenance" | "external_maintenance" | "delivery";
   source?: "manual" | "salla";
+  notes?: string;
+  parts?: string[];
   store_order_id?: string;
   store_order_number?: string;
   completed_at?: string;
@@ -204,6 +206,9 @@ export type Booking = {
   updatedAt?: string;
   fieldtech_status?: "scheduled" | "progress" | "complete" | "cancelled";
   fieldtech_updated_at?: string;
+  fieldtech_require_before_photo?: boolean;
+  fieldtech_require_after_photo?: boolean;
+  fieldtech_require_signature?: boolean;
 };
 
 export type FieldTechRemoteTechnician = {

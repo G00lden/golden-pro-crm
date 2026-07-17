@@ -10,6 +10,7 @@ import {
   Loading,
   PageHeader,
   SelectInput,
+  TextArea,
   TextInput,
   Badge,
   statusLabel,
@@ -199,6 +200,10 @@ function BookingForm({
   const [time, setTime] = useState(initial?.scheduled_time || "10:00");
   const [status, setStatus] = useState<api.Booking["status"]>(initial?.status || "confirmed");
   const [bookingType, setBookingType] = useState<NonNullable<api.Booking["booking_type"]>>(initial?.booking_type || "maintenance");
+  const [parts, setParts] = useState((initial?.parts || []).join("\n"));
+  const [requireBeforePhoto, setRequireBeforePhoto] = useState(initial?.fieldtech_require_before_photo ?? true);
+  const [requireAfterPhoto, setRequireAfterPhoto] = useState(initial?.fieldtech_require_after_photo ?? true);
+  const [requireSignature, setRequireSignature] = useState(initial?.fieldtech_require_signature ?? true);
   const [saving, setSaving] = useState(false);
 
   const selectableInstallations = useMemo(
@@ -241,6 +246,10 @@ function BookingForm({
         scheduled_time: time,
         status,
         booking_type: bookingType,
+        parts: parts.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+        fieldtech_require_before_photo: requireBeforePhoto,
+        fieldtech_require_after_photo: requireAfterPhoto,
+        fieldtech_require_signature: requireSignature,
       });
     } finally {
       setSaving(false);
@@ -281,10 +290,29 @@ function BookingForm({
           <option value="delivery">توصيل</option>
         </SelectInput>
       </Field>
+      <Field label="القطع المتوقعة / المسلّمة للفني">
+        <TextArea rows={3} value={parts} onChange={(event) => setParts(event.target.value)} placeholder="فلتر × 1&#10;وصلة 2 متر × 2" />
+      </Field>
       <div className="form-grid">
         <Field label="التاريخ"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
         <Field label="الوقت"><TextInput type="time" value={time} onChange={(e) => setTime(e.target.value)} /></Field>
       </div>
+      <section className="form-section" aria-labelledby="fieldtech-evidence-title">
+        <h3 id="fieldtech-evidence-title">توثيق تطبيق الفني</h3>
+        <p className="form-note">لن يتمكن الفني من إنهاء المهمة حتى يرفع العناصر المطلوبة.</p>
+        <label className="check-row">
+          <input type="checkbox" checked={requireBeforePhoto} onChange={(event) => setRequireBeforePhoto(event.target.checked)} />
+          <span>صورة قبل التنفيذ</span>
+        </label>
+        <label className="check-row">
+          <input type="checkbox" checked={requireAfterPhoto} onChange={(event) => setRequireAfterPhoto(event.target.checked)} />
+          <span>صورة بعد التنفيذ</span>
+        </label>
+        <label className="check-row">
+          <input type="checkbox" checked={requireSignature} onChange={(event) => setRequireSignature(event.target.checked)} />
+          <span>توقيع العميل</span>
+        </label>
+      </section>
       <div className="form-actions">
         <Button type="submit" loading={saving}><Save size={16} /> حفظ</Button>
         <Button tone="muted" onClick={onCancel}>إلغاء</Button>

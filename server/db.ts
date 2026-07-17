@@ -265,6 +265,10 @@ db.exec(`
     booking_type TEXT DEFAULT 'maintenance',
     source TEXT DEFAULT 'manual',
     notes TEXT DEFAULT '',
+    parts TEXT DEFAULT '[]',
+    fieldtech_require_before_photo INTEGER DEFAULT 1,
+    fieldtech_require_after_photo INTEGER DEFAULT 1,
+    fieldtech_require_signature INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
@@ -693,6 +697,10 @@ for (const col of [
   ["confirmed_by_technician", "INTEGER DEFAULT 0"],
   ["technician_confirmed_at", "TEXT"],
   ["technician_reminded_at", "TEXT"],
+  ["parts", "TEXT DEFAULT '[]'"],
+  ["fieldtech_require_before_photo", "INTEGER DEFAULT 1"],
+  ["fieldtech_require_after_photo", "INTEGER DEFAULT 1"],
+  ["fieldtech_require_signature", "INTEGER DEFAULT 1"],
 ] as const) {
   if (!hasColumn("bookings", col[0])) {
     db.exec(`ALTER TABLE bookings ADD COLUMN ${col[0]} ${col[1]}`);
