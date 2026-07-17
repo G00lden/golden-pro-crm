@@ -20,6 +20,7 @@ import {
 import { completeBooking } from "./bookingLifecycle";
 import { notifyTechnicianForBooking, sendTechnicianPreAlerts } from "./bookingNotifications";
 import { validate, resolveEscalationSchema, assignEscalationSchema } from "./validation";
+import { requestFieldTechSync } from "./fieldtechIntegration";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -119,7 +120,9 @@ export function registerMaintenanceRoutes(app: Express) {
     "/api/bookings/:id/complete",
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
-      res.json(await completeBooking(req.params.id, userReq.user.uid));
+      const result = await completeBooking(req.params.id, userReq.user.uid);
+      void requestFieldTechSync("booking_completed_in_crm").catch(() => {});
+      res.json(result);
     }),
   );
 

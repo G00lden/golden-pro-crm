@@ -57,6 +57,10 @@ import { getLocalAuthPolicy } from "./server/localAuthPolicy";
 import { requireNonProductionDemoData } from "./server/demoDataGuard";
 import { requireCapability } from "./server/capabilityGuard";
 import { requestClientIp } from "./server/clientIp";
+import {
+  registerFieldTechAdminRoutes,
+  registerFieldTechPublicRoutes,
+} from "./server/fieldtechIntegration";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
@@ -319,6 +323,12 @@ async function startServer() {
   // Tap payment webhook (authenticated via HMAC signature, not Firebase)
   registerPaymentWebhookRoute(app);
 
+  // Technician Android service bridge (mutual HMAC, no Firebase token on devices).
+  registerFieldTechPublicRoutes(app, {
+    webhookRateLimit,
+    ownerUid: () => process.env.FIELDTECH_OWNER_UID || __whatsappOwnerUid(),
+  });
+
   // Auto-reply on unanswered WhatsApp calls + route inbound WhatsApp replies.
   initWhatsAppAutoReply(__whatsappOwnerUid);
   void whatsappService.verifyConnection().catch((error) => {
@@ -395,6 +405,8 @@ async function startServer() {
   registerSallaRoutes(app);
 
   registerPaymentRoutes(app);
+
+  registerFieldTechAdminRoutes(app);
 
   registerMaintenanceRoutes(app);
 

@@ -25,6 +25,9 @@ const collectionPrefixes: Record<string, string> = {
   salla_order_inbox: "soi",
   salla_order_commands: "soc",
   technician_notifications: "tn",
+  fieldtech_events: "ftev",
+  fieldtech_job_states: "ftjs",
+  fieldtech_technician_locations: "ftloc",
 };
 
 const primaryKeyByTable: Record<string, string> = {

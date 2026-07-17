@@ -32,6 +32,9 @@ const collectionPrefixes: Record<string, string> = {
   crm_tasks: "task",
   crm_notes: "note",
   audit_logs: "audit",
+  fieldtech_events: "ftev",
+  fieldtech_job_states: "ftjs",
+  fieldtech_technician_locations: "ftloc",
 };
 
 const primaryKeyByTable: Record<string, string> = {

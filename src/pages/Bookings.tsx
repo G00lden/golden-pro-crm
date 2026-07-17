@@ -28,6 +28,13 @@ export default function BookingsPage({
   refreshStats: () => Promise<void>;
   setModal: (modal: ModalState) => void;
 }) {
+  const fieldTechLabel = (status?: api.Booking["fieldtech_status"]) => {
+    if (status === "scheduled") return "قبله الفني";
+    if (status === "progress") return "الفني في التنفيذ";
+    if (status === "complete") return "أكمله الفني";
+    if (status === "cancelled") return "ملغي في التطبيق";
+    return "أرسل للتطبيق";
+  };
   const [date, setDate] = useState(today());
   const bookings = useData(() => api.getBookings({ date }), [date]);
   const technicianNoticeLock = useRef(createPerItemActionLock()).current;
@@ -157,6 +164,7 @@ export default function BookingsPage({
                       <Badge tone="warn">جاري التحقق من الإرسال…</Badge>
                     </span>
                   )}
+                  {booking.fieldtech_status && <Badge tone={booking.fieldtech_status === "complete" ? "success" : booking.fieldtech_status === "cancelled" ? "danger" : "warn"}>{fieldTechLabel(booking.fieldtech_status)}</Badge>}
                 </div>
               </div>
               <div className="row-actions">
@@ -207,6 +215,7 @@ function BookingForm({
   const [date, setDate] = useState(initial?.date || selectedDate);
   const [time, setTime] = useState(initial?.scheduled_time || "10:00");
   const [status, setStatus] = useState<api.Booking["status"]>(initial?.status || "confirmed");
+  const [bookingType, setBookingType] = useState<NonNullable<api.Booking["booking_type"]>>(initial?.booking_type || "maintenance");
   const [saving, setSaving] = useState(false);
 
   const selectableInstallations = useMemo(
@@ -248,6 +257,7 @@ function BookingForm({
         date,
         scheduled_time: time,
         status,
+        booking_type: bookingType,
       });
     } finally {
       setSaving(false);
@@ -280,6 +290,14 @@ function BookingForm({
           </SelectInput>
         </Field>
       </div>
+      <Field label="نوع المهمة">
+        <SelectInput value={bookingType} onChange={(event) => setBookingType(event.target.value as NonNullable<api.Booking["booking_type"]>)}>
+          <option value="installation">تركيب</option>
+          <option value="maintenance">صيانة</option>
+          <option value="external_maintenance">صيانة خارجية</option>
+          <option value="delivery">توصيل</option>
+        </SelectInput>
+      </Field>
       <div className="form-grid">
         <Field label="التاريخ"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
         <Field label="الوقت"><TextInput type="time" value={time} onChange={(e) => setTime(e.target.value)} /></Field>

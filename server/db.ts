@@ -448,6 +448,37 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 
+  -- Signed Breexe Pro <-> Android technician bridge state. These tables keep
+  -- mobile workflow states separate from the canonical booking status while
+  -- preserving idempotency and the latest live location.
+  CREATE TABLE IF NOT EXISTS fieldtech_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    processed_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS fieldtech_job_states (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    booking_id TEXT NOT NULL,
+    technician_id TEXT NOT NULL,
+    app_status TEXT NOT NULL,
+    completion_note TEXT DEFAULT '',
+    occurred_at TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS fieldtech_technician_locations (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    technician_id TEXT NOT NULL,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    accuracy REAL DEFAULT 0,
+    recorded_at TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
   -- Indexes
   CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_uid);
   CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
@@ -461,6 +492,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(owner_uid);
   CREATE INDEX IF NOT EXISTS idx_reminders_sent ON reminders(sent_at);
   CREATE INDEX IF NOT EXISTS idx_store_orders_owner ON store_orders(owner_uid);
+  CREATE INDEX IF NOT EXISTS idx_fieldtech_events_owner ON fieldtech_events(owner_uid, processed_at);
+  CREATE INDEX IF NOT EXISTS idx_fieldtech_states_owner ON fieldtech_job_states(owner_uid, updated_at);
+  CREATE INDEX IF NOT EXISTS idx_fieldtech_locations_owner ON fieldtech_technician_locations(owner_uid, recorded_at);
 
   -- WhatsApp message log: every outbound template/text + every inbound message
   -- and delivery/read receipt. Powers GET /api/whatsapp/conversations/:phone.

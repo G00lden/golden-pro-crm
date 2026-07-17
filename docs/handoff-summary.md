@@ -539,3 +539,15 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - قيدت حالة بوابة المكالمات التفصيلية بصلاحية الإدارة، وأزيل تجاوز قائمة أرقام الاختبار، وحذفت الأرقام والتسميات من بيانات تدقيق سياسة الرد.
 - أصبحت خانة تجربة واتساب فارغة افتراضيًا بدل وضع رقم حقيقي، مع بقاء الإرسال الحقيقي محصورًا بقائمة الخادم المسموحة.
 - إصدار أندرويد الجديد `2.1.3 (9)`، ودليل الإصلاح في `docs/android-sim-fix-2.1.3-ar.md`.
+
+## 2026-07-17 - Breexe Pro CRM and FieldTech integration [Codex]
+
+- Branch: `codex/fieldtech-integration`.
+- Added signed bidirectional synchronization for technicians, bookings, job status, account control, pairing codes, and technician locations.
+- Added durable integration events/state/location storage for SQLite and Supabase, including migration `20260717120000_fieldtech_bridge.sql`.
+- Added CRM controls for connection status, manual sync, QR pairing, enable/disable, devices, wallet summary, and last Google Maps location.
+- Fixed local-auth deployments using a server data provider so technician and booking screens use the server API instead of browser local storage.
+- Verified lint, production build, asset/product/FieldTech tests, replay protection, idempotent snapshot handling, and a full local CRM-to-APK-server round trip through completion and location reporting.
+- Rebuilt QA APK: `fanni-fieldtech-breexe-pro-v1.0.0-debug.apk`; SHA-256 `6996F0C92BBFF40097E274C1031730CB881A3DC3827D5D251EA15A20560C4C45`.
+- Production activation still requires deploying the FieldTech server over HTTPS, setting the same 32+ character integration secret on both services, applying the Supabase migration when applicable, and signing the final APK with a company-owned release keystore.
+- Full Arabic deployment and verification steps: `docs/fieldtech-integration-runbook-ar.md`.
