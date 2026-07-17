@@ -194,7 +194,7 @@ export type Booking = {
   date: string;
   scheduled_time: string;
   status: "confirmed" | "completed" | "cancelled";
-  booking_type?: "installation" | "maintenance" | "external_maintenance";
+  booking_type?: "installation" | "maintenance" | "external_maintenance" | "delivery";
   source?: "manual" | "salla";
   store_order_id?: string;
   store_order_number?: string;
@@ -202,6 +202,50 @@ export type Booking = {
   createdBy?: string;
   createdAt?: string;
   updatedAt?: string;
+  fieldtech_status?: "scheduled" | "progress" | "complete" | "cancelled";
+  fieldtech_updated_at?: string;
+};
+
+export type FieldTechRemoteTechnician = {
+  id: string;
+  breexeTechnicianId: string;
+  name: string;
+  active: boolean;
+  pairedDevices: number;
+  lastSeenAt?: string | null;
+};
+
+export type FieldTechStatus = {
+  configured: boolean;
+  connected: boolean;
+  message?: string;
+  crmUrl?: string | null;
+  lastSync?: { at?: string; generatedAt?: string; technicians?: number; bookings?: number } | null;
+  lastError?: { at?: string; message?: string } | null;
+  pendingEvents?: number;
+  technicians?: FieldTechRemoteTechnician[];
+};
+
+export type FieldTechWallet = {
+  currency: "SAR";
+  ledgerHalalas: number;
+  heldHalalas: number;
+  availableHalalas: number;
+  paidHalalas: number;
+};
+
+export type FieldTechOperations = {
+  technician: FieldTechRemoteTechnician & { phone?: string; title?: string };
+  location: { latitude: number; longitude: number; accuracy: number; recordedAt: string } | null;
+  wallet: FieldTechWallet;
+  devices: Array<{ deviceName: string; expiresAt: string; lastSeenAt: string; revokedAt?: string | null }>;
+};
+
+export type FieldTechPairing = {
+  code: string;
+  value: string;
+  qrDataUrl: string;
+  expiresInSeconds: number;
 };
 
 export type Reminder = {
@@ -1179,7 +1223,7 @@ export const getStats = async (): Promise<DashboardStats> => {
   const { start: todayStart, end: tomorrowStart } = localDayWindow();
   const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toLocaleDateString("en-CA");
 
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const data = loadLocalDb(uid);
     return {
       customers: data.customers.length,
@@ -1292,7 +1336,7 @@ export const getCustomers = async (search = "") => {
   const user = getCurrentAppUser();
   if (!user) return { data: [] as Customer[], total: 0 };
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const cleanSearch = search.trim();
     let data = loadLocalDb(uid).customers.sort((a, b) => a.name.localeCompare(b.name));
     if (cleanSearch) data = data.filter((c) => `${c.name} ${c.phone} ${c.city || ""}`.includes(cleanSearch));
@@ -1321,7 +1365,7 @@ export const getCustomers = async (search = "") => {
 export const createCustomer = (data: Omit<Customer, "id">) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     localDb.customers.push({
       ...data,
@@ -1359,7 +1403,7 @@ export const createCustomer = (data: Omit<Customer, "id">) => {
 
 export const updateCustomer = (id: string, data: Partial<Customer>) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.customers = localDb.customers.map((item) => item.id === id ? { ...item, ...data, updatedAt: nowIso() } : item);
     saveLocalDb(user.uid, localDb);
@@ -1376,7 +1420,7 @@ export const updateCustomer = (id: string, data: Partial<Customer>) => {
 
 export const deleteCustomer = (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.customers = localDb.customers.filter((item) => item.id !== id);
     saveLocalDb(user.uid, localDb);
@@ -1549,7 +1593,7 @@ export const getQuotes = async (filter: { search?: string; status?: string } = {
   const user = getCurrentAppUser();
   if (!user) return { data: [], total: 0, stats: quoteStats([]) };
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const all = loadLocalDb(uid).quotes;
     const data = filterQuotes(all, filter);
     return { data, total: data.length, stats: quoteStats(all) };
@@ -1569,7 +1613,7 @@ export const getQuotes = async (filter: { search?: string; status?: string } = {
 export const createQuote = async (data: QuoteInput) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     let quote = localQuotePayload(data, uid);
     quote.quote_number = quoteNumber(Date.now(), nextNumberIndex(localDb.quotes, "quote_number"));
@@ -1595,7 +1639,7 @@ export const createQuote = async (data: QuoteInput) => {
 
 export const updateQuote = async (id: string, data: QuoteInput) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.quotes = localDb.quotes.map((item) => item.id === id ? localQuotePayload(data, user.uid, item) : item);
     saveLocalDb(user.uid, localDb);
@@ -1635,7 +1679,7 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
 export const setQuoteStatus = async (id: string, status: QuoteStatus, followUpDate?: string | null) => {
   const user = getUserOrThrow();
   const now = nowIso();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.quotes = localDb.quotes.map((item) =>
       item.id === id
@@ -1674,7 +1718,7 @@ export const setQuoteStatus = async (id: string, status: QuoteStatus, followUpDa
 
 export const deleteQuote = (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.quotes = localDb.quotes.filter((item) => item.id !== id);
     saveLocalDb(user.uid, localDb);
@@ -1694,7 +1738,7 @@ export const sendQuoteWhatsApp = async (quote: Quote, message: string) => {
     quote_id: quote.id,
     quote_number: quote.quote_number,
   };
-  if (serverDataEnabled() && !user?.local) {
+  if (serverDataEnabled()) {
     return apiFetch<{ success: boolean; result: unknown }>(`/api/quotes/${quote.id}/send-whatsapp`, {
       method: "POST",
       body: JSON.stringify({
@@ -1836,7 +1880,7 @@ export const getInvoices = async (filter: { search?: string; status?: string } =
   const user = getCurrentAppUser();
   if (!user) return { data: [], total: 0, stats: invoiceStats([]) };
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const all = loadLocalDb(uid).invoices;
     const data = filterInvoices(all, filter);
     return { data, total: data.length, stats: invoiceStats(all) };
@@ -1856,7 +1900,7 @@ export const getInvoices = async (filter: { search?: string; status?: string } =
 export const createInvoice = async (data: InvoiceInput) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     let invoice = localInvoicePayload(data, uid, localDb.settings);
     invoice.invoice_number = invoiceNumber(Date.now(), nextNumberIndex(localDb.invoices, "invoice_number"));
@@ -1881,7 +1925,7 @@ export const createInvoice = async (data: InvoiceInput) => {
 
 export const updateInvoice = async (id: string, data: InvoiceInput) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.invoices = localDb.invoices.map((item) =>
       item.id === id ? localInvoicePayload(data, user.uid, localDb.settings, item) : item,
@@ -1925,7 +1969,7 @@ export const updateInvoice = async (id: string, data: InvoiceInput) => {
 export const setInvoiceStatus = async (id: string, status: InvoiceStatus) => {
   const user = getUserOrThrow();
   const now = nowIso();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.invoices = localDb.invoices.map((item) =>
       item.id === id
@@ -1962,7 +2006,7 @@ export const setInvoiceStatus = async (id: string, status: InvoiceStatus) => {
 
 export const deleteInvoice = (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.invoices = localDb.invoices.filter((item) => item.id !== id);
     saveLocalDb(user.uid, localDb);
@@ -1978,14 +2022,14 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
   const user = getUserOrThrow();
   const uid = user.uid;
 
-  if (!user.local && serverDataEnabled()) {
+  if (serverDataEnabled()) {
     return apiFetch<{ id: string }>(`/api/quotes/${quoteId}/convert-to-invoice`, {
       method: "POST",
     }).then((result) => result.id);
   }
 
   let quote: Quote | null = null;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     quote = localDb.quotes.find((q) => q.id === quoteId) || null;
   } else {
@@ -1994,7 +2038,7 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
   }
   if (!quote) throw new Error("عرض السعر غير موجود");
 
-  const settings = user.local
+  const settings = user.local && !serverDataEnabled()
     ? loadLocalDb(uid).settings
     : defaultSettings();
 
@@ -2064,7 +2108,7 @@ export const sendInvoiceWhatsApp = async (invoice: Invoice, message: string) => 
     invoice_id: invoice.id,
     invoice_number: invoice.invoice_number,
   };
-  if (serverDataEnabled() && !user?.local) {
+  if (serverDataEnabled()) {
     return apiFetch<{ success: boolean; result: unknown }>(`/api/invoices/${invoice.id}/send-whatsapp`, {
       method: "POST",
       body: JSON.stringify({
@@ -2092,7 +2136,7 @@ export const getProducts = async () => {
   const user = getCurrentAppUser();
   if (!user) return [] as Product[];
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     return loadLocalDb(uid).products.sort((a, b) => a.name.localeCompare(b.name));
   }
   if (serverDataEnabled()) return apiFetch<Product[]>("/api/products");
@@ -2103,7 +2147,7 @@ export const getProducts = async () => {
 export const createProduct = (data: Omit<Product, "id">) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     localDb.products.push({
       ...data,
@@ -2149,7 +2193,7 @@ export const createProduct = (data: Omit<Product, "id">) => {
 
 export const updateProduct = (id: string, data: Partial<Product>) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.products = localDb.products.map((item) =>
       item.id === id ? { ...item, ...data, interval_months: Number(data.interval_months || item.interval_months || 1), updatedAt: nowIso() } : item,
@@ -2248,7 +2292,7 @@ export const syncOdooCustomers = () =>
 
 export const deleteProduct = (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.products = localDb.products.filter((item) => item.id !== id);
     saveLocalDb(user.uid, localDb);
@@ -2264,7 +2308,7 @@ export const getInstallations = async () => {
   const user = getCurrentAppUser();
   if (!user) return [] as Installation[];
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     return loadLocalDb(uid).installations
       .sort((a, b) => a.next_maintenance.localeCompare(b.next_maintenance))
       .map(localInstallationWithDays);
@@ -2289,7 +2333,7 @@ export const getInstallations = async () => {
 export const createInstallation = (data: Omit<Installation, "id" | "remind_count" | "status">) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     localDb.installations.push({
       ...data,
@@ -2339,7 +2383,7 @@ export const createInstallation = (data: Omit<Installation, "id" | "remind_count
 
 export const updateInstallation = (id: string, data: Partial<Installation>) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.installations = localDb.installations.map((item) => item.id === id ? { ...item, ...data, updatedAt: nowIso() } : item);
     saveLocalDb(user.uid, localDb);
@@ -2356,7 +2400,7 @@ export const updateInstallation = (id: string, data: Partial<Installation>) => {
 
 export const completeInstallation = (id: string, completedDate = today()) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.installations = localDb.installations.map((item) =>
       item.id === id ? { ...item, status: "completed", completed_date: completedDate, next_remind_type: null, updatedAt: nowIso() } : item,
@@ -2385,7 +2429,7 @@ export const completeInstallation = (id: string, completedDate = today()) => {
 
 export const deleteInstallation = (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.installations = localDb.installations.filter((item) => item.id !== id);
     localDb.bookings = localDb.bookings.filter((item) => item.installation_id !== id);
@@ -2401,7 +2445,7 @@ export const deleteInstallation = (id: string) => {
 export const remindInstallation = async (id: string, type?: string) => {
   const user = getUserOrThrow();
   const outboundCode = requestOutboundCode();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     const result = await sendLocalReminderViaWhatsApp(localDb, id, user.uid, type, outboundCode);
     saveLocalDb(user.uid, localDb);
@@ -2417,7 +2461,7 @@ export const remindInstallation = async (id: string, type?: string) => {
 export const runDueReminders = async (options: { automatic?: boolean } = {}) => {
   const user = getUserOrThrow();
   const outboundCode = options.automatic ? "" : requestOutboundCode();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const whatsapp = await getWhatsAppStatus().catch(() => null);
     if (whatsapp?.status !== "connected") {
       return {
@@ -2473,7 +2517,7 @@ export const getTechnicians = async () => {
   const user = getCurrentAppUser();
   if (!user) return [] as Technician[];
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     return loadLocalDb(uid).technicians.sort((a, b) => a.name.localeCompare(b.name));
   }
   if (serverDataEnabled()) return apiFetch<Technician[]>("/api/technicians");
@@ -2481,10 +2525,29 @@ export const getTechnicians = async () => {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Technician);
 };
 
+export const getFieldTechStatus = () => apiFetch<FieldTechStatus>("/api/fieldtech/status");
+
+export const syncFieldTech = () => apiFetch<{ success: boolean; technicians: number; bookings: number; changed: number }>("/api/fieldtech/sync", {
+  method: "POST",
+  body: "{}",
+});
+
+export const createFieldTechPairing = (technicianId: string) => apiFetch<FieldTechPairing>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/pairing`, {
+  method: "POST",
+  body: "{}",
+});
+
+export const setFieldTechAccount = (technicianId: string, active: boolean) => apiFetch<{ technician: FieldTechRemoteTechnician }>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/account`, {
+  method: "PATCH",
+  body: JSON.stringify({ active }),
+});
+
+export const getFieldTechOperations = (technicianId: string) => apiFetch<FieldTechOperations>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/operations`);
+
 export const createTechnician = (data: Omit<Technician, "id">) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     localDb.technicians.push({
       ...data,
@@ -2522,7 +2585,7 @@ export const createTechnician = (data: Omit<Technician, "id">) => {
 
 export const updateTechnician = (id: string, data: Partial<Technician>) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.technicians = localDb.technicians.map((item) =>
       item.id === id ? { ...item, ...data, max_daily: Number(data.max_daily || item.max_daily || 4), updatedAt: nowIso() } : item,
@@ -2545,7 +2608,7 @@ export const updateTechnician = (id: string, data: Partial<Technician>) => {
 
 export const deleteTechnician = (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.technicians = localDb.technicians.filter((item) => item.id !== id);
     saveLocalDb(user.uid, localDb);
@@ -2561,7 +2624,7 @@ export const getBookings = async (params: { date?: string } = {}) => {
   const user = getCurrentAppUser();
   if (!user) return [] as Booking[];
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const data = loadLocalDb(uid).bookings.filter((item) => !params.date || item.date === params.date);
     return data.sort((a, b) => params.date ? a.scheduled_time.localeCompare(b.scheduled_time) : a.date.localeCompare(b.date));
   }
@@ -2586,7 +2649,7 @@ export const getBookings = async (params: { date?: string } = {}) => {
 export const createBooking = (data: Omit<Booking, "id">) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     const id = localId("book");
     localDb.bookings.push({
@@ -2627,7 +2690,7 @@ export const createBooking = (data: Omit<Booking, "id">) => {
 
 export const updateBooking = (id: string, data: Partial<Booking>) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.bookings = localDb.bookings.map((item) => item.id === id ? { ...item, ...data, updatedAt: nowIso() } : item);
     saveLocalDb(user.uid, localDb);
@@ -2644,7 +2707,7 @@ export const updateBooking = (id: string, data: Partial<Booking>) => {
 
 export const deleteBooking = (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     localDb.bookings = localDb.bookings.filter((item) => item.id !== id);
     saveLocalDb(user.uid, localDb);
@@ -2659,7 +2722,7 @@ export const deleteBooking = (id: string) => {
 export const notifyTechnicianBooking = async (id: string, trigger = "manual") => {
   const user = getUserOrThrow();
   const outboundCode = requestOutboundCode();
-  if (user.local) return sendLocalTechnicianNotification(user.uid, id, trigger, outboundCode);
+  if (user.local && !serverDataEnabled()) return sendLocalTechnicianNotification(user.uid, id, trigger, outboundCode);
 
   return apiFetch<TechnicianNotificationResult>(`/api/bookings/${id}/notify-technician`, {
     method: "POST",
@@ -2669,7 +2732,7 @@ export const notifyTechnicianBooking = async (id: string, trigger = "manual") =>
 
 export const completeBooking = async (id: string) => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     const booking = localDb.bookings.find((item) => item.id === id);
     if (!booking) throw new Error("الحجز غير موجود.");
@@ -2710,7 +2773,7 @@ export const getReminders = async () => {
   const user = getCurrentAppUser();
   if (!user) return [] as Reminder[];
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     return loadLocalDb(uid).reminders.sort((a, b) => b.sent_at.localeCompare(a.sent_at));
   }
   if (serverDataEnabled()) return apiFetch<Reminder[]>("/api/reminders");
@@ -2723,7 +2786,7 @@ export const getCustomerCareQueue = async () => {
   if (!user) return [] as CustomerCareItem[];
   const uid = user.uid;
 
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const data = loadLocalDb(uid);
     return buildCustomerCareQueue(
       data.customers,
@@ -2761,7 +2824,7 @@ export const getSettings = async (): Promise<Settings> => {
   const user = getCurrentAppUser();
   if (!user) return defaultSettings();
   const uid = user.uid;
-  if (user.local) return loadLocalDb(uid).settings;
+  if (user.local && !serverDataEnabled()) return loadLocalDb(uid).settings;
   if (serverDataEnabled()) return apiFetch<Settings>("/api/settings");
   const snap = await getDoc(doc(db, "settings", uid));
   return snap.exists()
@@ -2772,7 +2835,7 @@ export const getSettings = async (): Promise<Settings> => {
 export const updateSettings = (data: Settings) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     localDb.settings = { ...defaultSettings(), ...data, createdBy: uid, updatedAt: nowIso() };
     saveLocalDb(uid, localDb);
@@ -2932,7 +2995,7 @@ export const seedDemoData = async (count = 10) => {
   const uid = user.uid;
   const demo = buildDemoDataSet(uid, count);
 
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(uid);
     localDb.products.push(...demo.products);
     localDb.technicians.push(...demo.technicians);
@@ -2994,7 +3057,7 @@ export const testWhatsApp = async (phone: string, message: string, metadata?: Re
 
 export const getReminderDiagnostics = async (): Promise<ReminderDiagnostics> => {
   const user = getUserOrThrow();
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     const localDb = loadLocalDb(user.uid);
     const whatsapp = await getWhatsAppStatus().catch(() => ({ status: "error", lastError: "تعذر قراءة حالة واتساب" }));
     const due = localDb.installations.filter(
@@ -3589,7 +3652,7 @@ export interface PaymentResponse {
 export const createPayment = async (invoiceId: string) => {
   const user = getUserOrThrow();
   const uid = user.uid;
-  if (user.local) {
+  if (user.local && !serverDataEnabled()) {
     return apiFetch<PaymentResponse>("/api/payments/create", {
       method: "POST",
       body: JSON.stringify({ invoice_id: invoiceId }),

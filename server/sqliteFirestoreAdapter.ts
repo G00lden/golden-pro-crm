@@ -36,6 +36,9 @@ const collectionPrefixes: Record<string, string> = {
   marketing_campaigns: "camp",
   odoo_import_runs: "odoo",
   replacement_links: "repl",
+  fieldtech_events: "ftev",
+  fieldtech_job_states: "ftjs",
+  fieldtech_technician_locations: "ftloc",
 };
 
 const primaryKeyByTable: Record<string, string> = {

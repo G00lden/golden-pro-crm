@@ -6,6 +6,7 @@ import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
 import { publicInvoiceShareQuerySchema, validateQuery } from "./validation";
+import { requestFieldTechSync } from "./fieldtechIntegration";
 
 type DocSnapshot = {
   id: string;
@@ -37,6 +38,13 @@ function userId(req: express.Request) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function queueFieldTechSync(reason: string) {
+  void requestFieldTechSync(reason).catch(() => {
+    // The FieldTech service also performs periodic recovery pulls. A temporary
+    // integration outage must never make the canonical CRM mutation fail.
+  });
 }
 
 function addMonths(date: string, months: number) {
@@ -685,6 +693,7 @@ export function registerCrmApiRoutes(app: express.Express) {
       specialty: req.body?.specialty || "",
       max_daily: Number(req.body?.max_daily || 4),
     });
+    queueFieldTechSync("technician_created");
     res.status(201).json({ id });
   }));
 
@@ -693,6 +702,7 @@ export function registerCrmApiRoutes(app: express.Express) {
       ...req.body,
       max_daily: req.body?.max_daily ? Number(req.body.max_daily) : undefined,
     }))) return res.status(404).json({ error: "Technician was not found." });
+    queueFieldTechSync("technician_updated");
     res.json({ success: true });
   }));
 
@@ -707,6 +717,7 @@ export function registerCrmApiRoutes(app: express.Express) {
       return res.status(409).json({ error: `لا يمكن حذف الفني لارتباطه بسجلات: ${blocking}. احذفها أو أعد إسنادها أولًا.` });
     }
     if (!(await deleteOwned("technicians", id, uid))) return res.status(404).json({ error: "Technician was not found." });
+    queueFieldTechSync("technician_deleted");
     res.json({ success: true });
   }));
 
@@ -714,8 +725,22 @@ export function registerCrmApiRoutes(app: express.Express) {
     const uid = userId(req);
     let ref = adminDb.collection("bookings").where("createdBy", "==", uid);
     if (req.query.date) ref = ref.where("date", "==", String(req.query.date));
-    const snap = await ref.orderBy(req.query.date ? "scheduled_time" : "date").limit(300).get();
-    res.json(snap.docs.map((doc: DocSnapshot) => docData(doc)));
+    const [snap, stateSnap] = await Promise.all([
+      ref.orderBy(req.query.date ? "scheduled_time" : "date").limit(300).get(),
+      adminDb.collection("fieldtech_job_states").where("createdBy", "==", uid).limit(500).get(),
+    ]);
+    const states = new Map<string, Record<string, any> & { id: string }>(
+      stateSnap.docs.map((doc: DocSnapshot): [string, Record<string, any> & { id: string }] => [doc.id, docData(doc)]),
+    );
+    res.json(snap.docs.map((doc: DocSnapshot) => {
+      const booking = docData(doc);
+      const state = states.get(doc.id);
+      return state ? {
+        ...booking,
+        fieldtech_status: state.app_status,
+        fieldtech_updated_at: state.updatedAt || state.updated_at || state.occurred_at,
+      } : booking;
+    }));
   }));
 
   app.post("/api/bookings", asyncRoute(async (req, res) => {
@@ -732,17 +757,25 @@ export function registerCrmApiRoutes(app: express.Express) {
       booking_type: req.body?.booking_type || "maintenance",
       source: req.body?.source || "manual",
     });
+    queueFieldTechSync("booking_created");
     res.status(201).json({ id });
   }));
 
   app.put("/api/bookings/:id", asyncRoute(async (req, res) => {
     if (!(await updateOwned("bookings", req.params.id, userId(req), req.body || {}))) return res.status(404).json({ error: "Booking was not found." });
+    queueFieldTechSync("booking_updated");
     res.json({ success: true });
   }));
 
   app.delete("/api/bookings/:id", asyncRoute(async (req, res) => {
-    if (!(await deleteOwned("bookings", req.params.id, userId(req)))) return res.status(404).json({ error: "Booking was not found." });
-    res.json({ success: true });
+    // Assigned field work is a business record. Keep a tombstone-like cancelled
+    // booking so an offline technician service can recover the cancellation on
+    // its next full sync instead of retaining an orphaned live job.
+    if (!(await updateOwned("bookings", req.params.id, userId(req), { status: "cancelled" }))) {
+      return res.status(404).json({ error: "Booking was not found." });
+    }
+    queueFieldTechSync("booking_cancelled");
+    res.json({ success: true, cancelled: true });
   }));
 
   app.get("/api/reminders", asyncRoute(async (req, res) => {
