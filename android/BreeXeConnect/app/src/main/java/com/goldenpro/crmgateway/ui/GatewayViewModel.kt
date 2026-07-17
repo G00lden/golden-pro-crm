@@ -65,29 +65,34 @@ data class GatewayUiState(
 
 class GatewayViewModel(application: Application) : AndroidViewModel(application) {
     private val context get() = getApplication<Application>()
-    private val _state = MutableStateFlow(loadState())
+    private val _state = MutableStateFlow(loadStateSafely())
     val state: StateFlow<GatewayUiState> = _state.asStateFlow()
 
     fun refresh() {
-        val persisted = GatewayPreferences.config(context)
-        _state.update { current ->
+        val current = _state.value
+        val refreshed = runCatching {
+            val persisted = GatewayPreferences.config(context)
             current.copy(
-                serverUrl = persisted.serverUrl.ifBlank { current.serverUrl },
-                companyNumber = persisted.companyNumber.ifBlank { current.companyNumber },
-                deviceName = persisted.deviceName.ifBlank { current.deviceName },
-                manualToken = persisted.token,
-                runtime = GatewayPreferences.runtime(context),
-                registration = GatewayPreferences.registration(context),
-                queue = GatewayQueue.stats(context),
-                diagnostics = GatewayDiagnosticsReader.read(context),
-                activity = GatewayActivityLog.list(context),
-                mobilePolicy = GatewayPreferences.mobilePolicy(context),
-                activeSims = WorkSimManager.activeSims(context),
-                mobileDashboard = GatewayPreferences.mobileDashboard(context),
-                pendingCommands = com.goldenpro.crmgateway.MobileDatabase.get(context).mobileDao().pendingCommands().size,
-                pendingCall = GatewayPreferences.pendingCall(context),
-            )
+                    serverUrl = persisted.serverUrl.ifBlank { current.serverUrl },
+                    companyNumber = persisted.companyNumber.ifBlank { current.companyNumber },
+                    deviceName = persisted.deviceName.ifBlank { current.deviceName },
+                    manualToken = persisted.token,
+                    runtime = GatewayPreferences.runtime(context),
+                    registration = GatewayPreferences.registration(context),
+                    queue = GatewayQueue.stats(context),
+                    diagnostics = GatewayDiagnosticsReader.read(context),
+                    activity = GatewayActivityLog.list(context),
+                    mobilePolicy = GatewayPreferences.mobilePolicy(context),
+                    activeSims = WorkSimManager.activeSims(context),
+                    mobileDashboard = GatewayPreferences.mobileDashboard(context),
+                    pendingCommands = com.goldenpro.crmgateway.MobileDatabase.get(context).mobileDao().pendingCommands().size,
+                    pendingCall = GatewayPreferences.pendingCall(context),
+                    message = current.message.takeUnless(::isStartupFailureMessage).orEmpty(),
+                )
+        }.getOrElse { error ->
+            current.copy(message = startupFailureMessage(error))
         }
+        _state.value = refreshed
     }
 
     fun updateServer(value: String) = _state.update { it.copy(serverUrl = value, message = "") }
@@ -248,4 +253,21 @@ class GatewayViewModel(application: Application) : AndroidViewModel(application)
             pendingCall = GatewayPreferences.pendingCall(context),
         )
     }
+
+    private fun loadStateSafely(): GatewayUiState = runCatching(::loadState).getOrElse { error ->
+        val config = runCatching { GatewayPreferences.config(context) }.getOrDefault(GatewayConfig("", "", "", ""))
+        GatewayUiState(
+            serverUrl = config.serverUrl.ifBlank { "https://crm.breexe-pro.com" },
+            companyNumber = config.companyNumber,
+            deviceName = config.deviceName,
+            manualToken = config.token,
+            message = startupFailureMessage(error),
+        )
+    }
+
+    private fun startupFailureMessage(error: Throwable): String =
+        "تعذر فتح التخزين المحلي للتطبيق، لكن بيانات CRM لم تتأثر. " +
+            "أعد تشغيل الجوال بعد تثبيت هذا التحديث. رمز التشخيص: ${error.javaClass.simpleName}."
+
+    private fun isStartupFailureMessage(value: String): Boolean = value.startsWith("تعذر فتح التخزين المحلي")
 }
