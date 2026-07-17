@@ -25,8 +25,8 @@ android {
         applicationId = "com.goldenpro.crmgateway"
         minSdk = 24
         targetSdk = 36
-        versionCode = 10
-        versionName = "2.2.0"
+        versionCode = 11
+        versionName = "2.2.1"
 
         buildConfigField("String", "DEFAULT_GATEWAY_URL", defaultGatewayUrl.get().asBuildConfigString())
         buildConfigField("String", "FIREBASE_PROJECT_ID", firebaseProjectId.get().asBuildConfigString())
