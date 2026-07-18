@@ -52,6 +52,9 @@ http://{$FIELDTECH_DOMAIN} {
 }
 
 https://fieldtech.66-94-103-6.nip.io {
+	tls admin@breexe-pro.com {
+		on_demand
+	}
 	import fieldtech_service
 }
 
