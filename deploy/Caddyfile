@@ -32,6 +32,21 @@ http://{$CRM_DOMAIN} {
 	}
 }
 
+http://{$FIELDTECH_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(self), microphone=(), geolocation=(self)"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	reverse_proxy fieldtech:4300
+}
+
 http://{$ERP_DOMAIN} {
 	redir https://{host}{uri} permanent
 }
