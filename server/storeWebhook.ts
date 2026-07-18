@@ -8,6 +8,7 @@ import { catalogProductIsVisible, productIsRetired } from "../shared/productCata
 import { publishStoreOrderChange } from "./storeOrderRealtime";
 import { compareAndSetDocument } from "./atomicDocumentUpdate";
 import { firstSallaDate } from "./sallaDate";
+import { queueFieldTechSync } from "./fieldtechIntegration";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
 
@@ -66,6 +67,7 @@ export type StoreWebhookOrder = {
   customerName: string;
   customerPhone: string;
   customerCity: string;
+  customerAddress?: string;
   orderDate: string;
   scheduledDate?: string;
   scheduledTime?: string;
@@ -551,6 +553,29 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
   }];
 }
 
+function formattedCustomerAddress(...records: Record<string, any>[]) {
+  const values: string[] = [];
+  for (const record of records) {
+    for (const value of [
+      record.address,
+      record.address_line,
+      record.address_line_1,
+      record.street,
+      record.block,
+      record.district,
+      record.city,
+      record.state,
+      record.postal_code,
+      record.country,
+    ]) {
+      if (typeof value !== "string") continue;
+      const normalized = value.trim();
+      if (normalized && !values.includes(normalized)) values.push(normalized);
+    }
+  }
+  return truncate(values.join("، "), 300);
+}
+
 export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebhookOrder {
   const body = asRecord(req.body);
   const data = asRecord(body.data);
@@ -558,6 +583,8 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
   const customer = asRecord(order.customer || order.client || order.user || body.customer || data.customer);
   const shipping = asRecord(order.shipping || order.shipping_address || order.delivery || body.shipping);
   const billing = asRecord(order.billing || order.billing_address || body.billing);
+  const shippingAddress = asRecord(shipping.address || order.shipping_address);
+  const billingAddress = asRecord(billing.address || order.billing_address);
   const shipmentList = Array.isArray(order.shipments) ? order.shipments : [];
   const shipment = asRecord(order.shipment || shipmentList[0] || data.shipment);
   const payment = asRecord(order.payment);
@@ -606,9 +633,11 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
       order.customer_phone,
       order.phone,
       shipping.phone,
+      shippingAddress.phone,
       joinCountryCode(shipping.mobile_code, shipping.mobile),
       shipping.mobile,
       billing.phone,
+      billingAddress.phone,
       joinCountryCode(billing.mobile_code, billing.mobile),
       billing.mobile,
     ),
@@ -722,7 +751,8 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
     status: truncate(firstDisplayValue(order.status, body.status, "new"), 40),
     customerName,
     customerPhone,
-    customerCity: truncate(firstText(customer.city, shipping.city, billing.city), 80),
+    customerCity: truncate(firstText(customer.city, shipping.city, shippingAddress.city, billing.city, billingAddress.city), 80),
+    customerAddress: formattedCustomerAddress(shippingAddress, shipping, billingAddress, billing, customer),
     orderDate: created?.orderDate || "",
     scheduledDate: scheduled?.orderDate,
     scheduledTime,
@@ -973,6 +1003,8 @@ async function upsertCustomer(uid: string, order: StoreWebhookOrder, now: string
       name: order.customerName,
       phone: order.customerPhone,
       city: order.customerCity || "",
+      address: order.customerAddress || data.address || "",
+      customer_address: order.customerAddress || data.customer_address || data.address || "",
       source: data.source || "salla",
       store_provider: order.provider,
       store_customer_id: data.store_customer_id || null,
@@ -988,6 +1020,8 @@ async function upsertCustomer(uid: string, order: StoreWebhookOrder, now: string
     name: order.customerName,
     phone: order.customerPhone,
     city: order.customerCity || "",
+    address: order.customerAddress || "",
+    customer_address: order.customerAddress || "",
     source: "salla",
     store_provider: order.provider,
     store_customer_id: null,
@@ -1085,6 +1119,7 @@ async function createStoreBooking(params: {
     customer_id: customerId,
     customer_name: order.customerName,
     customer_phone: order.customerPhone,
+    customer_address: order.customerAddress || order.customerCity || "",
     product_id: productId,
     product_name: item.name,
     technician_id: defaultTechId(),
@@ -1096,6 +1131,8 @@ async function createStoreBooking(params: {
     source: "salla",
     store_order_id: `store_${hash(`${uid}:${order.provider}:${order.orderId}`)}`,
     store_order_number: order.orderNumber,
+    notes: `طلب متجر ${order.orderNumber} · ${item.name} × ${item.quantity}`,
+    parts: [`${item.name} × ${item.quantity}`],
     createdBy: uid,
     createdAt: previous.createdAt || now,
     updatedAt: now,
@@ -1320,6 +1357,7 @@ async function importStoreOrder(
         customer_id: customerId,
         customer_name: order.customerName,
         customer_phone: order.customerPhone,
+        customer_address: order.customerAddress || order.customerCity || "",
         product_id: productId,
         product_name: item.name,
         product_sku: item.sku,
@@ -1425,6 +1463,7 @@ async function importStoreOrder(
       customer_id: customerId,
       customer_name: order.customerName,
       customer_phone: order.customerPhone,
+      customer_address: order.customerAddress || order.customerCity || "",
       product_id: productId,
       product_name: item.name,
       product_sku: item.sku,
@@ -1508,6 +1547,7 @@ async function importStoreOrder(
     customer_name: order.customerName,
     customer_phone: order.customerPhone,
     customer_city: order.customerCity || null,
+    customer_address: order.customerAddress || order.customerCity || null,
     product_ids: finalProductIds,
     installation_ids: finalInstallationIds,
     booking_ids: finalBookingIds,
@@ -1668,6 +1708,7 @@ async function projectStoreOrder(
     customer_name: order.customerName,
     customer_phone: order.customerPhone,
     customer_city: order.customerCity || null,
+    customer_address: order.customerAddress || order.customerCity || null,
     product_ids: finalProductIds,
     installation_ids: finalInstallationIds,
     booking_ids: finalBookingIds,
@@ -1861,6 +1902,8 @@ function localUpsertCustomer(data: LocalStoreDb, uid: string, order: StoreWebhoo
     name: order.customerName,
     phone: order.customerPhone,
     city: order.customerCity || "",
+    address: order.customerAddress || existing?.address || "",
+    customer_address: order.customerAddress || existing?.customer_address || existing?.address || "",
     source: existing?.source || "salla",
     store_provider: order.provider,
     store_customer_id: existing?.store_customer_id || null,
@@ -1912,6 +1955,7 @@ function localCreateBooking(params: {
     customer_id: customerId,
     customer_name: order.customerName,
     customer_phone: order.customerPhone,
+    customer_address: order.customerAddress || order.customerCity || "",
     product_id: productId,
     product_name: item.name,
     technician_id: defaultTechId(),
@@ -1923,6 +1967,8 @@ function localCreateBooking(params: {
     source: "salla",
     store_order_id: localId("store", `${uid}:${order.provider}:${order.orderId}`),
     store_order_number: order.orderNumber,
+    notes: `طلب متجر ${order.orderNumber} · ${item.name} × ${item.quantity}`,
+    parts: [`${item.name} × ${item.quantity}`],
     createdBy: uid,
     createdAt: previous.createdAt || now,
     updatedAt: now,
@@ -2013,6 +2059,7 @@ function localImportStoreOrder(data: LocalStoreDb, uid: string, order: StoreWebh
       customer_id: customerId,
       customer_name: order.customerName,
       customer_phone: order.customerPhone,
+      customer_address: order.customerAddress || order.customerCity || "",
       product_id: productId,
       product_name: item.name,
       product_sku: item.sku,
@@ -2094,6 +2141,7 @@ function localImportStoreOrder(data: LocalStoreDb, uid: string, order: StoreWebh
     customer_name: order.customerName,
     customer_phone: order.customerPhone,
     customer_city: order.customerCity || null,
+    customer_address: order.customerAddress || order.customerCity || null,
     product_ids: finalProductIds,
     installation_ids: finalInstallationIds,
     booking_ids: finalBookingIds,
@@ -2227,6 +2275,7 @@ async function ensureManualInstallationForOrderItem(params: {
     customer_id: customerId,
     customer_name: String(order.customer_name || ""),
     customer_phone: String(order.customer_phone || ""),
+    customer_address: String(order.customer_address || order.customer_city || ""),
     product_id: productId,
     product_name: item.name,
     product_sku: item.sku,
@@ -2282,6 +2331,7 @@ async function createOrUpdateManualStoreBooking(params: {
     customer_id: String(order.customer_id || ""),
     customer_name: String(order.customer_name || ""),
     customer_phone: String(order.customer_phone || ""),
+    customer_address: String(order.customer_address || order.customer_city || ""),
     product_id: String(item.product_id || ""),
     product_name: item.name,
     technician_id: technician.id,
@@ -2293,6 +2343,8 @@ async function createOrUpdateManualStoreBooking(params: {
     source: "salla",
     store_order_id: orderDocId,
     store_order_number: String(order.order_number || order.order_id || orderDocId),
+    notes: `طلب متجر ${order.order_number || order.order_id || orderDocId} · ${item.name} × ${item.quantity}`,
+    parts: [`${item.name} × ${item.quantity}`],
     createdBy: currentUid,
     createdAt: previous.createdAt || now,
     updatedAt: now,
@@ -2582,6 +2634,8 @@ export async function assignStoreOrderTechnician(
     updatedAt: now,
   });
 
+  queueFieldTechSync("store_order_assigned");
+
   return {
     success: true,
     order_id: orderDocId,
@@ -2640,6 +2694,7 @@ export async function linkStoreOrderInstallation(currentUid: string, orderDocId:
       customerName: String(order.customer_name || installation.customer_name || ""),
       customerPhone: String(order.customer_phone || installation.customer_phone || ""),
       customerCity: String(order.customer_city || ""),
+      customerAddress: String(order.customer_address || installation.customer_address || order.customer_city || ""),
       orderDate: String(order.order_date || now.slice(0, 10)),
       scheduledDate: order.scheduled_date || undefined,
       scheduledTime: order.scheduled_time || undefined,
@@ -2687,6 +2742,8 @@ export async function linkStoreOrderInstallation(currentUid: string, orderDocId:
     current_step: journeyStatus,
     updatedAt: now,
   });
+
+  if (bookingId) queueFieldTechSync("store_order_installation_linked");
 
   return {
     success: true,
@@ -2737,14 +2794,14 @@ export async function processStoreWebhook(req: RawBodyRequest) {
   }, { merge: true });
 
   try {
-      const imported = await importStoreOrderForUser(ownerUid, order, {
-        ...(order.projectionExtras || {}),
-        source: "salla",
-        provider: order.provider,
-        event_type: order.eventType,
-        remote_synced_at: now,
-        sync_origin: "store_webhook",
-      });
+    const imported = await importStoreOrderForUser(ownerUid, order, {
+      ...(order.projectionExtras || {}),
+      source: "salla",
+      provider: order.provider,
+      event_type: order.eventType,
+      remote_synced_at: now,
+      sync_origin: "store_webhook",
+    });
     const processedAt = new Date().toISOString();
     await eventRef.set({
       createdBy: ownerUid,
@@ -2760,6 +2817,8 @@ export async function processStoreWebhook(req: RawBodyRequest) {
       imported,
       error: null,
     }, { merge: true });
+
+    if (imported.booking_ids.length) queueFieldTechSync("store_webhook_booking_ready");
 
     return {
       success: true,

@@ -35,6 +35,7 @@ import {
   type ProductCatalogRecord,
 } from "./productCatalog";
 import { firstSallaDate } from "./sallaDate";
+import { queueFieldTechSync } from "./fieldtechIntegration";
 
 type SallaIntegrationRecord = {
   provider: "salla";
@@ -2037,6 +2038,8 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
   const customer = asRecord(remoteOrder.customer);
   const shipping = asRecord(remoteOrder.shipping);
   const billing = asRecord(remoteOrder.billing);
+  const shippingAddress = asRecord(shipping.address || remoteOrder.shipping_address);
+  const billingAddress = asRecord(billing.address || remoteOrder.billing_address);
   const items = asArray(
     remoteOrder.items ||
     remoteOrder.products ||
@@ -2102,9 +2105,11 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       joinCountryCode(shipping.mobile_code, shipping.mobile),
       shipping.mobile,
       shipping.phone,
+      shippingAddress.phone,
       joinCountryCode(billing.mobile_code, billing.mobile),
       billing.mobile,
       billing.phone,
+      billingAddress.phone,
     ),
   );
   const statusRecord = asRecord(remoteOrder.status);
@@ -2133,7 +2138,15 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       80,
     ),
     customerPhone: phone,
-    customerCity: truncate(firstText(customer.city, shipping.city, billing.city), 80),
+    customerCity: truncate(firstText(customer.city, shipping.city, shippingAddress.city, billing.city, billingAddress.city), 80),
+    customerAddress: truncate(Array.from(new Set([
+      firstText(shippingAddress.address_line, shippingAddress.address_line_1, shippingAddress.street),
+      firstText(shippingAddress.district, shipping.district),
+      firstText(shippingAddress.city, shipping.city, customer.city),
+      firstText(shippingAddress.state, shipping.state),
+      firstText(shippingAddress.postal_code, shipping.postal_code),
+      firstText(shippingAddress.country, shipping.country, customer.country),
+    ].filter(Boolean))).join("، "), 300),
     orderDate: created?.orderDate || "",
     scheduledDate: scheduled?.orderDate,
     scheduledTime: truncate(firstText(
@@ -2268,6 +2281,71 @@ function eventOrderRecord(data: Record<string, unknown>) {
   return data;
 }
 
+function signedWebhookHasCompleteOrder(remoteOrder: Record<string, any>) {
+  const rawItems = remoteOrder.items || remoteOrder.products || remoteOrder.order_items || asRecord(remoteOrder.details).items;
+  const normalized = mapSallaOrder(remoteOrder);
+  return Boolean(
+    normalized?.customerPhone &&
+    normalized.orderDate &&
+    Array.isArray(rawItems) &&
+    rawItems.length > 0,
+  );
+}
+
+async function applySignedSallaOrderPatch(
+  currentUid: string,
+  remoteOrderId: string,
+  remoteOrder: Record<string, any>,
+  eventType: string,
+  occurredAt: string,
+  attempt = 0,
+) {
+  const orderDocId = getStoreOrderDocId(currentUid, "salla", remoteOrderId);
+  const ref = adminDb.collection("store_orders").doc(orderDocId);
+  const snapshot = await ref.get();
+  if (!snapshot.exists) return null;
+  const current = snapshot.data() || {};
+  if (current.createdBy !== currentUid) {
+    const error = new Error("Salla order ownership mismatch.") as Error & { status?: number };
+    error.status = 403;
+    throw error;
+  }
+
+  const occurredMs = Date.parse(occurredAt);
+  const currentMs = Date.parse(String(current.remote_updated_at || current.remoteUpdatedAt || current.last_event_at || ""));
+  if (Number.isFinite(occurredMs) && Number.isFinite(currentMs) && occurredMs < currentMs) {
+    return { orderDocId, existed: true, stale: true };
+  }
+
+  const status = sallaRemoteStatus(remoteOrder);
+  const updatedAt = nowIso();
+  const changed = await compareAndSetDocument(ref, {
+    remote_updated_at: current.remote_updated_at ?? current.remoteUpdatedAt ?? null,
+  }, {
+    event_type: eventType,
+    status: status.name || status.slug || current.status || "new",
+    remote_status_id: status.id || current.remote_status_id || null,
+    remote_status_name: status.name || current.remote_status_name || null,
+    remote_status_slug: status.slug || current.remote_status_slug || null,
+    last_event_at: occurredAt,
+    remote_updated_at: occurredAt,
+    remote_synced_at: updatedAt,
+    sync_origin: "salla_webhook",
+    updatedAt,
+  });
+  if (!changed) {
+    if (attempt < 2) return applySignedSallaOrderPatch(currentUid, remoteOrderId, remoteOrder, eventType, occurredAt, attempt + 1);
+    throw new Error(`Salla order ${orderDocId} changed concurrently while applying webhook status.`);
+  }
+  publishStoreOrderChange(currentUid, {
+    type: eventType === "order.created" || eventType === "order.deleted" ? eventType : "order.updated",
+    orderId: orderDocId,
+    remoteOrderId,
+    source: "salla_webhook",
+  });
+  return { orderDocId, existed: true, stale: false, status };
+}
+
 function remoteOrderProjectionExtras(remoteOrder: Record<string, any>, origin: "salla_webhook" | "salla_command") {
   const status = asRecord(remoteOrder.status);
   const syncedAt = nowIso();
@@ -2288,7 +2366,13 @@ function remoteOrderProjectionExtras(remoteOrder: Record<string, any>, origin: "
 async function persistAuthoritativeSallaOrder(
   currentUid: string,
   remoteOrder: Record<string, any>,
-  options: { operationalCreate?: boolean; origin: "salla_webhook" | "salla_command" },
+  options: {
+    operationalCreate?: boolean;
+    origin: "salla_webhook" | "salla_command";
+    eventType?: string;
+    eventId?: string;
+    occurredAt?: string;
+  },
 ) {
   const normalized = mapSallaOrder(remoteOrder);
   if (!normalized) {
@@ -2296,13 +2380,20 @@ async function persistAuthoritativeSallaOrder(
     error.status = 422;
     throw error;
   }
-  const extras = remoteOrderProjectionExtras(remoteOrder, options.origin);
+  if (options.eventType) normalized.eventType = truncate(options.eventType, 80);
+  if (options.eventId) normalized.eventId = truncate(options.eventId, 160);
+  const extras = {
+    ...remoteOrderProjectionExtras(remoteOrder, options.origin),
+    ...(options.occurredAt ? { last_event_at: options.occurredAt } : {}),
+    event_type: normalized.eventType,
+  };
   // Operational records need a real store date. If Salla ever returns an
   // incomplete detail payload, keep the order visible for review without
   // inventing today's date for installations, bookings, or maintenance.
   const imported = options.operationalCreate && Boolean(normalized.customerPhone) && Boolean(normalized.orderDate)
     ? await importStoreOrderForUser(currentUid, normalized, extras)
     : await projectStoreOrderForUser(currentUid, normalized, extras);
+  if (imported.booking_ids.length) queueFieldTechSync("salla_webhook_booking_ready");
   return {
     normalized,
     imported,
@@ -2756,6 +2847,7 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
   const merchantId = firstText(body.merchant, body.merchant_id);
   const eventOccurredAt = firstText(body.created_at, body.updated_at) || null;
   const observedAt = eventOccurredAt || nowIso();
+  const signedEventId = firstText(body.event_id, body.id) || `${event || "salla.event"}:${observedAt}`;
   const uid = sallaAppOwnerUid();
 
   // Persistent audit trail of every accepted (signature-passed) Salla event,
@@ -2881,21 +2973,56 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
         error.status = 422;
         throw error;
       }
-      const { session } = await authorizedSessionForUser(uid);
-      if (event === "order.deleted") {
-        try {
-          const currentRemoteOrder = await fetchSallaOrderDetails(session, remoteOrderId);
-          return persistAuthoritativeSallaOrder(uid, currentRemoteOrder, { origin: "salla_webhook" });
-        } catch (error) {
-          if (!(error instanceof SallaRequestError) || (error.status !== 404 && error.status !== 410)) throw error;
+      const signedOrder = eventOrderRecord(asRecord(body.data));
+      let outboundError: unknown = null;
+      let remoteOrder: Record<string, any> | null = null;
+      try {
+        const { session } = await authorizedSessionForUser(uid);
+        remoteOrder = await fetchSallaOrderDetails(session, remoteOrderId);
+      } catch (error) {
+        if (event === "order.deleted" && error instanceof SallaRequestError && (error.status === 404 || error.status === 410)) {
           return markSallaOrderDeleted(uid, remoteOrderId, observedAt);
         }
+        outboundError = error;
       }
-      const remoteOrder = await fetchSallaOrderDetails(session, remoteOrderId);
-      return persistAuthoritativeSallaOrder(uid, remoteOrder, {
-        operationalCreate: event === "order.created",
-        origin: "salla_webhook",
-      });
+
+      // Keep persistence outside the outbound request catch. A database write
+      // failure must never be mistaken for a Salla connectivity failure (most
+      // importantly, it must not turn an order into a deleted order).
+      if (remoteOrder) {
+        return persistAuthoritativeSallaOrder(uid, remoteOrder, {
+          operationalCreate: event === "order.created",
+          origin: "salla_webhook",
+          eventType: event,
+          eventId: signedEventId,
+          occurredAt: observedAt,
+        });
+      }
+
+      // Salla can deliver a signed, complete order webhook even when its API
+      // blocks this server's outbound IP. Treat that authenticated payload as
+      // the real-time source and keep the API pull as reconciliation only.
+      if (event === "order.deleted") {
+        return markSallaOrderDeleted(uid, remoteOrderId, observedAt);
+      }
+      if (signedWebhookHasCompleteOrder(signedOrder)) {
+        return persistAuthoritativeSallaOrder(uid, signedOrder, {
+          operationalCreate: event === "order.created",
+          origin: "salla_webhook",
+          eventType: event,
+          eventId: signedEventId,
+          occurredAt: observedAt,
+        });
+      }
+      const patched = await applySignedSallaOrderPatch(
+        uid,
+        remoteOrderId,
+        signedOrder,
+        event,
+        observedAt,
+      );
+      if (patched) return { ...patched, fallback: "signed_webhook_patch" };
+      throw outboundError;
     });
     return {
       success: true,

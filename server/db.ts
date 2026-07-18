@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10500;
+const TARGET_SCHEMA_VERSION = 10501;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -149,6 +149,7 @@ for (const col of [
   ["customer_name", "TEXT"],
   ["customer_phone", "TEXT"],
   ["customer_city", "TEXT"],
+  ["customer_address", "TEXT"],
   ["product_name", "TEXT"],
   ["product_sku", "TEXT"],
   ["order_status", "TEXT"],
@@ -162,6 +163,7 @@ for (const col of [
     db.exec(`ALTER TABLE store_orders ADD COLUMN ${col[0]} ${col[1]}`);
   }
 }
+
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_imported ON store_orders(imported_at)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_owner_created ON store_orders(owner_uid, order_created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_owner_status_created ON store_orders(owner_uid, remote_status_slug, order_created_at DESC)");
@@ -286,6 +288,8 @@ db.exec(`
     name TEXT NOT NULL DEFAULT '',
     phone TEXT NOT NULL DEFAULT '',
     city TEXT DEFAULT '',
+    address TEXT DEFAULT '',
+    customer_address TEXT DEFAULT '',
     source TEXT DEFAULT 'manual',
     notes TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
@@ -346,6 +350,10 @@ db.exec(`
     last_remind_at TEXT,
     last_remind_attempt_at TEXT,
     source TEXT DEFAULT 'manual',
+    customer_address TEXT DEFAULT '',
+    store_order_id TEXT,
+    store_order_number TEXT,
+    order_item_type TEXT,
     notes TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
@@ -379,6 +387,7 @@ db.exec(`
     status TEXT DEFAULT 'confirmed',
     booking_type TEXT DEFAULT 'maintenance',
     source TEXT DEFAULT 'manual',
+    customer_address TEXT DEFAULT '',
     notes TEXT DEFAULT '',
     parts TEXT DEFAULT '[]',
     fieldtech_require_before_photo INTEGER DEFAULT 1,
@@ -1280,6 +1289,30 @@ db.exec(`
 // runs before the public route can accept traffic.
 db.exec(PUBLIC_LEAD_SCHEMA_SQL);
 
+for (const [table, columns] of [
+  ["customers", [["address", "TEXT DEFAULT ''"], ["customer_address", "TEXT DEFAULT ''"]]],
+  ["installations", [
+    ["customer_address", "TEXT DEFAULT ''"],
+    ["store_order_id", "TEXT"],
+    ["store_order_number", "TEXT"],
+    ["order_item_type", "TEXT"],
+  ]],
+  ["bookings", [["customer_address", "TEXT DEFAULT ''"]]],
+] as const) {
+  for (const [column, definition] of columns) {
+    if (hasColumn(table, column)) continue;
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      // Node's test runner can start isolated server modules concurrently
+      // against the same legacy QA database. If another process completed the
+      // same additive migration after our PRAGMA check, accept that winner;
+      // every other ALTER failure still remains fatal.
+      if (!hasColumn(table, column)) throw error;
+    }
+  }
+}
+
 // Post-schema column migrations. These run AFTER the main schema block above,
 // so every referenced table is guaranteed to exist (fixes "no such table" on a
 // fresh database).
@@ -1950,6 +1983,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10309, '1.3.8-android-gateway');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10310, '2.1.2-mobile-onboarding-clarity');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10500, '1.5.0-unified-call-center');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10501, '1.5.1-salla-fieldtech-addresses');
 `);
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

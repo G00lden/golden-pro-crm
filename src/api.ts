@@ -261,6 +261,49 @@ export type FieldTechWallet = {
   heldHalalas: number;
   availableHalalas: number;
   paidHalalas: number;
+  entries?: FieldTechWalletEntry[];
+  withdrawals?: FieldTechWithdrawal[];
+};
+
+export type FieldTechWalletEntry = {
+  id: string;
+  entryType: "commission" | "reversal" | "payout";
+  amountHalalas: number;
+  description: string;
+  createdBy?: string;
+  createdAt: string;
+};
+
+export type FieldTechRewardRule = {
+  jobType: "تركيب" | "صيانة" | "توصيل";
+  amountHalalas: number;
+  updatedAt?: string;
+};
+
+export type FieldTechWithdrawal = {
+  id: string;
+  technicianId: string;
+  technicianName?: string;
+  amountHalalas: number;
+  status: "pending" | "deferred" | "rejected" | "approved" | "paid";
+  technicianNote?: string;
+  managerReason?: string;
+  transferReference?: string;
+  proofId?: string;
+  createdAt: string;
+  updatedAt?: string;
+  paidAt?: string;
+};
+
+export type FieldTechFinancials = {
+  currency: "SAR";
+  technicians: Array<{
+    id: string;
+    name: string;
+    wallet: FieldTechWallet;
+    rewardRules: FieldTechRewardRule[];
+  }>;
+  requests: FieldTechWithdrawal[];
 };
 
 export type FieldTechOperations = {
@@ -3242,6 +3285,35 @@ export const setFieldTechAccount = (technicianId: string, active: boolean) => ap
 });
 
 export const getFieldTechOperations = (technicianId: string) => apiFetch<FieldTechOperations>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/operations`);
+
+export const getFieldTechFinancials = (status?: FieldTechWithdrawal["status"]) => apiFetch<FieldTechFinancials>(
+  `/api/fieldtech/financials${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+);
+
+export const updateFieldTechRewardRules = (
+  technicianId: string,
+  rules: Record<FieldTechRewardRule["jobType"], number>,
+) => apiFetch<{ rules: FieldTechRewardRule[] }>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/reward-rules`, {
+  method: "PUT",
+  body: JSON.stringify({ rules }),
+});
+
+export const reviewFieldTechWithdrawal = (
+  id: string,
+  action: "approve" | "defer" | "reject",
+  reason = "",
+) => apiFetch<{ request: FieldTechWithdrawal }>(`/api/fieldtech/withdrawal-requests/${encodeURIComponent(id)}`, {
+  method: "PATCH",
+  body: JSON.stringify({ action, reason }),
+});
+
+export const payFieldTechWithdrawal = (
+  id: string,
+  payload: { transferReference: string; proof: { fileName: string; mimeType: string; dataBase64: string } },
+) => apiFetch<{ request: FieldTechWithdrawal }>(`/api/fieldtech/withdrawal-requests/${encodeURIComponent(id)}/pay`, {
+  method: "POST",
+  body: JSON.stringify(payload),
+});
 
 export const createTechnician = (data: Omit<Technician, "id">) => {
   const user = getUserOrThrow();

@@ -38,6 +38,7 @@ export type Page =
   | "storeOrders"
   | "care"
   | "technicians"
+  | "technicianWallet"
   | "messages"
   | "campaigns"
   | "callSystem"

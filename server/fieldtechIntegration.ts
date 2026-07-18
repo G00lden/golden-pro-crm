@@ -8,6 +8,8 @@ import { logError, logEvent } from "./logger";
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
 const MAX_SNAPSHOT_ROWS = 1_000;
 const replayNonces = new Map<string, number>();
+const queuedSyncReasons = new Set<string>();
+let fieldTechSyncQueued = false;
 
 type FieldTechRouteOptions = {
   webhookRateLimit: (req: Request, res: Response, next: NextFunction) => void;
@@ -401,6 +403,39 @@ export async function requestFieldTechSync(reason: string) {
   }
 }
 
+/**
+ * Pushes CRM mutations to FieldTech without making the canonical CRM write
+ * depend on the remote technician service. Calls made in the same burst are
+ * coalesced into one sync request; FieldTech also keeps its periodic recovery
+ * pull as a safety net.
+ */
+export function queueFieldTechSync(reason: string) {
+  const normalizedReason = String(reason || "crm_change").trim().slice(0, 120) || "crm_change";
+  if (!fieldTechIntegrationConfigured()) return false;
+
+  queuedSyncReasons.add(normalizedReason);
+  if (fieldTechSyncQueued) return true;
+  fieldTechSyncQueued = true;
+
+  queueMicrotask(async () => {
+    try {
+      while (queuedSyncReasons.size) {
+        const reasons = Array.from(queuedSyncReasons);
+        queuedSyncReasons.clear();
+        try {
+          await requestFieldTechSync(reasons.join(",").slice(0, 500));
+        } catch {
+          // requestFieldTechSync already writes a structured error. The CRM
+          // mutation remains successful and FieldTech will recover by polling.
+        }
+      }
+    } finally {
+      fieldTechSyncQueued = false;
+    }
+  });
+  return true;
+}
+
 function requireOperationsRole(req: Request, res: Response, next: NextFunction) {
   const user = (req as AuthedRequest).user;
   if (user?.role === "admin" || user?.role === "manager") {
@@ -481,6 +516,61 @@ export function registerFieldTechAdminRoutes(app: Express) {
     asyncRoute(async (req, res) => {
       res.json(await callFieldTech(
         `/api/integrations/breexe/technicians/${encodeURIComponent(req.params.id)}/operations`,
+      ));
+    }),
+  );
+  app.get(
+    "/api/fieldtech/financials",
+    requireOperationsRole,
+    asyncRoute(async (req, res) => {
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const query = status ? `?status=${encodeURIComponent(status)}` : "";
+      res.json(await callFieldTech(`/api/integrations/breexe/financials${query}`));
+    }),
+  );
+  app.put(
+    "/api/fieldtech/technicians/:id/reward-rules",
+    requireOperationsRole,
+    asyncRoute(async (req, res) => {
+      const rules = req.body?.rules;
+      if (!rules || typeof rules !== "object" || Array.isArray(rules)) {
+        res.status(400).json({ error: "rules is required." });
+        return;
+      }
+      res.json(await callFieldTech(
+        `/api/integrations/breexe/technicians/${encodeURIComponent(req.params.id)}/reward-rules`,
+        { method: "PUT", body: { rules } },
+      ));
+    }),
+  );
+  app.patch(
+    "/api/fieldtech/withdrawal-requests/:id",
+    requireOperationsRole,
+    asyncRoute(async (req, res) => {
+      const action = String(req.body?.action || "");
+      if (!["approve", "defer", "reject"].includes(action)) {
+        res.status(400).json({ error: "Invalid withdrawal action." });
+        return;
+      }
+      res.json(await callFieldTech(
+        `/api/integrations/breexe/withdrawal-requests/${encodeURIComponent(req.params.id)}`,
+        { method: "PATCH", body: { action, reason: String(req.body?.reason || "").slice(0, 500) } },
+      ));
+    }),
+  );
+  app.post(
+    "/api/fieldtech/withdrawal-requests/:id/pay",
+    requireOperationsRole,
+    asyncRoute(async (req, res) => {
+      const transferReference = String(req.body?.transferReference || "").trim();
+      const proof = req.body?.proof;
+      if (transferReference.length < 3 || !proof || typeof proof !== "object") {
+        res.status(400).json({ error: "Transfer reference and proof are required." });
+        return;
+      }
+      res.json(await callFieldTech(
+        `/api/integrations/breexe/withdrawal-requests/${encodeURIComponent(req.params.id)}/pay`,
+        { body: { transferReference, proof } },
       ));
     }),
   );

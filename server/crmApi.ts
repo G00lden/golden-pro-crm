@@ -5,7 +5,7 @@ import { adminDb } from "./firebaseAdmin";
 import { todayInTimeZone } from "./reminderEngine";
 import type { AuthedRequest } from "./auth";
 import { recordWhatsAppMessage, whatsappService } from "./whatsapp";
-import { requestFieldTechSync } from "./fieldtechIntegration";
+import { queueFieldTechSync } from "./fieldtechIntegration";
 import { publicInvoiceShareQuerySchema, validate, validateParams, validateQuery } from "./validation";
 import {
   bookingCreateSchema,
@@ -190,13 +190,6 @@ function userId(req: express.Request) {
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-function queueFieldTechSync(reason: string) {
-  void requestFieldTechSync(reason).catch(() => {
-    // The FieldTech service also performs periodic recovery pulls. A temporary
-    // integration outage must never make the canonical CRM mutation fail.
-  });
 }
 
 function daysUntil(value?: string) {

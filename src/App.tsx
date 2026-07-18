@@ -17,6 +17,7 @@ import {
   UserPlus,
   UserRoundCog,
   Users,
+  WalletCards,
   Wrench,
   X,
 } from "lucide-react";
@@ -54,6 +55,7 @@ import StoreOrdersPage from "./pages/StoreOrders";
 import CustomerCarePage from "./pages/CustomerCare";
 import OdooCrmPage from "./pages/OdooCrm";
 import TechniciansPage from "./pages/Technicians";
+import TechnicianWalletPage from "./pages/TechnicianWallet";
 import SettingsPage from "./pages/Settings";
 import CallCenterPage from "./pages/CallCenter";
 import { hasAppCapability, normalizeAppRole } from "../shared/accessControl";
@@ -87,6 +89,7 @@ const pageIds = new Set<Page>([
   "storeOrders",
   "care",
   "technicians",
+  "technicianWallet",
   "messages",
   "campaigns",
   "callSystem",
@@ -369,6 +372,7 @@ export default function App() {
   const canManageCalls = hasAppCapability(currentRole, "calls.manage", permissions);
   const canManagePublicLeads = hasAppCapability(currentRole, "public_leads.manage", permissions);
   const canPrepareOperations = hasAppCapability(currentRole, "operations.prepare", permissions);
+  const canManageTechnicianWallet = currentRole === "admin" || currentRole === "manager";
   const canSeedDemoData = hasAppCapability(currentRole, "demo.seed", permissions);
   const canViewMobile = hasAppCapability(currentRole, "mobile.devices.view", permissions);
   const canPairMobileDevices = hasAppCapability(currentRole, "mobile.devices.pair", permissions);
@@ -438,6 +442,9 @@ export default function App() {
     { id: "storeOrders" as Page, label: "طلبات المتجر", icon: ClipboardList },
     { id: "care" as Page, label: "رعاية العملاء", icon: UserPlus, badge: summary.care },
     { id: "technicians" as Page, label: "الفنيون", icon: UserRoundCog },
+    ...(canManageTechnicianWallet
+      ? [{ id: "technicianWallet" as Page, label: "محفظة الفنيين", icon: WalletCards }]
+      : []),
     ...(canManageCampaigns
       ? [
           { id: "campaigns" as Page, label: "الحملات", icon: Megaphone },
@@ -512,6 +519,9 @@ export default function App() {
     storeOrders: <StoreOrdersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     care: <CustomerCarePage notify={notify} refreshStats={stats.refresh} />,
     technicians: <TechniciansPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
+    technicianWallet: canManageTechnicianWallet
+      ? <TechnicianWalletPage notify={notify} setModal={setModal} />
+      : <AccessDenied />,
     messages: canManageWhatsApp ? callCenter("whatsapp") : <AccessDenied />,
     campaigns: canManageCampaigns ? <CampaignsPage notify={notify} /> : <AccessDenied />,
     callSystem: canManageCalls || canViewMobile ? callCenter() : <AccessDenied />,
