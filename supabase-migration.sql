@@ -111,9 +111,18 @@ CREATE TABLE IF NOT EXISTS bookings (
   booking_type TEXT DEFAULT 'maintenance',
   source TEXT DEFAULT 'manual',
   notes TEXT DEFAULT '',
+  parts JSONB DEFAULT '[]'::jsonb,
+  fieldtech_require_before_photo BOOLEAN DEFAULT TRUE,
+  fieldtech_require_after_photo BOOLEAN DEFAULT TRUE,
+  fieldtech_require_signature BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fieldtech_require_before_photo BOOLEAN DEFAULT TRUE;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fieldtech_require_after_photo BOOLEAN DEFAULT TRUE;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fieldtech_require_signature BOOLEAN DEFAULT TRUE;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS parts JSONB DEFAULT '[]'::jsonb;
 
 -- ==========================================
 -- TABLE: reminders

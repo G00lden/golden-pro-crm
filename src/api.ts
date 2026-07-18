@@ -218,14 +218,63 @@ export type Booking = {
   date: string;
   scheduled_time: string;
   status: "confirmed" | "completed" | "cancelled";
-  booking_type?: "installation" | "maintenance" | "external_maintenance";
+  booking_type?: "installation" | "maintenance" | "external_maintenance" | "delivery";
   source?: "manual" | "salla";
+  notes?: string;
+  parts?: string[];
   store_order_id?: string;
   store_order_number?: string;
   completed_at?: string;
   createdBy?: string;
   createdAt?: string;
   updatedAt?: string;
+  fieldtech_status?: "scheduled" | "progress" | "complete" | "cancelled";
+  fieldtech_updated_at?: string;
+  fieldtech_require_before_photo?: boolean;
+  fieldtech_require_after_photo?: boolean;
+  fieldtech_require_signature?: boolean;
+};
+
+export type FieldTechRemoteTechnician = {
+  id: string;
+  breexeTechnicianId: string;
+  name: string;
+  active: boolean;
+  pairedDevices: number;
+  lastSeenAt?: string | null;
+};
+
+export type FieldTechStatus = {
+  configured: boolean;
+  connected: boolean;
+  message?: string;
+  crmUrl?: string | null;
+  lastSync?: { at?: string; generatedAt?: string; technicians?: number; bookings?: number } | null;
+  lastError?: { at?: string; message?: string } | null;
+  pendingEvents?: number;
+  technicians?: FieldTechRemoteTechnician[];
+};
+
+export type FieldTechWallet = {
+  currency: "SAR";
+  ledgerHalalas: number;
+  heldHalalas: number;
+  availableHalalas: number;
+  paidHalalas: number;
+};
+
+export type FieldTechOperations = {
+  technician: FieldTechRemoteTechnician & { phone?: string; title?: string };
+  location: { latitude: number; longitude: number; accuracy: number; recordedAt: string } | null;
+  wallet: FieldTechWallet;
+  devices: Array<{ deviceName: string; expiresAt: string; lastSeenAt: string; revokedAt?: string | null }>;
+};
+
+export type FieldTechPairing = {
+  code: string;
+  value: string;
+  qrDataUrl: string;
+  expiresInSeconds: number;
 };
 
 export type Reminder = {
@@ -3174,6 +3223,25 @@ export const getTechnicians = async () => {
   const snap = await getDocs(query(collection(db, "technicians"), where("createdBy", "==", uid), orderBy("name"), limit(100)));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Technician);
 };
+
+export const getFieldTechStatus = () => apiFetch<FieldTechStatus>("/api/fieldtech/status");
+
+export const syncFieldTech = () => apiFetch<{ success: boolean; technicians: number; bookings: number; changed: number }>("/api/fieldtech/sync", {
+  method: "POST",
+  body: "{}",
+});
+
+export const createFieldTechPairing = (technicianId: string) => apiFetch<FieldTechPairing>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/pairing`, {
+  method: "POST",
+  body: "{}",
+});
+
+export const setFieldTechAccount = (technicianId: string, active: boolean) => apiFetch<{ technician: FieldTechRemoteTechnician }>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/account`, {
+  method: "PATCH",
+  body: JSON.stringify({ active }),
+});
+
+export const getFieldTechOperations = (technicianId: string) => apiFetch<FieldTechOperations>(`/api/fieldtech/technicians/${encodeURIComponent(technicianId)}/operations`);
 
 export const createTechnician = (data: Omit<Technician, "id">) => {
   const user = getUserOrThrow();

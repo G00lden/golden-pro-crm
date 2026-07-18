@@ -41,6 +41,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       CRM_DOMAIN: ${CRM_DOMAIN:-crm.breexe-pro.com}
+      FIELDTECH_DOMAIN: ${FIELDTECH_DOMAIN:-fieldtech.breexe-pro.com}
       ERP_DOMAIN: ${ERP_DOMAIN:-erp.breexe-pro.com}
     ports:
       - "80:80"
