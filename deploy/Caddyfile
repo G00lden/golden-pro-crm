@@ -13,6 +13,21 @@
 	}
 }
 
+(fieldtech_service) {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(self), microphone=(), geolocation=(self)"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	reverse_proxy fieldtech:4300
+}
+
 http://{$CRM_DOMAIN} {
 	encode zstd gzip
 
@@ -33,18 +48,11 @@ http://{$CRM_DOMAIN} {
 }
 
 http://{$FIELDTECH_DOMAIN} {
-	encode zstd gzip
+	import fieldtech_service
+}
 
-	header {
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		X-Frame-Options "DENY"
-		Permissions-Policy "camera=(self), microphone=(), geolocation=(self)"
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		-Server
-	}
-
-	reverse_proxy fieldtech:4300
+https://fieldtech.66-94-103-6.nip.io {
+	import fieldtech_service
 }
 
 http://{$ERP_DOMAIN} {
