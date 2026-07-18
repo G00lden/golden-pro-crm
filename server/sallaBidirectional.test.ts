@@ -258,6 +258,97 @@ test("status.updated webhook fetches authoritative details and identical retries
   assert.equal(detailReads, 1);
 });
 
+test("signed order.created payload imports immediately when Salla detail API returns 403", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid);
+  let detailReads = 0;
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/orders/40301")) {
+      detailReads += 1;
+      return jsonResponse({ error: { message: "Forbidden" } }, 403);
+    }
+    throw new Error(`Unexpected request ${url.pathname}`);
+  }) as typeof fetch;
+
+  const order = remoteOrder("40301") as Record<string, any>;
+  order.items = [{
+    id: "line-40301",
+    name: "طقم فلاتر صيانة",
+    sku: "INSTALL-FILTER-40301",
+    quantity: 2,
+    price: { amount: 75, currency: "SAR" },
+  }];
+  order.shipping = {
+    mobile: "0500000000",
+    address: { street: "شارع الاختبار", district: "حي الاختبار", city: "الرياض" },
+  };
+  const body = {
+    event: "order.created",
+    event_id: "evt-order-40301",
+    merchant: "merchant-a",
+    created_at: "2026-07-18T10:00:00.000Z",
+    data: order,
+  };
+
+  const first = await handleSallaAppWebhook(webhookRequest(body) as never);
+  const second = await handleSallaAppWebhook(webhookRequest(body) as never);
+  assert.equal(first.duplicate, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(detailReads, 1);
+
+  const orderId = getStoreOrderDocId(uid, "salla", "40301");
+  const stored = (await adminDb.collection("store_orders").doc(orderId).get()).data() || {};
+  assert.equal(stored.event_type, "order.created");
+  assert.equal(stored.journey_status, "awaiting_schedule");
+  assert.match(String(stored.customer_address), /شارع الاختبار/);
+  assert.equal(stored.items[0].quantity, 2);
+  const bookings = await adminDb.collection("bookings").where("createdBy", "==", uid).get();
+  assert.equal(bookings.docs.some((doc) => doc.data().store_order_id === orderId), false, "an unscheduled order must not invent a technician appointment");
+});
+
+test("partial signed status webhook preserves rich local order data when Salla detail API returns 403", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid);
+  const orderId = getStoreOrderDocId(uid, "salla", "40302");
+  await adminDb.collection("store_orders").doc(orderId).set({
+    createdBy: uid,
+    provider: "salla",
+    source: "salla",
+    order_id: "40302",
+    order_number: "REF-40302",
+    customer_id: "customer-rich",
+    customer_name: "عميل محفوظ",
+    customer_phone: "0500000000",
+    items: [{ name: "منتج محفوظ", sku: "SALE-RICH", quantity: 3, order_type: "sale_only", status: "sale_recorded" }],
+    product_ids: ["product-rich"],
+    installation_ids: [],
+    booking_ids: [],
+    imported_at: "2026-07-17T00:00:00.000Z",
+    remote_updated_at: "2026-07-17T00:00:00.000Z",
+  });
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/orders/40302")) return jsonResponse({ error: "Forbidden" }, 403);
+    throw new Error(`Unexpected request ${url.pathname}`);
+  }) as typeof fetch;
+
+  const body = {
+    event: "order.status.updated",
+    event_id: "evt-status-40302",
+    merchant: "merchant-a",
+    created_at: "2026-07-18T11:00:00.000Z",
+    data: { id: "40302", status: { id: 20, name: "تم", slug: "completed" } },
+  };
+  await handleSallaAppWebhook(webhookRequest(body) as never);
+  const stored = (await adminDb.collection("store_orders").doc(orderId).get()).data() || {};
+  assert.equal(stored.remote_status_slug, "completed");
+  assert.equal(stored.status, "تم");
+  assert.equal(stored.customer_name, "عميل محفوظ");
+  assert.equal(stored.items[0].sku, "SALE-RICH");
+  assert.deepEqual(stored.product_ids, ["product-rich"]);
+});
+
 test("merchant mismatch is rejected before reading or mutating a Salla order", async () => {
   await linkOwner("test-owner");
   let calls = 0;
@@ -315,8 +406,8 @@ test("an order.created event without a phone is projected without operational si
   assert.equal(stored.customer_id, "");
   const installations = await adminDb.collection("installations").where("createdBy", "==", "test-owner").get();
   const bookings = await adminDb.collection("bookings").where("createdBy", "==", "test-owner").get();
-  assert.equal(installations.size, 0);
-  assert.equal(bookings.size, 0);
+  assert.equal(installations.docs.some((doc) => doc.data().store_order_id === localId), false);
+  assert.equal(bookings.docs.some((doc) => doc.data().store_order_id === localId), false);
 });
 
 test("status list remains dynamically sourced from the connected store", async () => {

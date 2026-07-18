@@ -212,3 +212,16 @@ CREATE INDEX IF NOT EXISTS idx_reminders_sent_at ON reminders(sent_at);
 CREATE INDEX IF NOT EXISTS idx_store_orders_owner ON store_orders(owner_uid);
 CREATE INDEX IF NOT EXISTS idx_store_webhook_events_created ON store_webhook_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_technician_notifications_status ON technician_notifications(status);
+
+-- Salla -> FieldTech operational address and parts handoff.
+ALTER TABLE IF EXISTS customers ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE IF EXISTS customers ADD COLUMN IF NOT EXISTS customer_address TEXT;
+ALTER TABLE IF EXISTS installations ADD COLUMN IF NOT EXISTS customer_address TEXT;
+ALTER TABLE IF EXISTS installations ADD COLUMN IF NOT EXISTS store_order_id TEXT;
+ALTER TABLE IF EXISTS installations ADD COLUMN IF NOT EXISTS store_order_number TEXT;
+ALTER TABLE IF EXISTS installations ADD COLUMN IF NOT EXISTS order_item_type TEXT;
+ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS customer_address TEXT;
+ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
+ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS parts JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS store_orders ADD COLUMN IF NOT EXISTS customer_city TEXT;
+ALTER TABLE IF EXISTS store_orders ADD COLUMN IF NOT EXISTS customer_address TEXT;

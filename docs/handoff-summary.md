@@ -551,3 +551,12 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Rebuilt QA APK: `fanni-fieldtech-breexe-pro-v1.0.0-debug.apk`; SHA-256 `6996F0C92BBFF40097E274C1031730CB881A3DC3827D5D251EA15A20560C4C45`.
 - Production activation still requires deploying the FieldTech server over HTTPS, setting the same 32+ character integration secret on both services, applying the Supabase migration when applicable, and signing the final APK with a company-owned release keystore.
 - Full Arabic deployment and verification steps: `docs/fieldtech-integration-runbook-ar.md`.
+
+## 2026-07-18 - Salla real-time orders and technician wallet 1.5.1 [Codex]
+
+- Fixed the production `403` dead end after signed Salla order webhooks: a complete authenticated webhook now creates/projects the order immediately, while partial status events patch only remote status metadata and preserve the rich local customer/items workflow. Salla API reads remain reconciliation, not a prerequisite for ingestion.
+- Kept webhook processing idempotent through the existing durable inbox and added regression coverage for repeated full `order.created` payloads and partial `order.status.updated` payloads when the detail API returns `403`.
+- Store orders now carry the customer's formatted delivery address, item quantities, notes, and parts into installations/bookings; technician assignment, auto-created scheduled bookings, manual installation linking, and CRM booking mutations queue an immediate FieldTech sync with periodic pull retained as recovery.
+- Added a manager-only `محفظة الفنيين` section with wallet totals, per-job reward rules, immutable ledger entries, withdrawal approval/defer/reject, and payout confirmation with transfer reference and proof.
+- Added HMAC-signed financial bridge endpoints to the separate technician service and covered the full reward -> partial withdrawal -> approval -> payout flow. FieldTech commit `7afdfc3` was deployed with a SQLite `VACUUM INTO` backup and verified live (`financials` HTTP 200, 3 mapped technicians).
+- Advanced SQLite schema to `10501`, added address/store linkage columns and a matching Supabase migration `20260718170000_salla_fieldtech_addresses.sql`, and bumped the CRM release to `1.5.1`.
