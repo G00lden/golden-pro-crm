@@ -48,6 +48,17 @@ const values = {
   FIREBASE_SERVICE_ACCOUNT_PATH: keep("FIREBASE_SERVICE_ACCOUNT_PATH"),
   FIREBASE_SERVICE_ACCOUNT_JSON: keep("FIREBASE_SERVICE_ACCOUNT_JSON"),
 
+  // Per-employee CRM -> Google -> Android contact sync. Keep the OAuth client
+  // and token-encryption key in the private production environment so a future
+  // regeneration does not silently disable Google Contacts.
+  GOOGLE_CONTACTS_CLIENT_ID: keep("GOOGLE_CONTACTS_CLIENT_ID"),
+  GOOGLE_CONTACTS_CLIENT_SECRET: keep("GOOGLE_CONTACTS_CLIENT_SECRET"),
+  GOOGLE_CONTACTS_REDIRECT_URI: keep(
+    "GOOGLE_CONTACTS_REDIRECT_URI",
+    `https://${domain}/api/integrations/google-contacts/callback`,
+  ),
+  GOOGLE_CONTACTS_ENCRYPTION_KEY: secret("GOOGLE_CONTACTS_ENCRYPTION_KEY"),
+
   STORE_WEBHOOK_SECRET: secret("STORE_WEBHOOK_SECRET"),
   STORE_WEBHOOK_OWNER_UID: keep("STORE_WEBHOOK_OWNER_UID"),
   STORE_WEBHOOK_DEFAULT_MAINTENANCE_MONTHS: keep("STORE_WEBHOOK_DEFAULT_MAINTENANCE_MONTHS", "3"),

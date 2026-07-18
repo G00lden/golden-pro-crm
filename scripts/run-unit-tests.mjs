@@ -4,6 +4,7 @@ const files = [
   "scripts/version-policy.test.mjs",
   "scripts/server-mode.test.mjs",
   "scripts/qa-isolation.test.mjs",
+  "scripts/configure-google-contacts-env.test.mjs",
   "scripts/tracking-route-registration.test.mjs",
   "scripts/schema-migration.test.mjs",
   "scripts/user-identity.test.mjs",
