@@ -66,6 +66,8 @@ import { invalidateStoreProductCatalogIndex } from "./storeWebhook";
 import { allocateInvoiceSequence } from "./invoiceSequence";
 import { createAtomicInvoiceDocumentWithDatabase } from "./invoiceDocumentWriter";
 import { compareAndSetDocument } from "./atomicDocumentUpdate";
+import { captureCrmStageAttribution } from "./tiktokAttribution";
+import { logError } from "./logger";
 import {
   canApplyCorrection,
   canApplyOperationalInvoiceStatus,
@@ -2004,6 +2006,22 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       return;
     }
     const invoice = await getInvoiceLedgerRecord(uid, req.params.id);
+    if (status === "paid" && invoice) {
+      try {
+        captureCrmStageAttribution({
+          ownerUid: uid,
+          entityId: req.params.id,
+          phone: String(invoice.customer_phone || ""),
+          stage: "paid",
+          amount: Number(invoice.total_with_vat || invoice.total || 0),
+          currency: String(invoice.currency || "SAR"),
+          contentName: String(invoice.invoice_number || invoice.title || "مكيفات"),
+          occurredAt: String(invoice.paid_at || nowIso()),
+        });
+      } catch (error) {
+        logError("tiktok.attribution.manual_invoice_paid_failed", error, { invoiceId: req.params.id });
+      }
+    }
     res.json({ invoice });
   }));
 

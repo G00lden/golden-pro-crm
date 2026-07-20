@@ -12,6 +12,8 @@
 
 import { ga4Event } from "./ga4";
 import { trackMetaEvent } from "./metaPixel";
+import { hasConsent } from "./consent";
+import { trackTikTokEvent } from "./tiktokPixel";
 
 declare global {
   interface Window {
@@ -22,6 +24,7 @@ declare global {
 const isDev = typeof import.meta !== "undefined" && (import.meta as { env?: { DEV?: boolean } }).env?.DEV;
 
 const UTM_KEY = "breexe_utm";
+const ATTRIBUTION_REFERENCE_KEY = "breexe_attribution_ref_v1";
 
 export interface UtmContext {
   utm_source?: string;
@@ -62,8 +65,9 @@ export function captureUtm(): UtmContext {
     captured.ts = new Date().toISOString();
     try {
       // First-touch attribution: keep the earliest capture; don't overwrite it
-      // on later visits that arrive with fresh UTM params.
-      if (!localStorage.getItem(UTM_KEY)) {
+      // on later visits that arrive with fresh UTM params. Click identifiers are
+      // persisted only after explicit consent.
+      if (hasConsent() && !localStorage.getItem(UTM_KEY)) {
         localStorage.setItem(UTM_KEY, JSON.stringify(captured));
       }
     } catch { /* private mode */ }
@@ -74,6 +78,28 @@ export function captureUtm(): UtmContext {
     if (raw) return JSON.parse(raw) as UtmContext;
   } catch { /* private mode */ }
   return {};
+}
+
+/** Stable for one browser tab; contains no identity and is useless by itself. */
+export function attributionReference(): string | null {
+  if (typeof window === "undefined" || !hasConsent()) return null;
+  try {
+    const existing = sessionStorage.getItem(ATTRIBUTION_REFERENCE_KEY);
+    if (/^[A-F0-9]{16}$/.test(existing || "")) return existing;
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    const reference = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("").toUpperCase();
+    sessionStorage.setItem(ATTRIBUTION_REFERENCE_KEY, reference);
+    return reference;
+  } catch {
+    return null;
+  }
+}
+
+export function tiktokFirstPartyCookie(): string | undefined {
+  if (typeof document === "undefined" || !hasConsent()) return undefined;
+  const match = document.cookie.match(/(?:^|;\s*)_ttp=([^;]+)/);
+  return match?.[1] ? decodeURIComponent(match[1]).slice(0, 256) : undefined;
 }
 
 export interface TrackEvent {
@@ -113,6 +139,7 @@ export function trackEvent(event: TrackEvent): void {
   const eventParams = { value: event.value, currency: event.currency, ...(event.meta || {}) };
   ga4Event(event.name, eventParams);
   trackMetaEvent(event.name, eventParams);
+  trackTikTokEvent(event.name, eventParams, payload.event_id);
 
   // 3. Privacy-minimised server intake. Attribution ids and arbitrary metadata
   // stay out of this request; the server also strips unknown fields defensively.

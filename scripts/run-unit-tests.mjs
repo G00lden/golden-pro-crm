@@ -25,6 +25,7 @@ const files = [
   "server/routes-public-leads.test.ts",
   "server/routes-public-lead-inbox.test.ts",
   "server/routes-tracking.test.ts",
+  "server/tiktokAttributionStorage.test.ts",
   "server/routes-salla.availability.test.ts",
   "server/salla.test.ts",
   "server/sallaDate.test.ts",

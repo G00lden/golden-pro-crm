@@ -18,6 +18,8 @@ services:
         VITE_DB_PROVIDER: ${VITE_DB_PROVIDER:-sqlite}
         VITE_LOCAL_AUTH: ${VITE_LOCAL_AUTH:-false}
         VITE_PUBLIC_CONTACT_PHONE: ${VITE_PUBLIC_CONTACT_PHONE:?Set VITE_PUBLIC_CONTACT_PHONE in .env.production}
+        VITE_ENABLE_TRACKING: ${VITE_ENABLE_TRACKING:-false}
+        VITE_TIKTOK_PIXEL_ID: ${VITE_TIKTOK_PIXEL_ID:-}
     image: golden-pro-crm:latest
     container_name: golden-pro-crm
     restart: unless-stopped

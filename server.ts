@@ -48,6 +48,7 @@ import { registerPublicLeadInboxRoutes } from "./server/routes-public-lead-inbox
 import { registerTrackingRoutes, trackingEventRateLimitOptions } from "./server/routes-tracking";
 import { initWhatsAppAutoReply } from "./server/whatsappAutoReply";
 import { startCommunicationWorker } from "./server/communicationWorker";
+import { startTikTokAttributionWorker } from "./server/tiktokAttribution";
 import { whatsappService } from "./server/whatsapp";
 import { getStoreWebhookPublicState } from "./server/storeWebhook";
 import { getReminderSchedulerState } from "./server/reminderEngine";
@@ -291,9 +292,15 @@ async function startServer() {
   // storage still assigns the configured CRM owner partition server-side.
   registerPublicLeadRoutes(app, { database: db, rateLimit: publicLeadRateLimit });
 
-  // Landing analytics is public by necessity, but accepts only a privacy-safe
-  // field allowlist and is a documented no-op until a consent-aware adapter is added.
-  registerTrackingRoutes(app, { rateLimit: trackingEventRateLimit });
+  // Public landing analytics plus the explicit-consent, same-origin WhatsApp
+  // attribution redirect. The latter stores only allowlisted campaign fields.
+  registerTrackingRoutes(app, {
+    rateLimit: trackingEventRateLimit,
+    database: db,
+    ownerUid: () => resolvePublicLeadOwnerUid() || "",
+    clientIp,
+    publicContactPhone: () => process.env.VITE_PUBLIC_CONTACT_PHONE,
+  });
 
   registerStoreRoutes(app, { webhookRateLimit });
 
@@ -335,6 +342,7 @@ async function startServer() {
     logError("whatsapp.startup_verification_failed", error);
   });
   startCommunicationWorker();
+  startTikTokAttributionWorker();
 
   // Salla OAuth callback + webhook (unauthenticated — these trigger token
   // exchanges or receive store-push events before any user is logged in).

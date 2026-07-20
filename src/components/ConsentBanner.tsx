@@ -26,8 +26,8 @@ export function ConsentBanner() {
     <div className="consent-banner" dir="rtl" role="dialog" aria-live="polite" aria-label="إعدادات الخصوصية">
       <div className="consent-inner">
         <p className="consent-text">
-          نستخدم ملفات تعريف الارتباط (cookies) لتحليل أداء الإعلانات وتحسين تجربتك.
-          بموافقتك نُفعّل أدوات القياس مثل Google Analytics و Meta Pixel. تقدر ترفض
+          نستخدم ملفات تعريف الارتباط لتحليل أداء الإعلانات وتحسين تجربتك.
+          بموافقتك نُفعّل أدوات القياس التابعة لتيكتوك وميتا وجوجل. تقدر ترفض
           وتكمل تصفّح الموقع بشكل طبيعي. اطّلع على{" "}
           <a href="/legal/privacy">سياسة الخصوصية</a>.
         </p>

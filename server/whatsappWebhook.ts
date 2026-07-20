@@ -21,6 +21,7 @@ import { logError, logEvent, redactValue } from "./logger";
 import { normalizePhoneDigits, phoneTail } from "../shared/phone";
 import { communicationEventStore } from "./communicationEvents";
 import { routeInboundConversation } from "./inboundConversation";
+import { captureInboundWhatsAppAttribution } from "./tiktokAttribution";
 
 export type WhatsAppWebhookMessage = {
   from?: string;
@@ -252,6 +253,31 @@ export async function handleWebhook(
             owner_uid: ownerUid,
             metadata: { wa_type: message?.type, timestamp: message?.timestamp },
           });
+
+          // A tracked CTA appends an opaque reference on its own line. Missing
+          // references are normal for organic WhatsApp conversations.
+          try {
+            const epochSeconds = Number(message?.timestamp);
+            const occurredAt = Number.isFinite(epochSeconds) && epochSeconds > 0
+              ? new Date(epochSeconds * 1_000).toISOString()
+              : undefined;
+            const attribution = captureInboundWhatsAppAttribution({
+              ownerUid,
+              message: text,
+              phone: String(message?.from || ""),
+              providerMessageId: message?.id,
+              occurredAt,
+            });
+            if (attribution.matched) {
+              summary.push({
+                kind: "marketing_attribution",
+                matched: true,
+                created: attribution.created,
+              });
+            }
+          } catch (err) {
+            logError("whatsapp.webhook.attribution_failed", err);
+          }
 
           // 2. Confirmation keyword → stop reminders for that installation.
           const confirmed = parseConfirmation(text);

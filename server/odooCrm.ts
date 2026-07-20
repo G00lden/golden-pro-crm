@@ -3,6 +3,8 @@ import type { Express, NextFunction, Request, Response } from "express";
 import db from "./db";
 import type { AuthedRequest } from "./auth";
 import { todayInTimeZone } from "./reminderEngine";
+import { captureCrmStageAttribution } from "./tiktokAttribution";
+import { logError } from "./logger";
 
 type CrmStage = "lead" | "opportunity" | "quote" | "invoice" | "paid" | "lost";
 type CrmTaskStatus = "open" | "done" | "cancelled";
@@ -55,6 +57,24 @@ function id(prefix: string) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function recordDealAttribution(deal: Record<string, unknown>) {
+  try {
+    return captureCrmStageAttribution({
+      ownerUid: String(deal.owner_uid || ""),
+      entityId: String(deal.id || ""),
+      phone: String(deal.customer_phone || ""),
+      stage: String(deal.stage || ""),
+      amount: Number(deal.amount || 0),
+      currency: String(deal.currency || "SAR"),
+      contentName: String(deal.title || "مكيفات"),
+      occurredAt: String(deal.updated_at || deal.created_at || nowIso()),
+    });
+  } catch (error) {
+    logError("tiktok.attribution.crm_stage_failed", error, { dealId: deal.id });
+    return null;
+  }
 }
 
 function stage(value: unknown): CrmStage {
@@ -286,6 +306,7 @@ export function registerOdooCrmRoutes(app: Express) {
        VALUES (@id, @owner_uid, @title, @customer_id, @customer_name, @customer_phone, @stage, @amount, @currency, @probability, @expected_close, @assigned_to, @source, @quote_id, @invoice_id, @notes, @created_at, @updated_at)`,
     ).run(deal);
     recordAudit({ ownerUid, actorUid: uid(req), action: "create", entityType: "crm_deal", entityId: deal.id, summary: deal.title, after: deal });
+    recordDealAttribution(deal);
     res.status(201).json({ deal });
   }));
 
@@ -316,6 +337,7 @@ export function registerOdooCrmRoutes(app: Express) {
     ).run(next);
     const after = row("SELECT * FROM crm_deals WHERE id = ? AND owner_uid = ?", req.params.id, ownerUid);
     recordAudit({ ownerUid, actorUid: uid(req), action: "update", entityType: "crm_deal", entityId: req.params.id, summary: String(next.title || ""), before, after });
+    if (after && String(before.stage || "") !== String(after.stage || "")) recordDealAttribution(after);
     res.json({ deal: after });
   }));
 

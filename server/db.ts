@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
 import { PUBLIC_LEAD_SCHEMA_SQL } from "./publicLeadStorage";
+import { TIKTOK_ATTRIBUTION_SCHEMA_SQL } from "./tiktokAttributionStorage";
 import { calculateDocumentTotals, normalizeVatPercent, type DiscountMode } from "../shared/financial";
 import { verifiableInvoiceItems } from "../shared/invoiceItems";
 
@@ -10,7 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10501;
+const TARGET_SCHEMA_VERSION = 10600;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -1289,6 +1290,11 @@ db.exec(`
 // runs before the public route can accept traffic.
 db.exec(PUBLIC_LEAD_SCHEMA_SQL);
 
+// Consent-gated first-party attribution and a durable TikTok delivery outbox.
+// Delivery can be disabled independently without losing the local customer
+// journey, and production creates a pre-migration backup before this runs.
+db.exec(TIKTOK_ATTRIBUTION_SCHEMA_SQL);
+
 for (const [table, columns] of [
   ["customers", [["address", "TEXT DEFAULT ''"], ["customer_address", "TEXT DEFAULT ''"]]],
   ["installations", [
@@ -1799,8 +1805,11 @@ if (schemaVersionBeforeMigration < TARGET_SCHEMA_VERSION) {
 // Defense in depth: the HTTP layer already restricts financial edits and
 // deletes to drafts. These triggers close check/write races and protect the
 // ledger from any other SQLite caller. Operational status, paid_at and
-// updated_at remain mutable; every fiscal field is frozen after issuance.
-db.exec(`
+// updated_at remain mutable; every fiscal field is frozen after issuance. Use
+// one IMMEDIATE transaction because separate Node processes can open the same
+// fresh database during startup; DROP + CREATE must never interleave.
+db.transaction(() => {
+  db.exec(`
   DROP TRIGGER IF EXISTS invoices_prevent_issued_financial_update;
   CREATE TRIGGER invoices_prevent_issued_financial_update
   BEFORE UPDATE ON invoices
@@ -1984,7 +1993,9 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10310, '2.1.2-mobile-onboarding-clarity');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10500, '1.5.0-unified-call-center');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10501, '1.5.1-salla-fieldtech-addresses');
-`);
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10600, '1.6.0-tiktok-whatsapp-attribution');
+  `);
+}).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 
 export default db;

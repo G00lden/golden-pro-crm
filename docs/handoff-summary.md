@@ -560,3 +560,15 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Added a manager-only `محفظة الفنيين` section with wallet totals, per-job reward rules, immutable ledger entries, withdrawal approval/defer/reject, and payout confirmation with transfer reference and proof.
 - Added HMAC-signed financial bridge endpoints to the separate technician service and covered the full reward -> partial withdrawal -> approval -> payout flow. FieldTech commit `7afdfc3` was deployed with a SQLite `VACUUM INTO` backup and verified live (`financials` HTTP 200, 3 mapped technicians).
 - Advanced SQLite schema to `10501`, added address/store linkage columns and a matching Supabase migration `20260718170000_salla_fieldtech_addresses.sql`, and bumped the CRM release to `1.5.1`.
+
+## 2026-07-21 - TikTok to WhatsApp attribution and air-conditioner funnel 1.6.0 [Codex]
+
+- Added `/landing-ac`, a mobile-first Arabic air-conditioner quote landing page with a qualifying WhatsApp message for city, site type, area, quantity, and site photo.
+- Added an explicit-consent, same-origin WhatsApp redirect that stores TikTok click identifiers, creates an opaque message reference, and fails open to the old direct WhatsApp link if attribution is unavailable.
+- Matched the reference inside the existing authenticated WhatsApp Cloud webhook, hashes the sender phone, and records `ClickButton` and `Contact` in a durable idempotent outbox. CRM qualification/quote/invoice stages add `SubmitForm`; paid deals and invoices add `CompletePayment`.
+- Added consent-gated TikTok Pixel support plus a server-side Events API worker with leases, exponential retry, secret redaction, a delivery kill switch, a separate attribution kill switch, a ninety-day session retention default, and pre-migration SQLite backup through schema `10600`.
+- Added production build arguments and environment examples. The initial production configuration deliberately keeps `TIKTOK_EVENTS_ENABLED=false` until an Events Manager access token is generated and a real test event is accepted.
+- Added the audience, targeting, risk, launch-gate, and rollback runbook at `docs/tiktok-whatsapp-attribution-ar.md`.
+- Verification completed locally: `394/394` unit tests, schema migration tests, TypeScript lint, production build, desktop visual inspection, mobile viewport inspection, and a consented link check confirming that `ttclid` reaches the same-origin redirect.
+- The first deploy preflight exposed an existing cross-process SQLite trigger recreation race. Trigger replacement now runs in one immediate transaction; the concurrent invoice-sequence suite passed three consecutive runs before deployment resumed.
+- The consent banner and both privacy-policy surfaces now name TikTok measurement explicitly and disclose the click identifier, campaign source, network/browser context, one-way phone hash, ninety-day attribution retention, and the exclusion of raw WhatsApp messages and raw phone numbers from TikTok delivery.

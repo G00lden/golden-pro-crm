@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import db from "./db";
 import type { AuthedRequest } from "./auth";
 import { logError, logEvent } from "./logger";
+import { captureCrmStageAttribution } from "./tiktokAttribution";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -244,6 +245,26 @@ function markInvoicePaid(invoiceId: string): boolean {
            AND credit.adjustment_scope = 'full'
        )`,
   ).run(now, now, invoiceId);
+  if (result.changes === 1) {
+    try {
+      const invoice = db.prepare(`
+        SELECT id, owner_uid, invoice_number, customer_phone, total_with_vat, currency, paid_at
+        FROM invoices WHERE id = ? LIMIT 1
+      `).get(invoiceId) as Pick<InvoiceRow, "id" | "owner_uid" | "invoice_number" | "customer_phone" | "total_with_vat" | "currency" | "paid_at"> | undefined;
+      if (invoice) captureCrmStageAttribution({
+        ownerUid: invoice.owner_uid,
+        entityId: invoice.id,
+        phone: invoice.customer_phone,
+        stage: "paid",
+        amount: invoice.total_with_vat,
+        currency: invoice.currency,
+        contentName: invoice.invoice_number,
+        occurredAt: invoice.paid_at || now,
+      });
+    } catch (error) {
+      logError("tiktok.attribution.invoice_paid_failed", error, { invoiceId });
+    }
+  }
   return result.changes === 1;
 }
 
