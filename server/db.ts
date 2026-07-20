@@ -1805,8 +1805,11 @@ if (schemaVersionBeforeMigration < TARGET_SCHEMA_VERSION) {
 // Defense in depth: the HTTP layer already restricts financial edits and
 // deletes to drafts. These triggers close check/write races and protect the
 // ledger from any other SQLite caller. Operational status, paid_at and
-// updated_at remain mutable; every fiscal field is frozen after issuance.
-db.exec(`
+// updated_at remain mutable; every fiscal field is frozen after issuance. Use
+// one IMMEDIATE transaction because separate Node processes can open the same
+// fresh database during startup; DROP + CREATE must never interleave.
+db.transaction(() => {
+  db.exec(`
   DROP TRIGGER IF EXISTS invoices_prevent_issued_financial_update;
   CREATE TRIGGER invoices_prevent_issued_financial_update
   BEFORE UPDATE ON invoices
@@ -1991,7 +1994,8 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10500, '1.5.0-unified-call-center');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10501, '1.5.1-salla-fieldtech-addresses');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10600, '1.6.0-tiktok-whatsapp-attribution');
-`);
+  `);
+}).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 
 export default db;
