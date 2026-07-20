@@ -3,11 +3,13 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import {LandingPage} from './pages/Landing.tsx';
 import {LandingModern} from './pages/LandingModern.tsx';
+import {AirConditionerLanding} from './pages/AirConditionerLanding.tsx';
 import LegalPage from './pages/Legal.tsx';
 import {ConsentBanner} from './components/ConsentBanner.tsx';
 import {initializeTracking} from './gtm';
 import {initGA4} from './ga4';
 import {initMetaPixel} from './metaPixel';
+import {initTikTokPixel} from './tiktokPixel';
 import {hasConsent, onConsentChange} from './consent';
 import './index.css';
 
@@ -24,6 +26,8 @@ function startTracking(): void {
   if (ga4Id) initGA4(ga4Id);
   const metaPixelId = import.meta.env.VITE_META_PIXEL_ID as string | undefined;
   if (metaPixelId) initMetaPixel(metaPixelId);
+  const tiktokPixelId = import.meta.env.VITE_TIKTOK_PIXEL_ID as string | undefined;
+  if (tiktokPixelId) initTikTokPixel(tiktokPixelId);
 }
 
 if (hasConsent()) {
@@ -45,13 +49,15 @@ const path = typeof window !== 'undefined' ? window.location.pathname : '';
 //   /landing-v2  → dark-mode A/B variant
 //   /legal/*     → privacy / terms
 //   everything else → the auth-gated CRM app
-const isPublic = path === '/landing' || path === '/landing-v2' || path.startsWith('/legal/');
+const isPublic = path === '/landing' || path === '/landing-v2' || path === '/landing-ac' || path.startsWith('/legal/');
 
 let page: ReactElement;
 if (path.startsWith('/legal/')) {
   page = <LegalPage />;
 } else if (path === '/landing-v2') {
   page = <LandingModern />;
+} else if (path === '/landing-ac') {
+  page = <AirConditionerLanding />;
 } else if (path === '/landing') {
   page = <LandingPage />;
 } else {

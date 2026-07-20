@@ -1,5 +1,11 @@
-import type { ReactNode } from "react";
-import { buildPublicContactHref, publicContactPhone } from "../publicContact";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { getConsent, onConsentChange } from "../consent";
+import {
+  buildPublicContactHref,
+  buildTrackedWhatsAppHref,
+  publicContactPhone,
+} from "../publicContact";
+import { attributionReference, captureUtm, tiktokFirstPartyCookie } from "../track";
 
 export function PublicContactLink({
   channel,
@@ -16,7 +22,28 @@ export function PublicContactLink({
   children: ReactNode;
   ariaLabel?: string;
 }) {
-  const href = buildPublicContactHref(channel, publicContactPhone, whatsappText);
+  const [consent, setConsent] = useState(getConsent);
+  useEffect(() => onConsentChange(setConsent), []);
+  const href = useMemo(() => {
+    const fallback = buildPublicContactHref(channel, publicContactPhone, whatsappText);
+    if (channel !== "whatsapp" || consent !== "granted" || typeof window === "undefined") return fallback;
+    const reference = attributionReference();
+    if (!reference) return fallback;
+    const utm = captureUtm();
+    return buildTrackedWhatsAppHref({
+      phone: publicContactPhone,
+      message: whatsappText,
+      reference,
+      page: window.location.pathname,
+      ttclid: utm.ttclid,
+      ttp: tiktokFirstPartyCookie(),
+      utmSource: utm.utm_source,
+      utmMedium: utm.utm_medium,
+      utmCampaign: utm.utm_campaign,
+      utmContent: utm.utm_content,
+      utmTerm: utm.utm_term,
+    }) || fallback;
+  }, [channel, consent, whatsappText]);
   if (!href) {
     return (
       <span

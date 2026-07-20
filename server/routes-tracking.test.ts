@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import express, { type RequestHandler } from "express";
+import Database from "better-sqlite3";
 import {
   registerTrackingRoutes,
   trackingEventRateLimitOptions,
   type AcceptedTrackingEvent,
 } from "./routes-tracking";
+import { TIKTOK_ATTRIBUTION_SCHEMA_SQL } from "./tiktokAttributionStorage";
 
 async function withServer(
   rateLimit: RequestHandler,
@@ -117,4 +119,55 @@ test("tracking rate-limit settings use safe defaults and bounded overrides", () 
     name: "tracking-events",
   });
   assert.equal(trackingEventRateLimitOptions({ TRACK_EVENT_RATE_LIMIT_MAX: "999999" }).max, 10_000);
+});
+
+test("consented WhatsApp redirect persists the click before adding its message reference", async () => {
+  const previous = process.env.TIKTOK_ATTRIBUTION_ENABLED;
+  process.env.TIKTOK_ATTRIBUTION_ENABLED = "true";
+  const database = new Database(":memory:");
+  database.exec(TIKTOK_ATTRIBUTION_SCHEMA_SQL);
+  const app = express();
+  registerTrackingRoutes(app, {
+    rateLimit: allow,
+    database,
+    ownerUid: () => "owner-a",
+    clientIp: () => "203.0.113.10",
+    publicContactPhone: () => "+966551234567",
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const params = new URLSearchParams({
+      reference: "0123456789ABCDEF",
+      consent: "granted",
+      message: "أرغب بعرض سعر",
+      page: "/landing-ac",
+      ttclid: "test-click-123456",
+      ts: "2026-07-21T10:00:00.000Z",
+    });
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/track/whatsapp?${params}`, {
+      redirect: "manual",
+    });
+    assert.equal(response.status, 302);
+    const location = decodeURIComponent(response.headers.get("location") || "");
+    assert.match(location, /^https:\/\/wa\.me\/966551234567\?text=/);
+    assert.match(location, /مرجع الطلب:\n0123456789ABCDEF/);
+    const session = database.prepare(
+      "SELECT ttclid, landing_path, client_ip FROM marketing_attribution_sessions WHERE reference = ?",
+    ).get("0123456789ABCDEF");
+    assert.deepEqual(session, {
+      ttclid: "test-click-123456",
+      landing_path: "/landing-ac",
+      client_ip: "203.0.113.10",
+    });
+    const event = database.prepare("SELECT event_name, status FROM marketing_attribution_events").get();
+    assert.deepEqual(event, { event_name: "ClickButton", status: "pending" });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    database.close();
+    if (previous === undefined) delete process.env.TIKTOK_ATTRIBUTION_ENABLED;
+    else process.env.TIKTOK_ATTRIBUTION_ENABLED = previous;
+  }
 });

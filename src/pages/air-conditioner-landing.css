@@ -1,0 +1,83 @@
+.ac-page {
+  --ac-ink: #10252a;
+  --ac-muted: #5e7175;
+  --ac-green: #0b7b69;
+  --ac-green-dark: #075c50;
+  --ac-sand: #f5efe3;
+  min-height: 100vh;
+  color: var(--ac-ink);
+  background: #fcfdfb;
+  font-family: "Tajawal", "Segoe UI", sans-serif;
+}
+
+.ac-header,
+.ac-hero,
+.ac-requirements,
+.ac-final,
+.ac-footer {
+  width: min(1120px, calc(100% - 36px));
+  margin-inline: auto;
+}
+
+.ac-header { display: flex; align-items: center; justify-content: space-between; padding: 24px 0; }
+.ac-brand { display: inline-flex; gap: 10px; align-items: center; color: var(--ac-ink); font-size: 22px; font-weight: 900; text-decoration: none; }
+.ac-brand svg { color: var(--ac-green); }
+.ac-header-note { color: var(--ac-muted); font-size: 14px; }
+
+.ac-hero { display: grid; grid-template-columns: 1.45fr .8fr; gap: 48px; align-items: center; padding: 72px 0 86px; }
+.ac-hero-copy { max-width: 720px; }
+.ac-kicker { display: inline-block; color: var(--ac-green); font-weight: 800; letter-spacing: .02em; margin-bottom: 14px; }
+.ac-hero h1 { margin: 0; font-size: clamp(40px, 6vw, 68px); line-height: 1.12; letter-spacing: -.035em; }
+.ac-hero-copy > p { max-width: 650px; margin: 24px 0; color: var(--ac-muted); font-size: 20px; line-height: 1.8; }
+.ac-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 28px 0; }
+.ac-primary,
+.ac-secondary,
+.ac-card-link { display: inline-flex; align-items: center; justify-content: center; gap: 10px; border-radius: 14px; padding: 15px 22px; font-weight: 900; text-decoration: none; }
+.ac-primary { color: #fff; background: var(--ac-green); box-shadow: 0 12px 28px rgba(11,123,105,.18); }
+.ac-primary:hover { background: var(--ac-green-dark); }
+.ac-secondary { color: var(--ac-ink); border: 1px solid #d9e0dd; background: #fff; }
+.ac-trust { display: flex; gap: 18px; flex-wrap: wrap; padding: 0; margin: 26px 0 0; list-style: none; color: var(--ac-muted); font-size: 14px; }
+.ac-trust li { display: inline-flex; gap: 6px; align-items: center; }
+.ac-trust svg { color: var(--ac-green); }
+
+.ac-quote-card { padding: 30px; border: 1px solid #dbe6e2; border-radius: 26px; background: linear-gradient(155deg, #fff, #eef7f3); box-shadow: 0 26px 70px rgba(23,54,50,.09); }
+.ac-card-label { color: var(--ac-muted); font-weight: 700; }
+.ac-quote-card ol { display: grid; gap: 18px; list-style: none; padding: 0; margin: 28px 0; }
+.ac-quote-card li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: center; font-weight: 800; }
+.ac-quote-card svg { color: var(--ac-green); }
+.ac-card-link { width: 100%; box-sizing: border-box; background: var(--ac-ink); color: #fff; }
+
+.ac-requirements { padding: 74px 0; border-top: 1px solid #e6ece9; }
+.ac-requirements h2,
+.ac-final h2 { font-size: clamp(30px, 4vw, 44px); margin: 0; }
+.ac-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 34px; }
+.ac-steps article { padding: 24px; background: #fff; border: 1px solid #e1e8e5; border-radius: 18px; }
+.ac-steps b { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; color: #fff; background: var(--ac-green); }
+.ac-steps h3 { margin: 22px 0 8px; }
+.ac-steps p { margin: 0; color: var(--ac-muted); line-height: 1.7; }
+
+.ac-final { display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 44px; box-sizing: border-box; border-radius: 26px; background: var(--ac-sand); }
+.ac-final p { color: var(--ac-muted); margin-bottom: 0; }
+.ac-footer { display: flex; justify-content: space-between; padding: 42px 0; color: var(--ac-muted); }
+.ac-footer nav { display: flex; gap: 20px; }
+.ac-footer a { color: inherit; }
+
+@media (max-width: 850px) {
+  .ac-header-note { display: none; }
+  .ac-hero { grid-template-columns: 1fr; padding-top: 42px; }
+  .ac-steps { grid-template-columns: repeat(2, 1fr); }
+  .ac-final { align-items: stretch; flex-direction: column; }
+}
+
+@media (max-width: 520px) {
+  .ac-header,
+  .ac-hero,
+  .ac-requirements,
+  .ac-final,
+  .ac-footer { width: min(100% - 24px, 1120px); }
+  .ac-hero h1 { font-size: 38px; }
+  .ac-hero-copy > p { font-size: 17px; }
+  .ac-actions > * { width: 100%; box-sizing: border-box; }
+  .ac-steps { grid-template-columns: 1fr; }
+  .ac-final { padding: 28px; }
+}

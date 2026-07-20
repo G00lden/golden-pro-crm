@@ -10,6 +10,8 @@ services:
         VITE_DB_PROVIDER: ${VITE_DB_PROVIDER:-sqlite}
         VITE_LOCAL_AUTH: ${VITE_LOCAL_AUTH:-false}
         VITE_PUBLIC_CONTACT_PHONE: ${VITE_PUBLIC_CONTACT_PHONE:-}
+        VITE_ENABLE_TRACKING: ${VITE_ENABLE_TRACKING:-false}
+        VITE_TIKTOK_PIXEL_ID: ${VITE_TIKTOK_PIXEL_ID:-}
     restart: unless-stopped
     env_file:
       - ../.env.production

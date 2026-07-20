@@ -154,7 +154,7 @@ test("SQLite counter is durable and unique across concurrent database connection
         WHERE owner_uid = 'owner-concurrent' AND series = 'tax_documents'
       `).get() as { last_value?: number } | undefined;
       assert.equal(state?.last_value, 101);
-      assert.equal(Number(inspection.pragma("user_version", { simple: true })), 10501);
+      assert.equal(Number(inspection.pragma("user_version", { simple: true })), 10600);
     } finally {
       inspection.close();
     }
