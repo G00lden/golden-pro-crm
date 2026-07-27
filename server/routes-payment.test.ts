@@ -215,7 +215,10 @@ test("Tap payments are idempotent, race-safe, monotonic, signed, and redirect-re
     assert.equal(first.response.status, 200, JSON.stringify(first.body));
     assert.equal(first.body.redirect_url, "https://tap.test/pay/1");
     assert.match(String(tapBodies[0].reference?.idempotent || ""), /^pay_[a-f0-9]{48}$/);
-    assert.match(String(tapBodies[0].redirect?.url || ""), new RegExp(`payment_id=${first.body.id}$`));
+    assert.match(
+      String(tapBodies[0].redirect?.url || ""),
+      new RegExp(`/pay/return\\?payment_id=${first.body.id}$`),
+    );
 
     const replay = await api("/api/payments/create", {
       method: "POST",
@@ -316,6 +319,18 @@ test("Tap payments are idempotent, race-safe, monotonic, signed, and redirect-re
     assert.equal(reconciled.body.tap_charge_id, redirectTapId, "redirect reconciliation must atomically bind tap_id");
     assert.equal(retrieveTapCalls, 1, "redirect reconciliation must call Retrieve Charge once");
     assert.equal((db.prepare("SELECT status FROM invoices WHERE id = ?").get("payment-invoice-redirect") as any)?.status, "paid");
+
+    const publicReturn = await fetch(
+      `${baseUrl}/pay/return?payment_id=${encodeURIComponent(redirectPayment.body.id)}&tap_id=${encodeURIComponent(redirectTapId)}`,
+    );
+    const publicReturnHtml = await publicReturn.text();
+    assert.equal(publicReturn.status, 200);
+    assert.equal(publicReturn.headers.get("cache-control"), "no-store");
+    assert.equal(publicReturn.headers.get("referrer-policy"), "no-referrer");
+    assert.match(publicReturnHtml, /dir="rtl"/);
+    assert.match(publicReturnHtml, /تم الدفع بنجاح/);
+    assert.doesNotMatch(publicReturnHtml, /Customer payment-invoice-redirect/);
+    assert.equal(retrieveTapCalls, 2, "the public return page must reconcile the charge once");
 
     const refunded = await postWebhook({ ...capturedPayload, status: "REFUNDED" });
     assert.equal(refunded.response.status, 200, JSON.stringify(refunded.body));

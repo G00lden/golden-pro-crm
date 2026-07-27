@@ -376,6 +376,10 @@ function paymentApiResponse(payment: PaymentRow) {
   };
 }
 
+export type PaymentLinkResponse = ReturnType<typeof paymentApiResponse> & {
+  idempotent_replay?: boolean;
+};
+
 function publicBaseUrl(req: Request): string {
   const host = req.get("host") || "";
   const proto = req.get("x-forwarded-proto") || req.protocol || "https";
@@ -581,6 +585,94 @@ function releasePaymentReservation(
   })();
 }
 
+function normalizedPaymentBaseUrl(value: string) {
+  const raw = String(value || "").trim().replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw paymentError(500, "عنوان التطبيق العام غير صالح لإنشاء رابط دفع.");
+  }
+  const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !localHttp) {
+    throw paymentError(500, "رابط الدفع يتطلب عنوان HTTPS عامًا.");
+  }
+  return parsed.origin;
+}
+
+export async function createPaymentLinkForInvoice(input: {
+  invoiceId: string;
+  ownerUid: string;
+  idempotencyKey: string;
+  baseUrl: string;
+}): Promise<PaymentLinkResponse> {
+  if (!PAYMENT_STORE_SUPPORTED) {
+    throw paymentError(503, "بوابة الدفع متاحة حاليًا مع تخزين SQLite فقط.");
+  }
+  if (!PAYMENT_CONFIGURED) {
+    throw paymentError(503, "إعداد Tap غير مكتمل؛ اضبط مفتاح API السري.");
+  }
+  if (!/^[A-Za-z0-9:_-]{8,160}$/.test(input.idempotencyKey)) {
+    throw paymentError(400, "مفتاح منع تكرار الدفع مفقود أو غير صالح.");
+  }
+  const baseUrl = normalizedPaymentBaseUrl(input.baseUrl);
+  const reservation = reservePayment(input.invoiceId, input.ownerUid, input.idempotencyKey);
+  if (reservation.replay) {
+    return {
+      ...paymentApiResponse(reservation.payment),
+      idempotent_replay: true,
+    };
+  }
+  if (!reservation.leaseToken) throw new Error("Payment reservation has no active lease.");
+
+  const redirectUrl = `${baseUrl}/pay/return?payment_id=${encodeURIComponent(reservation.payment.id)}`;
+  const webhookUrl = `${baseUrl}/api/payments/webhook`;
+  try {
+    const tapResult = await createTapCharge({
+      amount: reservation.payment.amount,
+      currency: reservation.payment.currency || "SAR",
+      customerName: reservation.invoice.customer_name || "عميل",
+      customerPhone: reservation.invoice.customer_phone || "",
+      invoiceId: reservation.invoice.id,
+      invoiceNumber: reservation.invoice.invoice_number || reservation.invoice.id,
+      ownerUid: input.ownerUid,
+      paymentId: reservation.payment.id,
+      idempotencyKey: providerIdempotencyKey(
+        input.ownerUid,
+        reservation.payment.idempotency_key || input.idempotencyKey,
+      ),
+      description: `دفع الفاتورة ${reservation.invoice.invoice_number || reservation.invoice.id}`,
+      redirectUrl,
+      webhookUrl,
+    });
+    const payment = finalizeReservedPayment(reservation.payment.id, reservation.leaseToken, tapResult);
+    logEvent("info", "payment.charge_created", {
+      paymentId: payment.id,
+      invoiceId: payment.invoice_id,
+      tapChargeId: payment.tap_charge_id,
+      amount: payment.amount,
+      status: payment.status,
+    });
+    if (payment.status === "failed" || payment.status === "cancelled") {
+      throw paymentError(409, "رفضت بوابة Tap عملية الدفع.");
+    }
+    return paymentApiResponse(payment);
+  } catch (error) {
+    const definitive = error instanceof TapChargeRequestError && error.definitive;
+    releasePaymentReservation(reservation.payment.id, reservation.leaseToken, error, definitive);
+    if ((error as { status?: number })?.status) throw error;
+    const message = error instanceof Error ? error.message : "فشل الاتصال ببوابة الدفع Tap.";
+    logError("payment.create_charge_failed", error, {
+      paymentId: reservation.payment.id,
+      ambiguous: !definitive,
+    });
+    throw paymentError(
+      502,
+      definitive ? message : `${message} أعد المحاولة بنفس الطلب؛ لن تُنشأ مطالبة مكررة.`,
+    );
+  }
+}
+
 function assertTapPayloadMatchesPayment(payment: PaymentRow, payload: TapChargePayload) {
   const payloadCurrency = tapCurrency(payload.currency);
   const paymentCurrency = tapCurrency(payment.currency);
@@ -644,11 +736,97 @@ function applyTapChargePayload(
 
 // ── Route Registration ────────────────────────────────────
 
+function escapeHtml(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function publicPaymentReturnHtml(payment: PaymentRow) {
+  const state =
+    payment.status === "completed"
+      ? {
+          title: "تم الدفع بنجاح",
+          message: "شكرًا لك. تم تسجيل الدفعة وتحديث الفاتورة.",
+        }
+      : payment.status === "failed" || payment.status === "cancelled"
+        ? {
+            title: "لم تكتمل عملية الدفع",
+            message: "لم تُسجل دفعة ناجحة. يمكنك العودة إلى واتساب وطلب رابط جديد.",
+          }
+        : {
+            title: "جاري التحقق من الدفعة",
+            message: "قد يستغرق تأكيد بوابة الدفع لحظات. لا تُعد الدفع قبل مراجعة حالته.",
+          };
+  const publicPhone = String(process.env.VITE_PUBLIC_CONTACT_PHONE || "").replace(/\D/g, "");
+  const whatsAppUrl = publicPhone
+    ? `https://wa.me/${publicPhone}?text=${encodeURIComponent(payment.status === "completed" ? "حجز موعد" : "أحتاج مساعدة في الدفع")}`
+    : "";
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>${escapeHtml(state.title)} | جولدن برو</title>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtml(state.title)}</h1>
+    <p>${escapeHtml(state.message)}</p>
+    <p>رقم العملية: ${escapeHtml(payment.id)}</p>
+    ${whatsAppUrl ? `<p><a href="${escapeHtml(whatsAppUrl)}">العودة إلى واتساب</a></p>` : ""}
+  </main>
+</body>
+</html>`;
+}
+
 /**
- * Register ONLY the unauthenticated webhook route.
- * Call this BEFORE the Firebase auth middleware so Tap can post webhooks.
+ * Register the unauthenticated Tap webhook and customer return page.
+ * Call this BEFORE the Firebase auth middleware.
  */
 export function registerPaymentWebhookRoute(app: Express) {
+  app.get(
+    "/pay/return",
+    asyncRoute(async (req: Request, res: Response) => {
+      if (!PAYMENT_STORE_SUPPORTED) throw paymentError(503, "بوابة الدفع غير متاحة على مزود البيانات الحالي.");
+      const paymentId = String(req.query.payment_id || "").trim();
+      if (!/^pay_[A-Za-z0-9_-]{12,80}$/.test(paymentId)) {
+        throw paymentError(400, "معرّف الدفع غير صالح.");
+      }
+      const payment = getPaymentById(paymentId);
+      if (!payment) throw paymentError(404, "عملية الدفع غير موجودة.");
+
+      const redirectTapId = String(req.query.tap_id || "").trim();
+      if (redirectTapId && !/^chg_[A-Za-z0-9_-]{3,180}$/.test(redirectTapId)) {
+        throw paymentError(400, "معرّف Tap غير صالح.");
+      }
+      if (redirectTapId && payment.tap_charge_id && payment.tap_charge_id !== redirectTapId) {
+        throw paymentError(409, "معرّف Tap لا يطابق سجل الدفع.");
+      }
+      const chargeId = redirectTapId || payment.tap_charge_id;
+      if (chargeId && PAYMENT_CONFIGURED) {
+        try {
+          const tapStatus = await getTapChargeStatus(chargeId);
+          if (String(tapStatus.id || "") !== chargeId) {
+            throw paymentError(409, "استجابة Tap لا تطابق معرّف رابط العودة.");
+          }
+          applyTapChargePayload(tapStatus as TapChargePayload, { expectedPaymentId: paymentId });
+        } catch (error) {
+          logError("payment.public_return_sync_failed", error, { paymentId });
+        }
+      }
+
+      const fresh = getPaymentById(paymentId) || payment;
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.status(200).type("html").send(publicPaymentReturnHtml(fresh));
+    }),
+  );
+
   // ── POST /api/payments/webhook — Tap webhook receiver (NO auth) ──
   app.post(
     "/api/payments/webhook",
@@ -716,58 +894,13 @@ export function registerPaymentRoutes(app: Express) {
       if (!/^[A-Za-z0-9:_-]{8,160}$/.test(idempotencyKey)) {
         throw paymentError(400, "مفتاح منع تكرار الدفع مفقود أو غير صالح.");
       }
-      const reservation = reservePayment(String(invoice_id), uid, idempotencyKey);
-      if (reservation.replay) {
-        res.status(200).json({ ...paymentApiResponse(reservation.payment), idempotent_replay: true });
-        return;
-      }
-      if (!reservation.leaseToken) throw new Error("Payment reservation has no active lease.");
-
-      const base = publicBaseUrl(req);
-      const host = req.get("host") || "";
-      const proto = req.get("x-forwarded-proto") || req.protocol || "http";
-      const derivedBase = host ? `${proto}://${host}` : base;
-      const redirectUrl = `${derivedBase}/app/invoices?payment_id=${encodeURIComponent(reservation.payment.id)}`;
-      const webhookUrl = `${derivedBase}/api/payments/webhook`;
-
-      try {
-        const tapResult = await createTapCharge({
-          amount: reservation.payment.amount,
-          currency: reservation.payment.currency || "SAR",
-          customerName: reservation.invoice.customer_name || "عميل",
-          customerPhone: reservation.invoice.customer_phone || "",
-          invoiceId: reservation.invoice.id,
-          invoiceNumber: reservation.invoice.invoice_number || reservation.invoice.id,
-          ownerUid: uid,
-          paymentId: reservation.payment.id,
-          idempotencyKey: providerIdempotencyKey(uid, reservation.payment.idempotency_key || idempotencyKey),
-          description: `دفع الفاتورة ${reservation.invoice.invoice_number || reservation.invoice.id}`,
-          redirectUrl,
-          webhookUrl,
-        });
-        const payment = finalizeReservedPayment(reservation.payment.id, reservation.leaseToken, tapResult);
-        logEvent("info", "payment.charge_created", {
-          paymentId: payment.id,
-          invoiceId: payment.invoice_id,
-          tapChargeId: payment.tap_charge_id,
-          amount: payment.amount,
-          status: payment.status,
-        });
-        if (payment.status === "failed" || payment.status === "cancelled") {
-          res.status(409).json({ ...paymentApiResponse(payment), error: "رفضت بوابة Tap عملية الدفع." });
-          return;
-        }
-        res.json(paymentApiResponse(payment));
-      } catch (err) {
-        const definitive = err instanceof TapChargeRequestError && err.definitive;
-        releasePaymentReservation(reservation.payment.id, reservation.leaseToken, err, definitive);
-        const message = err instanceof Error ? err.message : "فشل الاتصال ببوابة الدفع Tap.";
-        logError("payment.create_charge_failed", err, {
-          paymentId: reservation.payment.id,
-          ambiguous: !definitive,
-        });
-        throw paymentError(502, definitive ? message : `${message} أعد المحاولة بنفس الطلب؛ لن تُنشأ مطالبة مكررة.`);
-      }
+      const payment = await createPaymentLinkForInvoice({
+        invoiceId: String(invoice_id),
+        ownerUid: uid,
+        idempotencyKey,
+        baseUrl: publicBaseUrl(req),
+      });
+      res.json(payment);
     }),
   );
 

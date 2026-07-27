@@ -272,6 +272,7 @@ async function startServer() {
       "/webhooks/whatsapp",
       "/webhooks/telephony",
       "/api/payments/webhook",
+      "/pay/return",
     ],
     webhookRateLimit,
   );

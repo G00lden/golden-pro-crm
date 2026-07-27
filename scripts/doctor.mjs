@@ -194,8 +194,28 @@ async function main() {
       else ok("WHATSAPP_CLOUD_PHONE_NUMBER_ID مضبوط");
       if (!env.WHATSAPP_CLOUD_API_TOKEN) fail("WHATSAPP_CLOUD_API_TOKEN مطلوب");
       else ok(`WHATSAPP_CLOUD_API_TOKEN مضبوط (${masked(env.WHATSAPP_CLOUD_API_TOKEN)})`);
+      if (!env.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
+        fail("WHATSAPP_WEBHOOK_VERIFY_TOKEN مطلوب للتحقق من ربط Meta");
+      } else {
+        ok("WHATSAPP_WEBHOOK_VERIFY_TOKEN مضبوط");
+      }
+      if (!env.WHATSAPP_APP_SECRET && !env.WHATSAPP_WEBHOOK_SECRET) {
+        fail("WHATSAPP_APP_SECRET مطلوب لتوثيق رسائل Meta الواردة مباشرة");
+      } else {
+        ok("توقيع Webhook الوارد من واتساب مضبوط");
+      }
     } else {
       warn("WHATSAPP_PROVIDER ليس cloud_api. WhatsApp Web أفضل على VPS دائم وليس Cloud Run/Cloudflare.");
+    }
+
+    if (env.WHATSAPP_COMMERCE_ENABLED !== "false") {
+      if (!env.TAP_SECRET_KEY) {
+        fail("TAP_SECRET_KEY مطلوب لإنشاء روابط الدفع من واتساب");
+      } else {
+        ok(`TAP_SECRET_KEY مضبوط (${masked(env.TAP_SECRET_KEY)})`);
+      }
+    } else {
+      warn("WHATSAPP_COMMERCE_ENABLED=false؛ الدفع والحجز الذاتي عبر واتساب متوقفان");
     }
 
     if (env.STORE_WEBHOOK_CREATE_BOOKINGS === "true") {
