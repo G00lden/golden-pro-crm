@@ -205,6 +205,24 @@ async function main() {
       warn("SALLA_CART_WHATSAPP_ENABLED=false؛ متابعة السلات المتروكة متوقفة");
     }
 
+    if (env.SALLA_DELIVERY_REVIEW_ENABLED !== "false") {
+      const deliveredSlugs = String(env.SALLA_DELIVERED_STATUS_SLUGS || "delivered")
+        .split(/[,\s]+/)
+        .filter(Boolean);
+      if (!deliveredSlugs.includes("delivered")) {
+        warn("SALLA_DELIVERED_STATUS_SLUGS لا يحتوي delivered؛ تحقق من حالة تم التوصيل في سلة");
+      } else {
+        ok("حالة سلة delivered مفعلة لطلب تقييم ما بعد التوصيل");
+      }
+      if (env.WHATSAPP_PROVIDER === "cloud_api" && !env.WHATSAPP_CLOUD_TEMPLATE_DELIVERY_REVIEW_REQUEST) {
+        fail("WHATSAPP_CLOUD_TEMPLATE_DELIVERY_REVIEW_REQUEST مطلوب لقالب طلب تقييم التوصيل");
+      } else if (env.WHATSAPP_CLOUD_TEMPLATE_DELIVERY_REVIEW_REQUEST) {
+        ok("قالب واتساب لطلب تقييم التوصيل مربوط");
+      }
+    } else {
+      warn("SALLA_DELIVERY_REVIEW_ENABLED=false؛ طلب تقييم ما بعد التوصيل متوقف");
+    }
+
     if (env.WHATSAPP_PROVIDER === "cloud_api") {
       if (!env.WHATSAPP_CLOUD_PHONE_NUMBER_ID) fail("WHATSAPP_CLOUD_PHONE_NUMBER_ID مطلوب");
       else ok("WHATSAPP_CLOUD_PHONE_NUMBER_ID مضبوط");

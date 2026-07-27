@@ -10,6 +10,7 @@ import { evaluateCallReplyRecipient, evaluateCallReplySource } from "./callReply
 import { communicationPreferenceStore } from "./communicationPreferences";
 import { sallaCartConciergeStore } from "./sallaCartConcierge";
 import { saveWhatsAppCommerceSession } from "./whatsappCommerceStorage";
+import { deliveryReviewStore } from "./deliveryReview";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -134,6 +135,72 @@ function startSallaCartConversation(job: CommunicationJob) {
   });
 }
 
+function deliveryReviewId(job: CommunicationJob) {
+  return job.payload.purpose === "salla_delivery_review"
+    ? String(job.payload.orderId || "").trim()
+    : "";
+}
+
+function blockDeliveryReviewJob(job: CommunicationJob, reason: string) {
+  const blocked = communicationJobStore.markBlocked(job.id, reason);
+  const orderId = deliveryReviewId(job);
+  if (orderId) {
+    deliveryReviewStore.setOutreach(job.owner_uid, orderId, {
+      status: reason,
+      jobId: job.id,
+    });
+  }
+  return blocked;
+}
+
+function deliveryReviewAuthorization(job: CommunicationJob) {
+  const orderId = deliveryReviewId(job);
+  if (!orderId) return { allowed: true as const };
+  const review = deliveryReviewStore.get(job.owner_uid, orderId);
+  if (!review || !["queued", "retry"].includes(review.status)) {
+    return {
+      allowed: false as const,
+      reason: review ? `salla_delivery_review_${review.status}` : "salla_delivery_review_missing",
+    };
+  }
+  if (process.env.SALLA_DELIVERY_REVIEW_ENABLED === "false") {
+    return { allowed: false as const, reason: "salla_delivery_review_feature_disabled" };
+  }
+  const consent = communicationPreferenceStore.marketingEligibility(
+    job.owner_uid,
+    job.recipient_phone,
+    "whatsapp",
+  );
+  if (!consent.eligible) {
+    return {
+      allowed: false as const,
+      reason: `salla_delivery_review_${consent.reason || "not_eligible"}`,
+    };
+  }
+  return { allowed: true as const };
+}
+
+function startDeliveryReviewConversation(job: CommunicationJob) {
+  const orderId = deliveryReviewId(job);
+  if (!orderId) return;
+  saveWhatsAppCommerceSession(db, {
+    ownerUid: job.owner_uid,
+    phone: job.recipient_phone,
+    step: "awaiting_delivery_rating",
+    context: {
+      deliveryReview: {
+        orderId,
+        orderNumber: String(job.payload.orderNumber || orderId),
+        customerName: String(job.payload.customerName || ""),
+      },
+    },
+    ttlMinutes: Math.max(
+      60,
+      Math.min(7 * 24 * 60, Number(process.env.SALLA_DELIVERY_REVIEW_SESSION_MINUTES || 10080)),
+    ),
+  });
+}
+
 export async function processNextCommunicationJob(): Promise<CommunicationJob | null> {
   const job = communicationJobStore.claimNext();
   if (!job) return null;
@@ -168,6 +235,10 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     if (!cartAuthorization.allowed) {
       return blockSallaCartJob(job, cartAuthorization.reason);
     }
+    const reviewAuthorization = deliveryReviewAuthorization(job);
+    if (!reviewAuthorization.allowed) {
+      return blockDeliveryReviewJob(job, reviewAuthorization.reason);
+    }
     const guard = communicationCampaignStore.guardJob(job);
     if (guard.action === "defer") {
       const deferred = communicationJobStore.defer(job.id, 60_000, guard.reason);
@@ -193,7 +264,9 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     if (isDryRunSendResult(result)) {
       const blocked = sallaCartId(job)
         ? blockSallaCartJob(job, result.reason)
-        : communicationJobStore.markBlocked(job.id, result.reason);
+        : deliveryReviewId(job)
+          ? blockDeliveryReviewJob(job, result.reason)
+          : communicationJobStore.markBlocked(job.id, result.reason);
       if (blocked) updateCall(blocked, "blocked");
       if (blocked) communicationCampaignStore.updateRecipient(blocked, "blocked", result.reason);
       if (blocked) updateBulkRun(blocked);
@@ -210,6 +283,16 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
       });
       startSallaCartConversation(job);
     }
+    const orderId = deliveryReviewId(job);
+    if (sent && orderId) {
+      deliveryReviewStore.setOutreach(job.owner_uid, orderId, {
+        status: "sent",
+        jobId: job.id,
+        providerMessageId: result.messageId,
+        requestedAt: sent.sent_at,
+      });
+      startDeliveryReviewConversation(job);
+    }
     if (sent) updateCall(sent, "sent", true);
     if (sent) communicationCampaignStore.updateRecipient(sent, "sent", null, result.messageId);
     if (sent) updateBulkRun(sent);
@@ -220,6 +303,13 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     const cartId = sallaCartId(job);
     if (failed && cartId) {
       sallaCartConciergeStore.setOutreach(job.owner_uid, cartId, {
+        status: failed.status,
+        jobId: job.id,
+      });
+    }
+    const orderId = deliveryReviewId(job);
+    if (failed && orderId) {
+      deliveryReviewStore.setOutreach(job.owner_uid, orderId, {
         status: failed.status,
         jobId: job.id,
       });

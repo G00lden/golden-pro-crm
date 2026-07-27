@@ -23,7 +23,9 @@ export type WhatsAppCommerceStep =
   | "awaiting_installation"
   | "awaiting_product"
   | "awaiting_slot"
-  | "awaiting_cart_question";
+  | "awaiting_cart_question"
+  | "awaiting_delivery_rating"
+  | "awaiting_delivery_feedback";
 
 export type WhatsAppCommerceSession<TContext extends Record<string, unknown> = Record<string, unknown>> = {
   owner_uid: string;

@@ -14,6 +14,10 @@ import {
   sallaCartConciergeStore,
 } from "./sallaCartConcierge";
 import type { SallaCartProductContext } from "./sallaCartConciergeStorage";
+import {
+  recordDeliveryFeedback,
+  recordDeliveryRating,
+} from "./deliveryReview";
 
 type CustomerRow = {
   id: string;
@@ -77,6 +81,11 @@ type CommerceContext = {
     customerName?: string;
     products: SallaCartProductContext[];
     selectedProductIndex?: number;
+  };
+  deliveryReview?: {
+    orderId: string;
+    orderNumber: string;
+    customerName?: string;
   };
 };
 
@@ -625,6 +634,95 @@ function handleCartQuestion(
   };
 }
 
+function handleDeliveryRating(
+  ownerUid: string,
+  phone: string,
+  text: string,
+  context: CommerceContext,
+  now: Date,
+): WhatsAppCommerceResult {
+  const review = context.deliveryReview;
+  if (!review?.orderId) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "delivery_review_context_missing" };
+  }
+  const rating = choiceNumber(text);
+  if (!rating || rating < 1 || rating > 5) {
+    return {
+      handled: true,
+      kind: "delivery_rating_retry",
+      reply: "فضلاً أرسل رقمًا واحدًا من 1 إلى 5 لتقييم تجربتك.",
+    };
+  }
+
+  const result = recordDeliveryRating(ownerUid, review.orderId, rating, now.toISOString());
+  if (!result.review) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "delivery_review_missing" };
+  }
+  if (rating <= 3) {
+    saveWhatsAppCommerceSession(db, {
+      ownerUid,
+      phone,
+      step: "awaiting_delivery_feedback",
+      context: context as Record<string, unknown>,
+      now: now.toISOString(),
+      ttlMinutes: Math.max(
+        60,
+        Math.min(7 * 24 * 60, Number(process.env.SALLA_DELIVERY_REVIEW_SESSION_MINUTES || 10080)),
+      ),
+    });
+    return {
+      handled: true,
+      kind: "delivery_rating_low",
+      reason: result.taskId || undefined,
+      reply: "نأسف أن تجربتك لم تكن بالمستوى المطلوب. ما الذي يمكننا تحسينه؟ اكتب ملاحظتك وسيتابعها فريقنا.",
+    };
+  }
+
+  clearWhatsAppCommerceSession(db, ownerUid, phone);
+  return {
+    handled: true,
+    kind: "delivery_rating_submitted",
+    reply: "شكرًا لتقييمك 🌟 سعدنا بخدمتك، ورأيك يساعدنا على تقديم تجربة أفضل.",
+  };
+}
+
+function handleDeliveryFeedback(
+  ownerUid: string,
+  phone: string,
+  originalText: string,
+  context: CommerceContext,
+  now: Date,
+): WhatsAppCommerceResult {
+  const review = context.deliveryReview;
+  if (!review?.orderId) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "delivery_review_context_missing" };
+  }
+  const feedback = originalText.trim();
+  if (feedback.length < 3) {
+    return {
+      handled: true,
+      kind: "delivery_feedback_retry",
+      reply: "اكتب ملاحظتك باختصار حتى يتمكن فريقنا من متابعتها معك.",
+    };
+  }
+  const result = recordDeliveryFeedback(
+    ownerUid,
+    review.orderId,
+    feedback,
+    now.toISOString(),
+  );
+  clearWhatsAppCommerceSession(db, ownerUid, phone);
+  return {
+    handled: true,
+    kind: "delivery_feedback_escalated",
+    reason: result.taskId || undefined,
+    reply: "شكرًا لتوضيحك. سجلنا ملاحظتك كمتابعة عاجلة وسيتواصل معك الفريق لمعالجتها.",
+  };
+}
+
 function customerFromContext(ownerUid: string, phone: string, context: CommerceContext) {
   const byId = context.customerId
     ? db.prepare(
@@ -1018,6 +1116,12 @@ export async function handleWhatsAppCommerceConversation(
   }
 
   const context = sessionContext(session);
+  if (session.step === "awaiting_delivery_rating") {
+    return handleDeliveryRating(input.ownerUid, phone, text, context, now);
+  }
+  if (session.step === "awaiting_delivery_feedback") {
+    return handleDeliveryFeedback(input.ownerUid, phone, input.text, context, now);
+  }
   if (session.step === "awaiting_cart_question") {
     return handleCartQuestion(input.ownerUid, phone, input.text, text, context, now);
   }

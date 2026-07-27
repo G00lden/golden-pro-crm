@@ -41,6 +41,10 @@ import {
   sallaCartId,
   SALLA_CART_EVENTS,
 } from "./sallaCartConcierge";
+import {
+  isDeliveredSallaStatus,
+  queueDeliveryReview,
+} from "./deliveryReview";
 
 type SallaIntegrationRecord = {
   provider: "salla";
@@ -2357,7 +2361,17 @@ async function applySignedSallaOrderPatch(
     remoteOrderId,
     source: "salla_webhook",
   });
-  return { orderDocId, existed: true, stale: false, status };
+  const deliveryReview = isDeliveredSallaStatus(status.slug)
+    ? queueDeliveryReview({
+        ownerUid: currentUid,
+        orderId: remoteOrderId,
+        orderNumber: firstText(current.order_number, current.orderNumber, remoteOrderId),
+        customerName: firstText(current.customer_name, current.customerName),
+        customerPhone: firstText(current.customer_phone, current.customerPhone),
+        deliveredAt: occurredAt,
+      })
+    : null;
+  return { orderDocId, existed: true, stale: false, status, deliveryReview };
 }
 
 function remoteOrderProjectionExtras(remoteOrder: Record<string, any>, origin: "salla_webhook" | "salla_command") {
@@ -2408,11 +2422,23 @@ async function persistAuthoritativeSallaOrder(
     ? await importStoreOrderForUser(currentUid, normalized, extras)
     : await projectStoreOrderForUser(currentUid, normalized, extras);
   if (imported.booking_ids.length) queueFieldTechSync("salla_webhook_booking_ready");
+  const status = sallaRemoteStatus(remoteOrder);
+  const deliveryReview = isDeliveredSallaStatus(status.slug)
+    ? queueDeliveryReview({
+        ownerUid: currentUid,
+        orderId: normalized.orderId,
+        orderNumber: normalized.orderNumber,
+        customerName: normalized.customerName,
+        customerPhone: normalized.customerPhone,
+        deliveredAt: options.occurredAt || firstText(extras.last_event_at) || nowIso(),
+      })
+    : null;
   return {
     normalized,
     imported,
     orderDocId: getStoreOrderDocId(currentUid, "salla", normalized.orderId),
-    status: sallaRemoteStatus(remoteOrder),
+    status,
+    deliveryReview,
   };
 }
 

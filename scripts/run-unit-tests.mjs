@@ -34,6 +34,7 @@ const files = [
   "server/sallaOrderCommandJournal.test.ts",
   "server/sallaOrderInbox.test.ts",
   "server/sallaCartConcierge.test.ts",
+  "server/deliveryReview.test.ts",
   "server/crmValidation.test.ts",
   "server/crmApi.invoice.test.ts",
   "server/crmApi.invoiceLegacy.test.ts",

@@ -40,6 +40,7 @@ const TEMPLATE_FIELD_DEFINITIONS = {
   department_name: { key: "department_name", label: "اسم القسم", placeholder: "مثال: الصيانة…", autoComplete: "off" },
   agent_name: { key: "agent_name", label: "اسم الموظف المتابع", placeholder: "مثال: سارة أحمد…", autoComplete: "name" },
   customer_phone: { key: "customer_phone", label: "رقم العميل", placeholder: "مثال: 0500000000…", type: "tel", inputMode: "tel", autoComplete: "tel", dir: "ltr" },
+  order_number: { key: "order_number", label: "رقم الطلب", placeholder: "مثال: 12345…", inputMode: "numeric", autoComplete: "off", dir: "ltr" },
   call_time: { key: "call_time", label: "وقت المكالمة", placeholder: "مثال: 2026-07-13 14:30…", type: "datetime-local", autoComplete: "off", dir: "ltr" },
   message: { key: "message", label: "نص التذكير", placeholder: "اكتب الرسالة التي ستظهر داخل القالب…", autoComplete: "off", multiline: true },
 } satisfies Record<string, TemplateVariableField>;
@@ -61,6 +62,7 @@ const TEMPLATE_VARIABLE_FIELDS: Record<string, TemplateVariableField[]> = {
   missed_call_customer: fieldsFor("department_name", "agent_name"),
   missed_call_agent: fieldsFor("department_name", "customer_phone", "call_time"),
   abandoned_cart_support: fieldsFor("customer_name", "product_names", "checkout_url"),
+  delivery_review_request: fieldsFor("customer_name", "order_number"),
   general_reminder: fieldsFor("message"),
 };
 
