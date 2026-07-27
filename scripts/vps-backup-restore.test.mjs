@@ -132,6 +132,10 @@ test("VPS backup uses external storage, one lock, unique snapshots, and guarded 
   assert.match(backup, /_salla-integrations-\$\{RUN_ID\}\.json/);
   assert.match(backup, /const source = "\/app\/\.runtime\/salla-integrations\.json"/);
   assert.match(backup, /chmod 600 "\$DEST\/salla-integrations\.json"/);
+  assert.match(backup, /docker cp "\$CID:\/app\/\.runtime\/whatsapp-campaign-media\/\." "\$DEST\/campaign-media"/);
+  assert.match(backup, /campaign-media\.tar\.gz/);
+  assert.match(backup, /Campaign media contains a non-whitelisted filename/);
+  assert.match(backup, /\[ "\$CAMPAIGN_MEDIA_PRESENT" = true \] && manifest_files\+=\("campaign-media\.tar\.gz"\)/);
   assert.match(backup, /docker cp "\$CID:\/app\/\.wa-session\/\." "\$DEST\/wa-session"[^\n]*\n\s*\|\| fail/);
   assert.match(backup, /WhatsApp session volume is missing/);
   assert.match(backup, /manifest_files\+=\("wa-session\.tar\.gz"\)/);
@@ -193,7 +197,7 @@ test("VPS restore enforces manifest whitelist, disables safety pruning, and chec
   assert.match(restore, /COMPOSE\+=\(--project-name "\$COMPOSE_PROJECT"\)/);
   assert.match(restore, /backup manifest must include golden-crm\.db\.gz/);
   assert.match(restore, /local -a allowed=/);
-  for (const payload of ["golden-crm.db.gz", "salla-integrations.json", "wa-session.tar.gz", "env.production"]) {
+  for (const payload of ["golden-crm.db.gz", "salla-integrations.json", "campaign-media.tar.gz", "wa-session.tar.gz", "env.production"]) {
     assert.ok(restore.includes(`"${payload}"`), `manifest whitelist is missing ${payload}`);
   }
   assert.match(restore, /BACKUP_PRUNE_ENABLED=false/);
@@ -201,6 +205,9 @@ test("VPS restore enforces manifest whitelist, disables safety pruning, and chec
   assert.match(restore, /pragma\("integrity_check"\)/);
   assert.match(restore, /docker cp "\$SALLA_SRC" "\$CID:\/app\/\.runtime\/salla-integrations\.json"/);
   assert.match(restore, /validate_wa_archive "\$SRC\/wa-session\.tar\.gz"/);
+  assert.match(restore, /validate_campaign_media_archive "\$CAMPAIGN_MEDIA_SRC"/);
+  assert.match(restore, /target=\/app\/\.runtime\/whatsapp-campaign-media/);
+  assert.match(restore, /Restored campaign media permissions are invalid/);
   assert.match(restore, /find "\$target" -mindepth 1 -maxdepth 1 ! -name/);
   assert.match(restore, /chown -R node:node "\$stage"/);
   assert.doesNotMatch(restore, /wa-session[\s\S]{0,220}?docker cp[\s\S]{0,80}?\|\| true/);
@@ -1487,6 +1494,49 @@ test("WhatsApp archive validator rejects traversal before extraction", () => {
     const rejected = runValidator(traversalArchive);
     assert.notEqual(rejected.status, 0);
     assert.match(rejected.stderr, /unsafe path/i);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("campaign media archive validator accepts only opaque image and video names", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "crm-campaign-media-archive-test-"));
+  const root = path.join(directory, "root");
+  const media = path.join(root, "campaign-media");
+  const goodArchive = path.join(directory, "good.tar.gz");
+  const badArchive = path.join(directory, "bad.tar.gz");
+  mkdirSync(media, { recursive: true });
+  writeFileSync(path.join(media, `${"a".repeat(48)}.png`), "png", "utf8");
+  const validator = shellFunction(
+    restore,
+    "validate_campaign_media_archive",
+    'if [ -f "$CAMPAIGN_MEDIA_SRC" ]',
+  );
+  const runValidator = (archivePath) => spawnSync(
+    "bash",
+    ["-c", `${validator}\nvalidate_campaign_media_archive "$1"`, "campaign-media-test", toBashPath(archivePath)],
+    { encoding: "utf8" },
+  );
+
+  try {
+    const good = spawnSync(
+      "bash",
+      ["-c", 'tar -czf "$1" -C "$2" campaign-media', "media-pack", toBashPath(goodArchive), toBashPath(root)],
+      { encoding: "utf8" },
+    );
+    assert.equal(good.status, 0, good.stderr);
+    assert.equal(runValidator(goodArchive).status, 0);
+
+    writeFileSync(path.join(media, "customer-name.png"), "png", "utf8");
+    const bad = spawnSync(
+      "bash",
+      ["-c", 'tar -czf "$1" -C "$2" campaign-media', "media-pack", toBashPath(badArchive), toBashPath(root)],
+      { encoding: "utf8" },
+    );
+    assert.equal(bad.status, 0, bad.stderr);
+    const rejected = runValidator(badArchive);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /unsafe path or filename/i);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

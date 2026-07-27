@@ -151,6 +151,35 @@ test("delivered and read campaign receipts still enforce the frequency cap", () 
   database.close();
 });
 
+test("a queued recipient reserves the frequency cap across concurrent campaigns", () => {
+  const { database, preferences, campaigns } = system();
+  customer(database, "c1", "0501234567");
+  preferences.setPreference({ ownerUid: "o1", phone: "0501234567", status: "granted", evidence: "form" });
+  const first = campaigns.create({
+    ownerUid: "o1",
+    name: "First queued campaign",
+    templateName: "general_reminder",
+    audienceFilter: { allCustomers: true },
+    frequencyCapDays: 7,
+  });
+  const second = campaigns.create({
+    ownerUid: "o1",
+    name: "Second concurrent campaign",
+    templateName: "general_reminder",
+    audienceFilter: { allCustomers: true },
+    frequencyCapDays: 7,
+  });
+
+  campaigns.launch("o1", first.id);
+  const preview = campaigns.preview("o1", second.id)!;
+  assert.equal(preview.eligible, 0);
+  assert.deepEqual(preview.excluded, { frequency_cap: 1 });
+  const launched = campaigns.launch("o1", second.id)!;
+  assert.equal(launched.stats.queued, 0);
+  assert.equal(launched.stats.skipped, 1);
+  database.close();
+});
+
 test("media campaigns queue a Meta header plus fixed order, filter, and booking buttons", () => {
   const { database, preferences, jobs, campaigns } = system();
   customer(database, "c1", "0501234567");

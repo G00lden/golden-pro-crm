@@ -1,8 +1,17 @@
 import db from "./db";
-import { communicationJobStore, type CommunicationJob } from "./communicationJobs";
+import {
+  communicationJobStore,
+  PROVIDER_ATTEMPT_STARTED,
+  type CommunicationJob,
+} from "./communicationJobs";
 import { isDryRunSendResult } from "./outboundSafety";
 import { listTemplateNames, type TemplateName } from "./whatsappTemplates";
-import { sendWhatsAppTemplate } from "./whatsapp";
+import {
+  isAmbiguousWhatsAppSendError,
+  isWhatsAppConfigurationError,
+  sendWhatsAppTemplate,
+  whatsappService,
+} from "./whatsapp";
 import { logError, logEvent } from "./logger";
 import type { RenderVars } from "./whatsappTemplates";
 import { communicationCampaignStore } from "./communicationCampaigns";
@@ -19,6 +28,15 @@ import { sanitizeWhatsAppCloudTemplateOptions } from "./whatsappCampaignOffer";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
+
+export function communicationJobLeaseMs() {
+  const configured = Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS || 10_000);
+  const providerTimeout = Math.max(
+    1_000,
+    Math.min(120_000, Number.isFinite(configured) ? configured : 10_000),
+  );
+  return Math.max(30_000, providerTimeout + 15_000);
+}
 
 function isTemplateName(value: string | null): value is TemplateName {
   return Boolean(value && listTemplateNames().includes(value as TemplateName));
@@ -207,7 +225,7 @@ function startDeliveryReviewConversation(job: CommunicationJob) {
 }
 
 export async function processNextCommunicationJob(): Promise<CommunicationJob | null> {
-  const job = communicationJobStore.claimNext();
+  const job = communicationJobStore.claimNext(communicationJobLeaseMs());
   if (!job) return null;
   updateCall(job, "processing");
   if (bookingAssignmentNotificationId(job)) {
@@ -216,6 +234,15 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
   if (job.campaign_id) communicationCampaignStore.updateRecipient(job, "processing");
 
   try {
+    if (job.campaign_id && job.last_error === PROVIDER_ATTEMPT_STARTED) {
+      const blocked = communicationJobStore.markBlocked(job.id, "ambiguous_provider_outcome");
+      if (blocked) communicationCampaignStore.updateRecipient(
+        blocked,
+        "blocked",
+        "ambiguous_provider_outcome",
+      );
+      return blocked;
+    }
     const bulkAuth = bulkAuthorization(job);
     if (!bulkAuth.allowed) {
       const blocked = communicationJobStore.markBlocked(job.id, "call_bulk_authorization_missing");
@@ -266,8 +293,30 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     if (job.kind !== "whatsapp_template" || !isTemplateName(job.template_name)) {
       throw new Error(`Unsupported communication job: ${job.kind}/${job.template_name || "missing-template"}`);
     }
+    if (job.campaign_id && whatsappService.getStatus().provider !== "cloud_api") {
+      const blocked = communicationJobStore.markBlocked(job.id, "campaign_requires_cloud_api");
+      if (blocked) communicationCampaignStore.updateRecipient(
+        blocked,
+        "blocked",
+        "campaign_requires_cloud_api",
+      );
+      return blocked;
+    }
+    const finalGuard = communicationCampaignStore.guardJob(job);
+    if (finalGuard.action !== "send") {
+      const blocked = finalGuard.action === "defer"
+        ? communicationJobStore.defer(job.id, 60_000, finalGuard.reason)
+        : communicationJobStore.markBlocked(job.id, finalGuard.reason);
+      if (blocked) communicationCampaignStore.updateRecipient(
+        blocked,
+        finalGuard.action === "defer" ? "queued" : "blocked",
+        finalGuard.reason,
+      );
+      return blocked;
+    }
     const vars = renderVars(job.payload.vars && typeof job.payload.vars === "object" ? job.payload.vars : job.payload);
     const templateOptions = sanitizeWhatsAppCloudTemplateOptions(job.payload.templateOptions);
+    communicationJobStore.markProviderAttemptStarted(job.id);
     const result = await sendWhatsAppTemplate({
       phone: job.recipient_phone,
       template: job.template_name,
@@ -323,7 +372,16 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     logEvent("info", "communication.job.sent", { jobId: job.id, kind: job.kind, role: job.role });
     return sent;
   } catch (error) {
-    const failed = communicationJobStore.markFailed(job.id, error);
+    const blockedReason = job.campaign_id
+      ? isAmbiguousWhatsAppSendError(error)
+        ? "ambiguous_provider_outcome"
+        : isWhatsAppConfigurationError(error)
+          ? "whatsapp_configuration_error"
+          : null
+      : null;
+    const failed = blockedReason
+      ? communicationJobStore.markBlocked(job.id, blockedReason)
+      : communicationJobStore.markFailed(job.id, error);
     const cartId = sallaCartId(job);
     if (failed && cartId) {
       sallaCartConciergeStore.setOutreach(job.owner_uid, cartId, {

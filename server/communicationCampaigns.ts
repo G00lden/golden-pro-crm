@@ -228,8 +228,16 @@ export function createCommunicationCampaignStore(
     const cutoff = new Date(Date.now() - campaign.frequency_cap_days * 24 * 60 * 60_000).toISOString();
     return Boolean(database.prepare(
       `SELECT 1 FROM communication_campaign_recipients
-       WHERE owner_uid = ? AND phone = ? AND status IN ('sent','delivered','read') AND sent_at >= ? LIMIT 1`,
-    ).get(campaign.owner_uid, phone, cutoff));
+       WHERE owner_uid = ? AND phone = ?
+         AND (
+           (status IN ('eligible','queued','processing','retry') AND created_at >= ?)
+           OR (
+             status IN ('sent','delivered','read')
+             AND COALESCE(sent_at, created_at) >= ?
+           )
+         )
+       LIMIT 1`,
+    ).get(campaign.owner_uid, phone, cutoff, cutoff));
   };
 
   const assess = (campaign: Campaign) => {

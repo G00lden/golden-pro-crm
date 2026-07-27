@@ -38,7 +38,33 @@ test("campaign order buttons are restricted to the approved Meta URL prefix", (t
   assert.equal(options.buttons?.[2].type, "quick_reply");
 });
 
-test("uploaded campaign media is opaque, public-addressable, and signature checked", (t) => {
+function mp4Box(type: string, ...parts: Buffer[]) {
+  const payload = Buffer.concat(parts);
+  const output = Buffer.alloc(8 + payload.length);
+  output.writeUInt32BE(output.length, 0);
+  output.write(type, 4, 4, "ascii");
+  payload.copy(output, 8);
+  return output;
+}
+
+function structurallyValidMp4() {
+  const ftyp = mp4Box("ftyp", Buffer.from("isom"), Buffer.alloc(4), Buffer.from("isommp42"));
+  const sampleTable = mp4Box("stbl", mp4Box("stsd", Buffer.alloc(8)));
+  const media = mp4Box(
+    "mdia",
+    mp4Box("mdhd", Buffer.alloc(20)),
+    mp4Box("hdlr", Buffer.alloc(8), Buffer.from("vide"), Buffer.alloc(12)),
+    mp4Box("minf", sampleTable),
+  );
+  const movie = mp4Box(
+    "moov",
+    mp4Box("mvhd", Buffer.alloc(20)),
+    mp4Box("trak", mp4Box("tkhd", Buffer.alloc(20)), media),
+  );
+  return Buffer.concat([ftyp, movie, mp4Box("mdat", Buffer.from([1, 2, 3, 4]))]);
+}
+
+test("uploaded campaign media is opaque, public-addressable, and structurally validated", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wa-campaign-media-"));
   const original = process.env.WHATSAPP_CAMPAIGN_MEDIA_DIR;
   t.after(() => {
@@ -47,10 +73,7 @@ test("uploaded campaign media is opaque, public-addressable, and signature check
     else process.env.WHATSAPP_CAMPAIGN_MEDIA_DIR = original;
   });
   process.env.WHATSAPP_CAMPAIGN_MEDIA_DIR = directory;
-  const png = Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    Buffer.from("test-image"),
-  ]);
+  const png = fs.readFileSync(new URL("../public/brand/icon-32.png", import.meta.url));
   const stored = saveWhatsAppCampaignMedia({
     contentType: "image/png",
     body: png,
@@ -66,7 +89,34 @@ test("uploaded campaign media is opaque, public-addressable, and signature check
       body: Buffer.from("not a png"),
       publicBaseUrl: "https://crm.example.test",
     }),
-    /does not match/,
+    /malformed|does not match/,
+  );
+  assert.throws(
+    () => saveWhatsAppCampaignMedia({
+      contentType: "image/png",
+      body: Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("signature-only payload"),
+      ]),
+      publicBaseUrl: "https://crm.example.test",
+    }),
+    /malformed/,
+  );
+  assert.equal(
+    saveWhatsAppCampaignMedia({
+      contentType: "video/mp4",
+      body: structurallyValidMp4(),
+      publicBaseUrl: "https://crm.example.test",
+    }).type,
+    "video",
+  );
+  assert.throws(
+    () => saveWhatsAppCampaignMedia({
+      contentType: "video/mp4",
+      body: Buffer.concat([Buffer.alloc(4), Buffer.from("ftyp"), Buffer.alloc(20)]),
+      publicBaseUrl: "https://crm.example.test",
+    }),
+    /malformed/,
   );
 });
 

@@ -47,11 +47,16 @@ https://goldenksa.store/{{1}}
 ```dotenv
 WHATSAPP_CLOUD_TEMPLATE_CAMPAIGN_OFFER_IMAGE=approved_image_template_name
 WHATSAPP_CLOUD_TEMPLATE_CAMPAIGN_OFFER_VIDEO=approved_video_template_name
+WHATSAPP_CLOUD_WABA_ID=your_whatsapp_business_account_id
 WHATSAPP_CLOUD_TEMPLATE_LANGUAGE=ar
 WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX=https://goldenksa.store/
 PUBLIC_BASE_URL=https://crm.example.com
 WHATSAPP_CAMPAIGN_MEDIA_DIR=.runtime/whatsapp-campaign-media
 ```
+
+قبل إطلاق الحملة، يتحقق النظام مباشرة من Meta أن القالب موجود داخل حساب
+`WABA`، وحالته `APPROVED`، ولغته وترويسة الوسائط ومتغيراته وأزراره الثلاثة
+مطابقة للعقد. وجود اسم القالب في ملف البيئة وحده لا يسمح بالإطلاق.
 
 قيمة `WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX` يجب أن تطابق الجزء الثابت في زر URL داخل قالب Meta وتنتهي بـ`/`. يمنع النظام روابط الطلب خارج هذا الجزء الثابت.
 

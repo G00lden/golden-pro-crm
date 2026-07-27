@@ -88,6 +88,8 @@ export function retryDelayMs(attempts: number): number {
   return Math.min(15 * 60_000, 30_000 * 2 ** Math.max(0, attempts - 1));
 }
 
+export const PROVIDER_ATTEMPT_STARTED = "provider_attempt_started";
+
 export function createCommunicationJobStore(database: Database.Database) {
   const get = (jobId: string) => row(
     database.prepare("SELECT * FROM communication_jobs WHERE id = ?").get(jobId) as Record<string, unknown> | undefined,
@@ -168,6 +170,14 @@ export function createCommunicationJobStore(database: Database.Database) {
     return get(jobId);
   };
 
+  const markProviderAttemptStarted = (jobId: string) => {
+    database.prepare(
+      `UPDATE communication_jobs SET last_error = ?, updated_at = ?
+       WHERE id = ? AND status = 'processing'`,
+    ).run(PROVIDER_ATTEMPT_STARTED, nowIso(), jobId);
+    return get(jobId);
+  };
+
   const markBlocked = (jobId: string, reason: string) => {
     database.prepare(
       "UPDATE communication_jobs SET status = 'blocked', last_error = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND status = 'processing'",
@@ -232,7 +242,18 @@ export function createCommunicationJobStore(database: Database.Database) {
     };
   };
 
-  return { enqueue, get, claimNext, markSent, markBlocked, markFailed, defer, listRecent, summary };
+  return {
+    enqueue,
+    get,
+    claimNext,
+    markProviderAttemptStarted,
+    markSent,
+    markBlocked,
+    markFailed,
+    defer,
+    listRecent,
+    summary,
+  };
 }
 
 export const communicationJobStore = createCommunicationJobStore(db);

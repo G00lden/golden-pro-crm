@@ -3,8 +3,8 @@
 #
 #   bash scripts/vps-restore.sh /var/backups/golden-pro-crm/<backup-dir>
 #
-# Restores SQLite, Salla integration state, and the WhatsApp session. The CRM
-# stays stopped if any integrity or ownership check fails.
+# Restores SQLite, Salla integration state, WhatsApp campaign media, and the
+# linked-device session. The CRM stays stopped if any integrity check fails.
 set -euo pipefail
 umask 077
 
@@ -161,7 +161,7 @@ validate_backup_source_entries() {
     name="${entry##*/}"
     case "$name" in
       .incomplete) fail "Backup source is marked incomplete." ;;
-      manifest.sha256|golden-crm.db.gz|salla-integrations.json|wa-session.tar.gz|env.production) ;;
+      manifest.sha256|golden-crm.db.gz|salla-integrations.json|campaign-media.tar.gz|wa-session.tar.gz|env.production) ;;
       *) fail "Backup source contains a non-whitelisted entry." ;;
     esac
     validate_trusted_regular_file "$entry" "Backup source payload"
@@ -190,6 +190,7 @@ stage_backup_source() {
     "manifest.sha256"
     "golden-crm.db.gz"
     "salla-integrations.json"
+    "campaign-media.tar.gz"
     "wa-session.tar.gz"
     "env.production"
   )
@@ -212,6 +213,7 @@ validate_manifest() {
   local -a allowed=(
     "golden-crm.db.gz"
     "salla-integrations.json"
+    "campaign-media.tar.gz"
     "wa-session.tar.gz"
     "env.production"
   )
@@ -223,7 +225,7 @@ validate_manifest() {
   }
 
   while IFS= read -r line || [ -n "$line" ]; do
-    if [[ ! "$line" =~ ^([[:xdigit:]]{64})[[:space:]][[:space:]*](golden-crm\.db\.gz|salla-integrations\.json|wa-session\.tar\.gz|env\.production)$ ]]; then
+    if [[ ! "$line" =~ ^([[:xdigit:]]{64})[[:space:]][[:space:]*](golden-crm\.db\.gz|salla-integrations\.json|campaign-media\.tar\.gz|wa-session\.tar\.gz|env\.production)$ ]]; then
       echo "backup manifest contains a malformed or non-whitelisted entry." >&2
       return 1
     fi
@@ -259,7 +261,7 @@ validate_manifest() {
 
   while IFS= read -r entry; do
     case "$entry" in
-      manifest.sha256|golden-crm.db.gz|salla-integrations.json|wa-session.tar.gz|env.production) ;;
+      manifest.sha256|golden-crm.db.gz|salla-integrations.json|campaign-media.tar.gz|wa-session.tar.gz|env.production) ;;
       *)
         echo "backup directory contains a non-whitelisted entry: $entry" >&2
         return 1
@@ -278,6 +280,7 @@ chmod 500 -- "$STAGED_SRC"
 SRC="$STAGED_SRC"
 DB_GZ="$SRC/golden-crm.db.gz"
 SALLA_SRC="$SRC/salla-integrations.json"
+CAMPAIGN_MEDIA_SRC="$SRC/campaign-media.tar.gz"
 [ -f "$DB_GZ" ] || { echo "no golden-crm.db.gz in $SRC" >&2; exit 1; }
 
 validate_wa_archive() {
@@ -317,6 +320,40 @@ validate_wa_archive() {
 if [ -f "$SRC/wa-session.tar.gz" ]; then
   log "validating WhatsApp session archive paths and file types"
   validate_wa_archive "$SRC/wa-session.tar.gz"
+fi
+
+validate_campaign_media_archive() {
+  local archive="$1"
+  local listing types
+  listing="$(mktemp "${TMPDIR:-/tmp}/golden-crm-campaign-media-list.XXXXXX")"
+  types="$(mktemp "${TMPDIR:-/tmp}/golden-crm-campaign-media-types.XXXXXX")"
+  if ! tar -tzf "$archive" --quoting-style=escape > "$listing" \
+    || ! tar -tvzf "$archive" --quoting-style=escape > "$types"; then
+    rm -f -- "$listing" "$types"
+    echo "Campaign media archive cannot be inspected." >&2
+    return 1
+  fi
+  if ! awk '
+    BEGIN { count=0 }
+    $0 !~ /^campaign-media\/?$/ && $0 !~ /^campaign-media\/[a-f0-9]{48}\.(jpg|png|mp4)$/ { exit 1 }
+    { count++ }
+    END { if (count == 0) exit 1 }
+  ' "$listing"; then
+    rm -f -- "$listing" "$types"
+    echo "Campaign media archive contains an unsafe path or filename." >&2
+    return 1
+  fi
+  if ! awk 'substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { exit 1 }' "$types"; then
+    rm -f -- "$listing" "$types"
+    echo "Campaign media archive contains a link or special file." >&2
+    return 1
+  fi
+  rm -f -- "$listing" "$types"
+}
+
+if [ -f "$CAMPAIGN_MEDIA_SRC" ]; then
+  log "validating WhatsApp campaign media archive"
+  validate_campaign_media_archive "$CAMPAIGN_MEDIA_SRC"
 fi
 
 CID="$("${COMPOSE[@]}" ps -q crm)"
@@ -399,6 +436,40 @@ else
   log "backup has no Salla state; preserving the current volume state"
 fi
 
+if [ -f "$CAMPAIGN_MEDIA_SRC" ]; then
+  log "restoring WhatsApp campaign media"
+  WT="$(mktemp -d "${TMPDIR:-/tmp}/golden-crm-campaign-media-restore-${RUN_ID}.XXXXXX")"
+  tar -xzf "$CAMPAIGN_MEDIA_SRC" --no-same-owner --no-same-permissions -C "$WT"
+  [ -d "$WT/campaign-media" ] && [ ! -L "$WT/campaign-media" ] \
+    || { echo "Campaign media archive has no safe root directory." >&2; exit 1; }
+  if find "$WT/campaign-media" \( -type l -o \( ! -type f ! -type d \) \) -print -quit | grep -q .; then
+    echo "Campaign media archive extracted an unsupported file type." >&2
+    exit 1
+  fi
+  "${COMPOSE[@]}" run --rm --no-deps --user root \
+    -e RESTORE_RUN_ID="$RUN_ID" \
+    -v "$WT/campaign-media:/tmp/campaign-media-restore:ro" \
+    crm sh -eu -c '
+      target=/app/.runtime/whatsapp-campaign-media
+      stage="/app/.runtime/.campaign-media-restore-$RESTORE_RUN_ID"
+      rm -rf -- "$stage"
+      mkdir -m 700 -- "$stage" "$target"
+      cp -a /tmp/campaign-media-restore/. "$stage/"
+      find "$stage" -type d -exec chmod 700 {} +
+      find "$stage" -type f -exec chmod 640 {} +
+      chown -R node:node "$stage"
+      find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+      find "$stage" -mindepth 1 -maxdepth 1 -exec mv -t "$target" -- {} +
+      rmdir -- "$stage"
+      chown node:node "$target"
+      chmod 700 "$target"
+    '
+  rm -rf "$WT"
+  WT=""
+else
+  log "backup has no campaign media payload; preserving the current volume state"
+fi
+
 if [ -f "$SRC/wa-session.tar.gz" ]; then
   log "restoring WhatsApp session"
   WT="$(mktemp -d "${TMPDIR:-/tmp}/golden-crm-wa-restore-${RUN_ID}.XXXXXX")"
@@ -443,6 +514,11 @@ log "repairing runtime ownership and permissions"
   if [ -f /app/.runtime/salla-integrations.json ]; then
     chown node:node /app/.runtime/salla-integrations.json
     chmod 600 /app/.runtime/salla-integrations.json
+  fi
+  if [ -d /app/.runtime/whatsapp-campaign-media ]; then
+    chown -R node:node /app/.runtime/whatsapp-campaign-media
+    find /app/.runtime/whatsapp-campaign-media -type d -exec chmod 700 {} +
+    find /app/.runtime/whatsapp-campaign-media -type f -exec chmod 640 {} +
   fi
   chown -R node:node /app/.wa-session
   find /app/.wa-session -type d -exec chmod 700 {} +
@@ -509,6 +585,38 @@ log "validating restored runtime before CRM startup"
     }
     if (stat.isDirectory()) {
       for (const name of fs.readdirSync(current)) pending.push(`${current}/${name}`);
+    }
+  }
+
+  const campaignMediaRoot = "/app/.runtime/whatsapp-campaign-media";
+  if (fs.existsSync(campaignMediaRoot)) {
+    const pendingMedia = [campaignMediaRoot];
+    while (pendingMedia.length > 0) {
+      const current = pendingMedia.pop();
+      const stat = fs.lstatSync(current);
+      const name = current.split("/").pop() || "";
+      if (
+        stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())
+        || (stat.isFile() && !/^[a-f0-9]{48}\.(jpg|png|mp4)$/.test(name))
+      ) {
+        console.error("Restored campaign media contains an unsupported file or name.");
+        process.exitCode = 5;
+        break;
+      }
+      if (expectedUid !== null && stat.uid !== expectedUid) {
+        console.error("Restored campaign media ownership is invalid.");
+        process.exitCode = 5;
+        break;
+      }
+      const mode = stat.mode & 0o777;
+      if ((stat.isDirectory() && mode !== 0o700) || (stat.isFile() && mode !== 0o640)) {
+        console.error("Restored campaign media permissions are invalid.");
+        process.exitCode = 5;
+        break;
+      }
+      if (stat.isDirectory()) {
+        for (const child of fs.readdirSync(current)) pendingMedia.push(`${current}/${child}`);
+      }
     }
   }
 '

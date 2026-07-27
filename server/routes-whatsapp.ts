@@ -596,7 +596,7 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
     "/api/whatsapp/campaigns/:id/launch",
     requireCampaignManager,
     validate(communicationCampaignLaunchSchema),
-    (req, res) => {
+    asyncRoute(async (req, res) => {
       const ownerUid = options.whatsappOwnerUid();
       const campaign = communicationCampaignStore.get(ownerUid, req.params.id);
       if (!campaign) throw httpError(404, "Campaign not found.");
@@ -620,11 +620,17 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
       }
       if (isCampaignOfferTemplate(campaign.template_name)) {
         try {
-          buildCampaignCloudTemplateOptions({
+          const templateOptions = buildCampaignCloudTemplateOptions({
             campaignId: campaign.id,
             media: campaign.media!,
             orderUrl: campaign.order_url!,
           });
+          const approval = await whatsappService.verifyCampaignTemplate(
+            campaign.template_name,
+            templateOptions,
+            true,
+          );
+          if (!approval.ready) throw new Error(approval.reason || "Meta template is not ready.");
         } catch (error) {
           throw httpError(
             409,
@@ -634,7 +640,7 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
       }
       const launched = communicationCampaignStore.launch(ownerUid, campaign.id, req.body.scheduled_at);
       res.json({ campaign: launched });
-    },
+    }),
   );
 
   for (const action of ["pause", "resume", "cancel"] as const) {
