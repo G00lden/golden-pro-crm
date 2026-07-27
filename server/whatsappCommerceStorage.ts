@@ -22,7 +22,8 @@ export type WhatsAppCommerceStep =
   | "awaiting_booking_kind"
   | "awaiting_installation"
   | "awaiting_product"
-  | "awaiting_slot";
+  | "awaiting_slot"
+  | "awaiting_cart_question";
 
 export type WhatsAppCommerceSession<TContext extends Record<string, unknown> = Record<string, unknown>> = {
   owner_uid: string;
@@ -90,7 +91,7 @@ export function saveWhatsAppCommerceSession(
   },
 ) {
   const now = input.now || new Date().toISOString();
-  const ttlMinutes = Math.max(5, Math.min(240, Number(input.ttlMinutes || 30)));
+  const ttlMinutes = Math.max(5, Math.min(7 * 24 * 60, Number(input.ttlMinutes || 30)));
   const expiresAt = new Date(Date.parse(now) + ttlMinutes * 60_000).toISOString();
   database.prepare(
     `INSERT INTO whatsapp_commerce_sessions (

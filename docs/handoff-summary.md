@@ -584,3 +584,12 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Added regression tests for payment-key reuse, existing-customer booking, new-customer onboarding, duplicate-choice handling, Tap return reconciliation, and schema migration.
 - Production was not activated: the current environment still uses the web provider, lacks the webhook verification/signature values and Tap key, and retains the outbound allowlist gate. The Meta app also remains unpublished and requires its application icon.
 - Arabic activation and rollback guide: `docs/whatsapp-cloud-payment-booking-ar.md`.
+
+## 2026-07-27 - Salla abandoned-cart WhatsApp concierge 1.8.0 [Codex]
+
+- Added signed, idempotent handling for `abandoned.cart`, updates, status changes, and purchased events.
+- Added `carts.read`, official abandoned-cart detail hydration, one-message-per-cart scheduling, and purchase-before-send cancellation.
+- Proactive cart messages fail closed without explicit WhatsApp marketing consent and still pass through the global outbound launch controls.
+- Inbound replies answer only confirmed catalog facts (price, availability, description, installation/maintenance); unknown questions create a high-priority CRM task.
+- Added authenticated cart visibility at `GET /api/integrations/salla/abandoned-carts` and SQLite schema `10800`.
+- Operational setup and rollback are documented in `docs/salla-cart-whatsapp-concierge-ar.md`.

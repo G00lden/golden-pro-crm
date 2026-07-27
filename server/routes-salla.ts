@@ -13,6 +13,7 @@ import { adminDb } from "./firebaseAdmin";
 import type { AuthedRequest } from "./auth";
 import { getStoreOrderPageForUser } from "./storeOrderQuery";
 import { catalogProductIsVisible } from "../shared/productCatalogState";
+import { sallaCartConciergeStore } from "./sallaCartConcierge";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -209,6 +210,23 @@ export function registerSallaRoutes(app: Express) {
         capped,
         warning: capped ? "Product usage summary reached the 10,000-row safety cap." : null,
         products: mapped,
+      });
+    }),
+  );
+
+  app.get(
+    "/api/integrations/salla/abandoned-carts",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      const requestedLimit = Number(req.query.limit || 100);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.max(1, Math.min(500, Math.floor(requestedLimit)))
+        : 100;
+      const carts = sallaCartConciergeStore.list(userReq.user.uid, limit);
+      res.json({
+        provider: "salla",
+        total: carts.length,
+        carts,
       });
     }),
   );

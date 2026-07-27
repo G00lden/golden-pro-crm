@@ -234,10 +234,24 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10700) throw new Error(`Expected schema 10700, got ${userVersion}`);
+if (userVersion !== 10800) throw new Error(`Expected schema 10800, got ${userVersion}`);
 for (const required of ["owner_uid", "phone", "step", "context_json", "expires_at"]) {
   if (!columns("whatsapp_commerce_sessions").has(required)) {
     throw new Error(`whatsapp_commerce_sessions.${required} is missing`);
+  }
+}
+for (const required of [
+  "owner_uid",
+  "cart_id",
+  "customer_phone",
+  "checkout_url",
+  "items_json",
+  "status",
+  "outreach_status",
+  "last_question",
+]) {
+  if (!columns("salla_abandoned_carts").has(required)) {
+    throw new Error(`salla_abandoned_carts.${required} is missing`);
   }
 }
 
@@ -543,6 +557,8 @@ const mobileOnboardingMigration = db.prepare("SELECT release FROM schema_migrati
 if (mobileOnboardingMigration?.release !== "2.1.2-mobile-onboarding-clarity") throw new Error("Mobile onboarding migration was not updated.");
 const whatsappCommerceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10700").get() as { release?: string };
 if (whatsappCommerceMigration?.release !== "1.7.0-whatsapp-payment-booking") throw new Error("WhatsApp commerce migration was not updated.");
+const sallaCartConciergeMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10800").get() as { release?: string };
+if (sallaCartConciergeMigration?.release !== "1.8.0-salla-cart-whatsapp-concierge") throw new Error("Salla cart concierge migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

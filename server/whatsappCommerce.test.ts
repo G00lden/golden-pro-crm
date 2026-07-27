@@ -19,6 +19,7 @@ const now = new Date("2026-07-27T06:00:00.000Z");
 
 const db = (await import("./db")).default;
 const { handleWhatsAppCommerceConversation } = await import("./whatsappCommerce");
+const { saveWhatsAppCommerceSession } = await import("./whatsappCommerceStorage");
 const { dispatchMessage } = await import("./gateway");
 
 function clearCommerceFixtures() {
@@ -30,6 +31,8 @@ function clearCommerceFixtures() {
     "products",
     "payments",
     "customers",
+    "crm_tasks",
+    "salla_abandoned_carts",
   ]) {
     db.prepare(`DELETE FROM ${table}`).run();
   }
@@ -181,6 +184,71 @@ test("WhatsApp creates an idempotent payment link for the latest payable invoice
     },
   );
   assert.equal(calls[1].idempotencyKey, calls[0].idempotencyKey);
+});
+
+test("a cart reply answers catalog facts and escalates unknown product questions without inventing an answer", async () => {
+  db.prepare(
+    `INSERT INTO salla_abandoned_carts (
+       owner_uid, cart_id, customer_name, customer_phone, checkout_url, items_json,
+       status, outreach_status, first_seen_at, last_event_at, created_at, updated_at
+     ) VALUES (?, 'cart-wa-1', 'عميل السلة', ?, 'https://store.example/checkout/cart-wa-1', '[]',
+               'active', 'sent', ?, ?, ?, ?)`,
+  ).run(ownerUid, existingPhone, now.toISOString(), now.toISOString(), now.toISOString(), now.toISOString());
+  saveWhatsAppCommerceSession(db, {
+    ownerUid,
+    phone: existingPhone,
+    step: "awaiting_cart_question",
+    now: now.toISOString(),
+    ttlMinutes: 1440,
+    context: {
+      cart: {
+        cartId: "cart-wa-1",
+        checkoutUrl: "https://store.example/checkout/cart-wa-1",
+        products: [{
+          productId: "product-wa-1",
+          name: "فلتر جولدن",
+          quantity: 1,
+          price: 199,
+          currency: "SAR",
+          description: "فلتر منزلي متعدد المراحل.",
+          productType: "install_maintenance",
+          storeUrl: "https://store.example/products/filter",
+          isAvailable: true,
+          stockQuantity: 5,
+        }],
+      },
+    },
+  });
+
+  const price = await handleWhatsAppCommerceConversation(
+    { ownerUid, fromPhone: existingPhone, text: "كم سعر الفلتر؟" },
+    { now: () => now },
+  );
+  assert.equal(price.kind, "cart_product_price");
+  assert.match(String(price.reply), /(?:199|١٩٩)/);
+
+  const checkout = await handleWhatsAppCommerceConversation(
+    { ownerUid, fromPhone: existingPhone, text: "أرسل رابط إكمال السلة" },
+    { now: () => now },
+  );
+  assert.equal(checkout.kind, "cart_checkout_link");
+  assert.match(String(checkout.reply), /https:\/\/store\.example\/checkout\/cart-wa-1/);
+
+  const warranty = await handleWhatsAppCommerceConversation(
+    { ownerUid, fromPhone: existingPhone, text: "كم مدة الضمان؟" },
+    { now: () => now },
+  );
+  assert.equal(warranty.kind, "cart_question_escalated");
+  assert.doesNotMatch(String(warranty.reply), /\d+\s*(?:سنة|سنوات|شهر)/);
+  const task = db.prepare(
+    "SELECT * FROM crm_tasks WHERE owner_uid = ? AND related_type = 'salla_abandoned_cart'",
+  ).get(ownerUid) as Record<string, unknown>;
+  assert.match(String(task.notes), /كم مدة الضمان/);
+  assert.equal(
+    (db.prepare("SELECT last_question FROM salla_abandoned_carts WHERE owner_uid = ? AND cart_id = 'cart-wa-1'")
+      .get(ownerUid) as { last_question: string }).last_question,
+    "كم مدة الضمان؟",
+  );
 });
 
 test("an existing customer can reserve a real technician slot without duplicate booking", async () => {
