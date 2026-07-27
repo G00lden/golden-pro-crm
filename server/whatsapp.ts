@@ -10,6 +10,14 @@ import { cloudTemplateEnvKey, renderTemplate, templateToCloudParams, type Render
 import { normalizePhoneDigits, requirePhoneDigits } from "../shared/phone";
 import { advanceMessageStatus } from "./communicationStatus";
 import { communicationCampaignStore } from "./communicationCampaigns";
+import {
+  isCampaignOfferTemplate,
+  type WhatsAppCloudTemplateOptions,
+} from "./whatsappCampaignOffer";
+import {
+  validateMetaTemplateApproval,
+  type TemplateApprovalResult,
+} from "./whatsappTemplateApproval";
 
 export type WhatsAppConnectionStatus =
   | "disconnected"
@@ -31,6 +39,37 @@ export type WhatsAppStatus = {
   outbound?: ReturnType<typeof outboundSafetyStatus>;
   updatedAt: string;
 };
+
+type WhatsAppTemplateSendOptions = OutboundSendOptions & {
+  templateOptions?: WhatsAppCloudTemplateOptions;
+};
+
+export class AmbiguousWhatsAppSendError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AmbiguousWhatsAppSendError";
+  }
+}
+
+export class WhatsAppConfigurationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WhatsAppConfigurationError";
+  }
+}
+
+export function isAmbiguousWhatsAppSendError(error: unknown): error is AmbiguousWhatsAppSendError {
+  return error instanceof AmbiguousWhatsAppSendError;
+}
+
+export function isWhatsAppConfigurationError(error: unknown): error is WhatsAppConfigurationError {
+  return error instanceof WhatsAppConfigurationError;
+}
+
+function cloudHttpTimeoutMs() {
+  const configured = Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS || 10_000);
+  return Math.max(1_000, Math.min(120_000, Number.isFinite(configured) ? configured : 10_000));
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -58,6 +97,7 @@ export class WhatsAppService {
   private readonly sessionDir: string;
   private readonly provider: "web" | "cloud_api";
   private cloudVerifiedAt = "";
+  private templateApprovalCache = new Map<string, { expiresAt: number; result: TemplateApprovalResult }>();
 
   // Auto-reply hooks (registered by server/whatsappAutoReply.ts). Kept as
   // callbacks so whatsapp.ts has no dependency on the routing engine.
@@ -317,7 +357,7 @@ export class WhatsAppService {
 
     this.status = "connecting";
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS || 10_000));
+    const timeout = setTimeout(() => controller.abort(), cloudHttpTimeoutMs());
     try {
       const version = process.env.WHATSAPP_CLOUD_API_VERSION || "v23.0";
       const fields = "id,display_phone_number,verified_name,quality_rating";
@@ -343,12 +383,92 @@ export class WhatsAppService {
     return this.getStatus();
   }
 
-  async sendTemplate(phone: string, template: TemplateName, vars: RenderVars = {}, options: OutboundSendOptions = {}) {
+  async verifyCampaignTemplate(
+    template: TemplateName,
+    templateOptions: WhatsAppCloudTemplateOptions,
+    force = false,
+  ): Promise<TemplateApprovalResult> {
+    if (!isCampaignOfferTemplate(template)) {
+      return { ready: false, reason: "Only campaign offer templates use this approval contract." };
+    }
+    if (this.provider !== "cloud_api") {
+      return { ready: false, reason: "Campaign offers require WhatsApp Cloud API." };
+    }
+    const token = this.cloudToken();
+    const wabaId = String(process.env.WHATSAPP_CLOUD_WABA_ID || "").trim();
+    const mappedName = String(process.env[cloudTemplateEnvKey(template)] || "").trim();
+    const language = this.cloudTemplateLanguage();
+    if (!token || !/^\d{5,40}$/.test(wabaId) || !mappedName) {
+      return {
+        ready: false,
+        reason: "WhatsApp WABA ID, API token, and campaign template mapping are required.",
+      };
+    }
+    const cacheKey = `${template}:${mappedName}:${language}`;
+    const cached = this.templateApprovalCache.get(cacheKey);
+    if (!force && cached && cached.expiresAt > Date.now()) return cached.result;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), cloudHttpTimeoutMs());
+    try {
+      const version = process.env.WHATSAPP_CLOUD_API_VERSION || "v23.0";
+      const params = new URLSearchParams({
+        name: mappedName,
+        fields: "name,status,language,components",
+        limit: "100",
+      });
+      let response: Response;
+      try {
+        response = await fetch(
+          `https://graph.facebook.com/${version}/${wabaId}/message_templates?${params}`,
+          { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
+        );
+      } catch (error) {
+        throw new Error("Unable to verify the Meta campaign template.", { cause: error });
+      }
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = String(body?.error?.message || `HTTP ${response.status}`);
+        if ([400, 401, 403].includes(response.status)) {
+          throw new WhatsAppConfigurationError(`Meta template verification failed: ${message}`);
+        }
+        throw new Error(`Meta template verification failed: ${message}`);
+      }
+      const candidates = Array.isArray(body?.data) ? body.data : [];
+      const record = candidates.find((item: Record<string, unknown>) => (
+        String(item?.name || "") === mappedName && String(item?.language || "") === language
+      ));
+      const result = record
+        ? validateMetaTemplateApproval({
+            record,
+            mappedName,
+            language,
+            logicalTemplate: template,
+            templateOptions,
+          })
+        : { ready: false, reason: "The configured campaign template was not found in this WABA." };
+      if (result.ready) {
+        this.templateApprovalCache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, result });
+      }
+      return result;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async sendTemplate(
+    phone: string,
+    template: TemplateName,
+    vars: RenderVars = {},
+    options: WhatsAppTemplateSendOptions = {},
+  ) {
     const decision = decideOutbound(phone, options);
     if (!decision.allowed) {
       return dryRunSendResult(phone, this.provider, decision.reason);
     }
-    if (this.provider === "cloud_api") return this.sendCloudTemplate(phone, template, vars);
+    if (this.provider === "cloud_api") {
+      return this.sendCloudTemplate(phone, template, vars, options.templateOptions);
+    }
     return this.sendText(phone, renderTemplate(template, vars, { strict: false }), options);
   }
 
@@ -587,15 +707,23 @@ export class WhatsAppService {
     if (!token || !phoneNumberId) throw new Error("WhatsApp Cloud API credentials are missing.");
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS || 10_000));
+    const timeout = setTimeout(() => controller.abort(), cloudHttpTimeoutMs());
     try {
       const version = process.env.WHATSAPP_CLOUD_API_VERSION || "v23.0";
-      const response = await fetch(`https://graph.facebook.com/${version}/${phoneNumberId}/messages`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch(`https://graph.facebook.com/${version}/${phoneNumberId}/messages`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        throw new AmbiguousWhatsAppSendError(
+          "WhatsApp Cloud API did not confirm whether the message was accepted; automatic retry is blocked.",
+          { cause: error },
+        );
+      }
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         const details = body?.error?.message || `HTTP ${response.status}`;
@@ -608,9 +736,15 @@ export class WhatsAppService {
       this.lastError = "";
       this.cloudVerifiedAt = new Date().toISOString();
       if (!this.connectedAt) this.connectedAt = this.cloudVerifiedAt;
+      const messageId = String(body?.messages?.[0]?.id || "").trim();
+      if (!messageId) {
+        throw new AmbiguousWhatsAppSendError(
+          "WhatsApp Cloud API returned success without a wamid; automatic retry is blocked.",
+        );
+      }
       return {
         jid: `${to}@s.whatsapp.net`,
-        messageId: body?.messages?.[0]?.id || null,
+        messageId,
         provider: this.provider,
       };
     } finally {
@@ -618,15 +752,49 @@ export class WhatsAppService {
     }
   }
 
-  private async sendCloudTemplate(phone: string, template: TemplateName, vars: RenderVars) {
+  private async sendCloudTemplate(
+    phone: string,
+    template: TemplateName,
+    vars: RenderVars,
+    templateOptions?: WhatsAppCloudTemplateOptions,
+  ) {
     const to = this.toInternationalPhone(phone);
     const envKey = cloudTemplateEnvKey(template);
     const templateName = process.env[envKey] || (template === "general_reminder" ? this.cloudTemplateName() : "");
     if (!templateName) throw new Error(`WhatsApp Cloud template mapping is missing: ${envKey}`);
+    if (isCampaignOfferTemplate(template)) {
+      const approval = await this.verifyCampaignTemplate(template, templateOptions || {});
+      if (!approval.ready) {
+        throw new WhatsAppConfigurationError(
+          approval.reason || "The Meta campaign template is not ready.",
+        );
+      }
+    }
     const rendered = templateToCloudParams(template, vars);
-    const components = rendered.parameters?.length
-      ? [{ type: "body", parameters: rendered.parameters }]
-      : undefined;
+    const components: Array<Record<string, unknown>> = [];
+    if (templateOptions?.header) {
+      const header = templateOptions.header;
+      components.push({
+        type: "header",
+        parameters: [{
+          type: header.type,
+          [header.type]: { link: header.link },
+        }],
+      });
+    }
+    if (rendered.parameters?.length) {
+      components.push({ type: "body", parameters: rendered.parameters });
+    }
+    for (const button of templateOptions?.buttons || []) {
+      components.push({
+        type: "button",
+        sub_type: button.type,
+        index: String(button.index),
+        parameters: button.type === "url"
+          ? [{ type: "text", text: button.text }]
+          : [{ type: "payload", payload: button.payload }],
+      });
+    }
     return this.postCloudPayload(to, {
       messaging_product: "whatsapp",
       recipient_type: "individual",
@@ -635,7 +803,7 @@ export class WhatsAppService {
       template: {
         name: templateName,
         language: { code: this.cloudTemplateLanguage() },
-        ...(components ? { components } : {}),
+        ...(components.length ? { components } : {}),
       },
     });
   }
@@ -778,11 +946,15 @@ export async function sendWhatsAppTemplate(opts: {
   booking_id?: string;
   owner_uid?: string;
   outboundCode?: string;
+  templateOptions?: WhatsAppCloudTemplateOptions;
 }) {
   // strict:false → a missing/empty variable becomes "" instead of leaking the
   // literal "{placeholder}" to the customer (e.g. "عزيزي {customer_name}،").
   const body = renderTemplate(opts.template, opts.vars || {}, { strict: false });
-  const result = await whatsappService.sendTemplate(opts.phone, opts.template, opts.vars || {}, { confirmationCode: opts.outboundCode });
+  const result = await whatsappService.sendTemplate(opts.phone, opts.template, opts.vars || {}, {
+    confirmationCode: opts.outboundCode,
+    templateOptions: opts.templateOptions,
+  });
 
   recordWhatsAppMessage({
     type: "template",
@@ -797,7 +969,11 @@ export async function sendWhatsAppTemplate(opts: {
     installation_id: opts.installation_id,
     booking_id: opts.booking_id,
     owner_uid: opts.owner_uid,
-    metadata: { template: opts.template, vars: opts.vars || {} },
+    metadata: {
+      template: opts.template,
+      vars: opts.vars || {},
+      ...(opts.templateOptions ? { templateOptions: opts.templateOptions } : {}),
+    },
   });
 
   return { ...result, template: opts.template, body };

@@ -14,6 +14,7 @@ import type { AuthedRequest } from "./auth";
 import { getStoreOrderPageForUser } from "./storeOrderQuery";
 import { catalogProductIsVisible } from "../shared/productCatalogState";
 import { sallaCartConciergeStore } from "./sallaCartConcierge";
+import { deliveryReviewStore } from "./deliveryReview";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -227,6 +228,23 @@ export function registerSallaRoutes(app: Express) {
         provider: "salla",
         total: carts.length,
         carts,
+      });
+    }),
+  );
+
+  app.get(
+    "/api/integrations/salla/delivery-reviews",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      const requestedLimit = Number(req.query.limit || 100);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.max(1, Math.min(500, Math.floor(requestedLimit)))
+        : 100;
+      const reviews = deliveryReviewStore.list(userReq.user.uid, limit);
+      res.json({
+        provider: "salla",
+        total: reviews.length,
+        reviews,
       });
     }),
   );

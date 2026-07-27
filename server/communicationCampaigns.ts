@@ -6,6 +6,12 @@ import { communicationPreferenceStore } from "./communicationPreferences";
 import { normalizePhoneDigits } from "../shared/phone";
 import { listTemplateNames, type TemplateName } from "./whatsappTemplates";
 import { advanceMessageStatus } from "./communicationStatus";
+import {
+  buildCampaignCloudTemplateOptions,
+  campaignOfferTemplateForMedia,
+  isCampaignOfferTemplate,
+  type CampaignMedia,
+} from "./whatsappCampaignOffer";
 
 export type CampaignStatus = "draft" | "scheduled" | "running" | "paused" | "completed" | "cancelled";
 export type AudienceFilter = {
@@ -24,6 +30,8 @@ export type Campaign = {
   status: CampaignStatus;
   audience_filter: AudienceFilter;
   template_vars: Record<string, string | number>;
+  media: CampaignMedia | null;
+  order_url: string | null;
   scheduled_at: string | null;
   rate_limit_per_minute: number;
   frequency_cap_days: number;
@@ -84,6 +92,10 @@ function mapCampaign(value: Record<string, unknown> | undefined): Campaign | nul
     ...(value as unknown as Campaign),
     audience_filter: safeJson<AudienceFilter>(value.audience_filter, {}),
     template_vars: safeJson<Record<string, string | number>>(value.template_vars, {}),
+    media: value.media_type && value.media_url
+      ? { type: value.media_type as CampaignMedia["type"], url: String(value.media_url) }
+      : null,
+    order_url: value.order_url ? String(value.order_url) : null,
     rate_limit_per_minute: Number(value.rate_limit_per_minute || 30),
     frequency_cap_days: Number(value.frequency_cap_days || 7),
   };
@@ -139,21 +151,33 @@ export function createCommunicationCampaignStore(
     templateName: TemplateName;
     audienceFilter: AudienceFilter;
     templateVars?: Record<string, string | number>;
+    media?: CampaignMedia | null;
+    orderUrl?: string | null;
     rateLimitPerMinute?: number;
     frequencyCapDays?: number;
     createdBy?: string;
   }) => {
-    if (!listTemplateNames().includes(input.templateName) || input.templateName !== "general_reminder") {
-      throw new Error("Campaigns require the approved general_reminder template.");
+    if (!listTemplateNames().includes(input.templateName)) {
+      throw new Error("Campaign template is not supported.");
+    }
+    if (isCampaignOfferTemplate(input.templateName)) {
+      if (!input.media || !input.orderUrl) {
+        throw new Error("Media campaigns require media and an order URL.");
+      }
+      if (campaignOfferTemplateForMedia(input.media.type) !== input.templateName) {
+        throw new Error("Campaign media type does not match its approved Meta template.");
+      }
+    } else if (input.templateName !== "general_reminder") {
+      throw new Error("Campaigns require an approved campaign template.");
     }
     const campaignId = id("camp");
     const now = nowIso();
     database.prepare(
       `INSERT INTO communication_campaigns
         (id, owner_uid, name, channel, template_name, status, audience_filter,
-         template_vars, rate_limit_per_minute, frequency_cap_days, created_by,
-         created_at, updated_at)
-       VALUES (?, ?, ?, 'whatsapp', ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`,
+         template_vars, media_type, media_url, order_url, rate_limit_per_minute,
+         frequency_cap_days, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 'whatsapp', ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       campaignId,
       input.ownerUid,
@@ -161,6 +185,9 @@ export function createCommunicationCampaignStore(
       input.templateName,
       JSON.stringify(input.audienceFilter || {}),
       JSON.stringify(input.templateVars || {}),
+      input.media?.type || null,
+      input.media?.url || null,
+      input.orderUrl || null,
       Math.max(1, Math.min(120, input.rateLimitPerMinute ?? 30)),
       Math.max(1, Math.min(90, input.frequencyCapDays ?? 7)),
       input.createdBy || null,
@@ -201,8 +228,16 @@ export function createCommunicationCampaignStore(
     const cutoff = new Date(Date.now() - campaign.frequency_cap_days * 24 * 60 * 60_000).toISOString();
     return Boolean(database.prepare(
       `SELECT 1 FROM communication_campaign_recipients
-       WHERE owner_uid = ? AND phone = ? AND status IN ('sent','delivered','read') AND sent_at >= ? LIMIT 1`,
-    ).get(campaign.owner_uid, phone, cutoff));
+       WHERE owner_uid = ? AND phone = ?
+         AND (
+           (status IN ('eligible','queued','processing','retry') AND created_at >= ?)
+           OR (
+             status IN ('sent','delivered','read')
+             AND COALESCE(sent_at, created_at) >= ?
+           )
+         )
+       LIMIT 1`,
+    ).get(campaign.owner_uid, phone, cutoff, cutoff));
   };
 
   const assess = (campaign: Campaign) => {
@@ -276,12 +311,19 @@ export function createCommunicationCampaignStore(
         customer_name: item.customer.name || "عميلنا العزيز",
         customer_city: item.customer.city || "",
       };
+      const templateOptions = isCampaignOfferTemplate(campaign.template_name)
+        ? buildCampaignCloudTemplateOptions({
+            campaignId: campaign.id,
+            media: campaign.media!,
+            orderUrl: campaign.order_url!,
+          })
+        : undefined;
       const job = jobs.enqueue({
         ownerUid: campaign.owner_uid,
         eventKey: `campaign:${campaign.id}:${item.phone}`,
         recipientPhone: item.phone,
         templateName: campaign.template_name,
-        payload: { vars },
+        payload: { vars, ...(templateOptions ? { templateOptions } : {}) },
         role: "customer",
         kind: "whatsapp_template",
         channel: "whatsapp",

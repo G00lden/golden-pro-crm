@@ -593,3 +593,14 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Inbound replies answer only confirmed catalog facts (price, availability, description, installation/maintenance); unknown questions create a high-priority CRM task.
 - Added authenticated cart visibility at `GET /api/integrations/salla/abandoned-carts` and SQLite schema `10800`.
 - Operational setup and rollback are documented in `docs/salla-cart-whatsapp-concierge-ar.md`.
+
+## 2026-07-27 - Salla post-delivery WhatsApp rating 1.9.0 [Codex]
+
+- Added an exact `delivered`-status trigger on the existing signed and idempotent `order.status.updated` path; `completed` alone does not send a review request.
+- Added one-message-per-order scheduling, a two-hour default delay, explicit WhatsApp-consent enforcement, global outbound gates, and durable review state under SQLite schema `10900`.
+- Customers reply with a rating from 1 to 5. Ratings 4-5 close with thanks; ratings 1-3 immediately create a high-priority CRM task and collect the customer's written feedback into that task.
+- Added authenticated visibility at `GET /api/integrations/salla/delivery-reviews`, an isolated `SALLA_DELIVERY_REVIEW_ENABLED` rollback switch, Meta-template readiness checks, and regression coverage for API `403`, duplicate events, consent, sending, positive ratings, and low-rating escalation.
+- Production sending was not activated: the local environment remains on `WHATSAPP_PROVIDER=web`, `OUTBOUND_MODE=allowlist`, and `OFFICIAL_LAUNCH_APPROVED=false`; the approved Meta template name is still required for Cloud API launch.
+- Setup, verification, monitoring, and rollback are documented in `docs/salla-delivery-rating-whatsapp-ar.md`.
+- Completed the WhatsApp self-service booking handoff: confirmed CRM bookings now enqueue one idempotent `technician_assigned` template for the assigned representative with customer phone/address, service, date, time, and booking id.
+- Technician delivery is tracked in both `communication_jobs` and `technician_notifications`; an invalid technician phone creates a high-priority CRM task instead of silently losing the appointment.

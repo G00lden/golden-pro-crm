@@ -18,6 +18,8 @@ process.env.SALLA_APP_WEBHOOK_SECRET = "test-webhook-secret";
 process.env.SALLA_FETCH_RETRY_BASE_DELAY_MS = "0";
 process.env.SALLA_FETCH_RETRY_MAX_DELAY_MS = "0";
 process.env.SALLA_CART_WHATSAPP_DELAY_MINUTES = "0";
+process.env.SALLA_DELIVERY_REVIEW_ENABLED = "true";
+process.env.SALLA_DELIVERY_REVIEW_DELAY_MINUTES = "0";
 
 const sallaModule = await import("./salla");
 const {
@@ -427,6 +429,57 @@ test("partial signed status webhook preserves rich local order data when Salla d
   assert.equal(stored.customer_name, "عميل محفوظ");
   assert.equal(stored.items[0].sku, "SALE-RICH");
   assert.deepEqual(stored.product_ids, ["product-rich"]);
+});
+
+test("signed delivered status queues one delivery review even when Salla detail API returns 403", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid);
+  db.prepare("DELETE FROM communication_jobs WHERE owner_uid = ?").run(uid);
+  db.prepare("DELETE FROM delivery_review_requests WHERE owner_uid = ?").run(uid);
+  const orderId = getStoreOrderDocId(uid, "salla", "40303");
+  await adminDb.collection("store_orders").doc(orderId).set({
+    createdBy: uid,
+    provider: "salla",
+    source: "salla",
+    order_id: "40303",
+    order_number: "REF-40303",
+    customer_name: "عميل التوصيل",
+    customer_phone: "0500000000",
+    items: [{ name: "منتج", sku: "SALE-40303", quantity: 1, order_type: "sale_only" }],
+    product_ids: [],
+    installation_ids: [],
+    booking_ids: [],
+    remote_updated_at: "2026-07-17T00:00:00.000Z",
+  });
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/orders/40303")) return jsonResponse({ error: "Forbidden" }, 403);
+    throw new Error(`Unexpected request ${url.pathname}`);
+  }) as typeof fetch;
+
+  const body = {
+    event: "order.status.updated",
+    event_id: "evt-status-40303-delivered",
+    merchant: "merchant-a",
+    created_at: "2026-07-18T12:00:00.000Z",
+    data: { id: "40303", status: { id: 30, name: "تم التوصيل", slug: "delivered" } },
+  };
+  const first = await handleSallaAppWebhook(webhookRequest(body) as never);
+  const duplicate = await handleSallaAppWebhook(webhookRequest(body) as never);
+  assert.equal(first.duplicate, false);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(
+    (db.prepare(
+      "SELECT COUNT(*) AS count FROM communication_jobs WHERE owner_uid = ? AND event_key = ?",
+    ).get(uid, "salla-order:40303:delivery-review:1") as { count: number }).count,
+    1,
+  );
+  const review = db.prepare(
+    "SELECT status, order_number, customer_phone FROM delivery_review_requests WHERE owner_uid = ? AND order_id = ?",
+  ).get(uid, "40303") as Record<string, unknown>;
+  assert.equal(review.status, "queued");
+  assert.equal(review.order_number, "REF-40303");
+  assert.equal(review.customer_phone, "966500000000");
 });
 
 test("merchant mismatch is rejected before reading or mutating a Salla order", async () => {

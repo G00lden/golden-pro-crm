@@ -6,6 +6,7 @@ import { PUBLIC_LEAD_SCHEMA_SQL } from "./publicLeadStorage";
 import { TIKTOK_ATTRIBUTION_SCHEMA_SQL } from "./tiktokAttributionStorage";
 import { WHATSAPP_COMMERCE_SCHEMA_SQL } from "./whatsappCommerceStorage";
 import { SALLA_CART_CONCIERGE_SCHEMA_SQL } from "./sallaCartConciergeStorage";
+import { DELIVERY_REVIEW_SCHEMA_SQL } from "./deliveryReviewStorage";
 import { calculateDocumentTotals, normalizeVatPercent, type DiscountMode } from "../shared/financial";
 import { verifiableInvoiceItems } from "../shared/invoiceItems";
 
@@ -13,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10800;
+const TARGET_SCHEMA_VERSION = 10901;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -940,6 +941,9 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'draft',
     audience_filter TEXT NOT NULL DEFAULT '{}',
     template_vars TEXT NOT NULL DEFAULT '{}',
+    media_type TEXT,
+    media_url TEXT,
+    order_url TEXT,
     scheduled_at TEXT,
     rate_limit_per_minute INTEGER NOT NULL DEFAULT 30,
     frequency_cap_days INTEGER NOT NULL DEFAULT 7,
@@ -1298,6 +1302,7 @@ db.exec(PUBLIC_LEAD_SCHEMA_SQL);
 db.exec(TIKTOK_ATTRIBUTION_SCHEMA_SQL);
 db.exec(WHATSAPP_COMMERCE_SCHEMA_SQL);
 db.exec(SALLA_CART_CONCIERGE_SCHEMA_SQL);
+db.exec(DELIVERY_REVIEW_SCHEMA_SQL);
 
 for (const [table, columns] of [
   ["customers", [["address", "TEXT DEFAULT ''"], ["customer_address", "TEXT DEFAULT ''"]]],
@@ -1960,6 +1965,16 @@ for (const col of [
 db.exec("CREATE INDEX IF NOT EXISTS idx_customers_owner_source_created ON customers(owner_uid, store_provider, created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_customers_owner_city_name ON customers(owner_uid, city, name)");
 
+for (const col of [
+  ["media_type", "TEXT"],
+  ["media_url", "TEXT"],
+  ["order_url", "TEXT"],
+] as const) {
+  if (!hasColumn("communication_campaigns", col[0])) {
+    db.exec(`ALTER TABLE communication_campaigns ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
 // Seller identity is saved per-owner via PUT /api/settings (defaultSettings
 // always includes these), but the settings table never declared the columns —
 // so on a fresh DB the seller name / VAT number / address never persisted.
@@ -2000,6 +2015,8 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10600, '1.6.0-tiktok-whatsapp-attribution');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10700, '1.7.0-whatsapp-payment-booking');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10800, '1.8.0-salla-cart-whatsapp-concierge');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10900, '1.9.0-salla-delivery-rating-whatsapp');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10901, '1.9.1-whatsapp-media-campaigns');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

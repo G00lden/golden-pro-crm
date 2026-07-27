@@ -4,6 +4,7 @@
 # Captures, into $BACKUP_DIR/<timestamp>-<pid>-<random>/:
 #   * golden-crm.db.gz         - consistent SQLite snapshot, gzipped.
 #   * salla-integrations.json  - validated Salla connection state, mode 0600.
+#   * campaign-media.tar.gz    - uploaded WhatsApp campaign images and videos.
 #   * wa-session.tar.gz        - WhatsApp linked-device session, when present.
 #   * env.production           - production secrets, mode 0600, when present.
 #   * manifest.sha256          - checksums for every captured payload.
@@ -202,7 +203,37 @@ else
   log "Salla integration state is absent; continuing without it"
 fi
 
-# 3) WhatsApp session (from the named volume, via the container). The mounted
+# 3) Campaign media from the runtime volume. The files are immutable and use
+# opaque allowlisted names, so a DB snapshot taken just before this archive can
+# safely produce only harmless orphan files, never a campaign row with a
+# partially-written payload.
+log "archiving WhatsApp campaign media"
+CAMPAIGN_MEDIA_PRESENT=false
+if "${COMPOSE[@]}" exec -T crm sh -c '[ -d /app/.runtime/whatsapp-campaign-media ]'; then
+  docker cp "$CID:/app/.runtime/whatsapp-campaign-media/." "$DEST/campaign-media" >/dev/null \
+    || fail "Unable to copy WhatsApp campaign media from the CRM volume."
+  [ -d "$DEST/campaign-media" ] && [ ! -L "$DEST/campaign-media" ] \
+    || fail "Campaign media copy did not create a safe directory."
+  if find "$DEST/campaign-media" \( -type l -o \( ! -type f ! -type d \) \) -print -quit | grep -q .; then
+    fail "Campaign media contains a link or special file."
+  fi
+  if find "$DEST/campaign-media" -mindepth 1 -type d -print -quit | grep -q .; then
+    fail "Campaign media must use one flat directory."
+  fi
+  if find "$DEST/campaign-media" -regextype posix-extended -mindepth 1 -type f \
+    ! -regex '.*/[a-f0-9]{48}\.(jpg|png|mp4)' -print -quit | grep -q .; then
+    fail "Campaign media contains a non-whitelisted filename."
+  fi
+  tar -czf "$DEST/campaign-media.tar.gz" -C "$DEST" campaign-media \
+    || fail "Unable to archive WhatsApp campaign media."
+  chmod 600 "$DEST/campaign-media.tar.gz"
+  rm -rf -- "$DEST/campaign-media"
+  CAMPAIGN_MEDIA_PRESENT=true
+else
+  log "Campaign media directory is absent; continuing without it"
+fi
+
+# 4) WhatsApp session (from the named volume, via the container). The mounted
 # directory is part of the production storage contract, so a missing directory
 # or any copy/archive error makes the whole backup incomplete.
 log "archiving WhatsApp session"
@@ -215,16 +246,17 @@ tar -czf "$DEST/wa-session.tar.gz" -C "$DEST" wa-session \
   || fail "Unable to archive the WhatsApp session."
 rm -rf -- "$DEST/wa-session"
 
-# 4) Secrets file (kept private).
+# 5) Secrets file (kept private).
 if [ -f "$COMPOSE_ENV_FILE" ]; then
   cp "$COMPOSE_ENV_FILE" "$DEST/env.production"
   chmod 600 "$DEST/env.production"
 fi
 
-# 5) Integrity manifest. This is the complete payload whitelist.
+# 6) Integrity manifest. This is the complete payload whitelist.
 log "writing checksum manifest"
 manifest_files=("golden-crm.db.gz")
 [ "$SALLA_PRESENT" = true ] && manifest_files+=("salla-integrations.json")
+[ "$CAMPAIGN_MEDIA_PRESENT" = true ] && manifest_files+=("campaign-media.tar.gz")
 manifest_files+=("wa-session.tar.gz")
 [ -f "$DEST/env.production" ] && manifest_files+=("env.production")
 (
@@ -235,7 +267,7 @@ chmod 600 "$DEST/manifest.sha256"
 (cd "$DEST" && sha256sum --check --strict --status manifest.sha256)
 rm -f "$DEST/.incomplete"
 
-# 6) Rotate only when explicitly enabled. Restore disables this for its nested
+# 7) Rotate only when explicitly enabled. Restore disables this for its nested
 # safety snapshot so an old source backup cannot be pruned mid-operation.
 if [ "$PRUNE_ENABLED" = "true" ]; then
   log "pruning backups older than ${KEEP_DAYS}d"

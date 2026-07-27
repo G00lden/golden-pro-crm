@@ -1,8 +1,17 @@
 import db from "./db";
-import { communicationJobStore, type CommunicationJob } from "./communicationJobs";
+import {
+  communicationJobStore,
+  PROVIDER_ATTEMPT_STARTED,
+  type CommunicationJob,
+} from "./communicationJobs";
 import { isDryRunSendResult } from "./outboundSafety";
 import { listTemplateNames, type TemplateName } from "./whatsappTemplates";
-import { sendWhatsAppTemplate } from "./whatsapp";
+import {
+  isAmbiguousWhatsAppSendError,
+  isWhatsAppConfigurationError,
+  sendWhatsAppTemplate,
+  whatsappService,
+} from "./whatsapp";
 import { logError, logEvent } from "./logger";
 import type { RenderVars } from "./whatsappTemplates";
 import { communicationCampaignStore } from "./communicationCampaigns";
@@ -10,9 +19,24 @@ import { evaluateCallReplyRecipient, evaluateCallReplySource } from "./callReply
 import { communicationPreferenceStore } from "./communicationPreferences";
 import { sallaCartConciergeStore } from "./sallaCartConcierge";
 import { saveWhatsAppCommerceSession } from "./whatsappCommerceStorage";
+import { deliveryReviewStore } from "./deliveryReview";
+import {
+  bookingAssignmentNotificationId,
+  updateBookingAssignmentNotification,
+} from "./bookingAssignmentNotification";
+import { sanitizeWhatsAppCloudTemplateOptions } from "./whatsappCampaignOffer";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
+
+export function communicationJobLeaseMs() {
+  const configured = Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS || 10_000);
+  const providerTimeout = Math.max(
+    1_000,
+    Math.min(120_000, Number.isFinite(configured) ? configured : 10_000),
+  );
+  return Math.max(30_000, providerTimeout + 15_000);
+}
 
 function isTemplateName(value: string | null): value is TemplateName {
   return Boolean(value && listTemplateNames().includes(value as TemplateName));
@@ -134,17 +158,100 @@ function startSallaCartConversation(job: CommunicationJob) {
   });
 }
 
+function deliveryReviewId(job: CommunicationJob) {
+  return job.payload.purpose === "salla_delivery_review"
+    ? String(job.payload.orderId || "").trim()
+    : "";
+}
+
+function blockDeliveryReviewJob(job: CommunicationJob, reason: string) {
+  const blocked = communicationJobStore.markBlocked(job.id, reason);
+  const orderId = deliveryReviewId(job);
+  if (orderId) {
+    deliveryReviewStore.setOutreach(job.owner_uid, orderId, {
+      status: reason,
+      jobId: job.id,
+    });
+  }
+  return blocked;
+}
+
+function deliveryReviewAuthorization(job: CommunicationJob) {
+  const orderId = deliveryReviewId(job);
+  if (!orderId) return { allowed: true as const };
+  const review = deliveryReviewStore.get(job.owner_uid, orderId);
+  if (!review || !["queued", "retry"].includes(review.status)) {
+    return {
+      allowed: false as const,
+      reason: review ? `salla_delivery_review_${review.status}` : "salla_delivery_review_missing",
+    };
+  }
+  if (process.env.SALLA_DELIVERY_REVIEW_ENABLED === "false") {
+    return { allowed: false as const, reason: "salla_delivery_review_feature_disabled" };
+  }
+  const consent = communicationPreferenceStore.marketingEligibility(
+    job.owner_uid,
+    job.recipient_phone,
+    "whatsapp",
+  );
+  if (!consent.eligible) {
+    return {
+      allowed: false as const,
+      reason: `salla_delivery_review_${consent.reason || "not_eligible"}`,
+    };
+  }
+  return { allowed: true as const };
+}
+
+function startDeliveryReviewConversation(job: CommunicationJob) {
+  const orderId = deliveryReviewId(job);
+  if (!orderId) return;
+  saveWhatsAppCommerceSession(db, {
+    ownerUid: job.owner_uid,
+    phone: job.recipient_phone,
+    step: "awaiting_delivery_rating",
+    context: {
+      deliveryReview: {
+        orderId,
+        orderNumber: String(job.payload.orderNumber || orderId),
+        customerName: String(job.payload.customerName || ""),
+      },
+    },
+    ttlMinutes: Math.max(
+      60,
+      Math.min(7 * 24 * 60, Number(process.env.SALLA_DELIVERY_REVIEW_SESSION_MINUTES || 10080)),
+    ),
+  });
+}
+
 export async function processNextCommunicationJob(): Promise<CommunicationJob | null> {
-  const job = communicationJobStore.claimNext();
+  const job = communicationJobStore.claimNext(communicationJobLeaseMs());
   if (!job) return null;
   updateCall(job, "processing");
+  if (bookingAssignmentNotificationId(job)) {
+    updateBookingAssignmentNotification(job, "processing");
+  }
   if (job.campaign_id) communicationCampaignStore.updateRecipient(job, "processing");
 
   try {
+    if (job.campaign_id && job.last_error === PROVIDER_ATTEMPT_STARTED) {
+      const blocked = communicationJobStore.markBlocked(job.id, "ambiguous_provider_outcome");
+      if (blocked) communicationCampaignStore.updateRecipient(
+        blocked,
+        "blocked",
+        "ambiguous_provider_outcome",
+      );
+      return blocked;
+    }
     const bulkAuth = bulkAuthorization(job);
     if (!bulkAuth.allowed) {
       const blocked = communicationJobStore.markBlocked(job.id, "call_bulk_authorization_missing");
       if (blocked) updateCall(blocked, "blocked");
+      if (blocked) {
+        updateBookingAssignmentNotification(blocked, "blocked", {
+          error: "call_bulk_authorization_missing",
+        });
+      }
       if (blocked) updateBulkRun(blocked);
       return blocked;
     }
@@ -168,6 +275,10 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     if (!cartAuthorization.allowed) {
       return blockSallaCartJob(job, cartAuthorization.reason);
     }
+    const reviewAuthorization = deliveryReviewAuthorization(job);
+    if (!reviewAuthorization.allowed) {
+      return blockDeliveryReviewJob(job, reviewAuthorization.reason);
+    }
     const guard = communicationCampaignStore.guardJob(job);
     if (guard.action === "defer") {
       const deferred = communicationJobStore.defer(job.id, 60_000, guard.reason);
@@ -182,19 +293,48 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     if (job.kind !== "whatsapp_template" || !isTemplateName(job.template_name)) {
       throw new Error(`Unsupported communication job: ${job.kind}/${job.template_name || "missing-template"}`);
     }
+    if (job.campaign_id && whatsappService.getStatus().provider !== "cloud_api") {
+      const blocked = communicationJobStore.markBlocked(job.id, "campaign_requires_cloud_api");
+      if (blocked) communicationCampaignStore.updateRecipient(
+        blocked,
+        "blocked",
+        "campaign_requires_cloud_api",
+      );
+      return blocked;
+    }
+    const finalGuard = communicationCampaignStore.guardJob(job);
+    if (finalGuard.action !== "send") {
+      const blocked = finalGuard.action === "defer"
+        ? communicationJobStore.defer(job.id, 60_000, finalGuard.reason)
+        : communicationJobStore.markBlocked(job.id, finalGuard.reason);
+      if (blocked) communicationCampaignStore.updateRecipient(
+        blocked,
+        finalGuard.action === "defer" ? "queued" : "blocked",
+        finalGuard.reason,
+      );
+      return blocked;
+    }
     const vars = renderVars(job.payload.vars && typeof job.payload.vars === "object" ? job.payload.vars : job.payload);
+    const templateOptions = sanitizeWhatsAppCloudTemplateOptions(job.payload.templateOptions);
+    communicationJobStore.markProviderAttemptStarted(job.id);
     const result = await sendWhatsAppTemplate({
       phone: job.recipient_phone,
       template: job.template_name,
       vars,
       owner_uid: job.owner_uid,
       outboundCode: bulkAuth.outboundCode,
+      templateOptions,
     });
     if (isDryRunSendResult(result)) {
       const blocked = sallaCartId(job)
         ? blockSallaCartJob(job, result.reason)
-        : communicationJobStore.markBlocked(job.id, result.reason);
+        : deliveryReviewId(job)
+          ? blockDeliveryReviewJob(job, result.reason)
+          : communicationJobStore.markBlocked(job.id, result.reason);
       if (blocked) updateCall(blocked, "blocked");
+      if (blocked) {
+        updateBookingAssignmentNotification(blocked, "blocked", { error: result.reason });
+      }
       if (blocked) communicationCampaignStore.updateRecipient(blocked, "blocked", result.reason);
       if (blocked) updateBulkRun(blocked);
       return blocked;
@@ -210,13 +350,38 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
       });
       startSallaCartConversation(job);
     }
+    const orderId = deliveryReviewId(job);
+    if (sent && orderId) {
+      deliveryReviewStore.setOutreach(job.owner_uid, orderId, {
+        status: "sent",
+        jobId: job.id,
+        providerMessageId: result.messageId,
+        requestedAt: sent.sent_at,
+      });
+      startDeliveryReviewConversation(job);
+    }
     if (sent) updateCall(sent, "sent", true);
+    if (sent) {
+      updateBookingAssignmentNotification(sent, "sent", {
+        providerMessageId: result.messageId,
+        provider: "provider" in result ? String(result.provider || "") : null,
+      });
+    }
     if (sent) communicationCampaignStore.updateRecipient(sent, "sent", null, result.messageId);
     if (sent) updateBulkRun(sent);
     logEvent("info", "communication.job.sent", { jobId: job.id, kind: job.kind, role: job.role });
     return sent;
   } catch (error) {
-    const failed = communicationJobStore.markFailed(job.id, error);
+    const blockedReason = job.campaign_id
+      ? isAmbiguousWhatsAppSendError(error)
+        ? "ambiguous_provider_outcome"
+        : isWhatsAppConfigurationError(error)
+          ? "whatsapp_configuration_error"
+          : null
+      : null;
+    const failed = blockedReason
+      ? communicationJobStore.markBlocked(job.id, blockedReason)
+      : communicationJobStore.markFailed(job.id, error);
     const cartId = sallaCartId(job);
     if (failed && cartId) {
       sallaCartConciergeStore.setOutreach(job.owner_uid, cartId, {
@@ -224,7 +389,19 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
         jobId: job.id,
       });
     }
+    const orderId = deliveryReviewId(job);
+    if (failed && orderId) {
+      deliveryReviewStore.setOutreach(job.owner_uid, orderId, {
+        status: failed.status,
+        jobId: job.id,
+      });
+    }
     if (failed) updateCall(failed, failed.status);
+    if (failed) {
+      updateBookingAssignmentNotification(failed, failed.status, {
+        error: failed.last_error,
+      });
+    }
     if (failed) communicationCampaignStore.updateRecipient(failed, failed.status, failed.last_error);
     if (failed && ["failed", "blocked", "expired"].includes(failed.status)) updateBulkRun(failed);
     logError("communication.job.failed", error, { jobId: job.id, attempts: job.attempts });

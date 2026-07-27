@@ -14,6 +14,11 @@ import {
   sallaCartConciergeStore,
 } from "./sallaCartConcierge";
 import type { SallaCartProductContext } from "./sallaCartConciergeStorage";
+import {
+  recordDeliveryFeedback,
+  recordDeliveryRating,
+} from "./deliveryReview";
+import { queueBookingAssignmentNotification } from "./bookingAssignmentNotification";
 
 type CustomerRow = {
   id: string;
@@ -45,6 +50,7 @@ type ProductRow = {
 type TechnicianRow = {
   id: string;
   name: string;
+  phone: string;
   max_daily: number;
 };
 
@@ -77,6 +83,14 @@ type CommerceContext = {
     customerName?: string;
     products: SallaCartProductContext[];
     selectedProductIndex?: number;
+  };
+  deliveryReview?: {
+    orderId: string;
+    orderNumber: string;
+    customerName?: string;
+  };
+  campaignInteraction?: {
+    campaignId: string;
   };
 };
 
@@ -184,6 +198,17 @@ function isHumanHelpQuestion(text: string) {
 
 function isExplicitBookingCommand(text: string) {
   return /^(?:حجز|احجز|أحجز|اريد حجز|أريد حجز|ابغى حجز|أبغى حجز)$/.test(text);
+}
+
+function campaignAction(value: string) {
+  const match = String(value || "").trim().match(
+    /^campaign:(change_filters|book_appointment):([a-z0-9_-]{6,100})$/i,
+  );
+  if (!match) return null;
+  return {
+    action: match[1].toLowerCase() as "change_filters" | "book_appointment",
+    campaignId: match[2],
+  };
 }
 
 function sessionTtlMinutes() {
@@ -365,7 +390,7 @@ function closedWeekdays() {
 
 function bookingTechnicians(ownerUid: string) {
   return db.prepare(
-    `SELECT id, name, MAX(1, COALESCE(max_daily, 4)) AS max_daily
+    `SELECT id, name, phone, MAX(1, COALESCE(max_daily, 4)) AS max_daily
        FROM technicians
       WHERE owner_uid = ?
       ORDER BY name ASC`,
@@ -501,6 +526,88 @@ function createCartQuestionTask(
   return taskId;
 }
 
+function beginCampaignFilterChange(
+  ownerUid: string,
+  phone: string,
+  campaignId: string,
+  now: Date,
+): WhatsAppCommerceResult {
+  const campaign = db.prepare(
+    "SELECT id FROM communication_campaigns WHERE owner_uid = ? AND id = ? LIMIT 1",
+  ).get(ownerUid, campaignId) as { id?: string } | undefined;
+  if (!campaign?.id) return { handled: false, reason: "campaign_action_missing" };
+  saveSession(ownerUid, phone, "awaiting_campaign_filter_request", {
+    campaignInteraction: { campaignId },
+  }, now);
+  return {
+    handled: true,
+    kind: "campaign_filter_details_required",
+    reply: "أكيد. اكتب نوع الفلتر أو الجهاز والمقاس أو الكمية المطلوبة، وسيفتح النظام متابعة لموظف المبيعات داخل CRM.",
+  };
+}
+
+function handleCampaignFilterChange(
+  ownerUid: string,
+  phone: string,
+  originalText: string,
+  context: CommerceContext,
+  now: Date,
+): WhatsAppCommerceResult {
+  const campaignId = String(context.campaignInteraction?.campaignId || "");
+  const details = originalText.replace(/\s+/g, " ").trim();
+  if (!campaignId) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "campaign_action_context_missing" };
+  }
+  if (details.length < 3) {
+    return {
+      handled: true,
+      kind: "campaign_filter_details_retry",
+      reply: "التفاصيل غير واضحة. اكتب نوع الفلتر أو الجهاز، المقاس، والكمية المطلوبة.",
+    };
+  }
+  const campaign = db.prepare(
+    "SELECT id, name FROM communication_campaigns WHERE owner_uid = ? AND id = ? LIMIT 1",
+  ).get(ownerUid, campaignId) as { id?: string; name?: string } | undefined;
+  if (!campaign?.id) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "campaign_action_missing" };
+  }
+  const customer = findCustomer(ownerUid, phone);
+  const taskId = `wa_campaign_filter_${crypto
+    .createHash("sha256")
+    .update(`${ownerUid}:${campaignId}:${phone}:${normalizedText(details)}`)
+    .digest("hex")
+    .slice(0, 24)}`;
+  db.prepare(
+    `INSERT OR IGNORE INTO crm_tasks (
+       id, owner_uid, title, status, priority, due_date, assigned_to,
+       related_type, related_id, customer_id, notes, created_at, updated_at
+     ) VALUES (?, ?, ?, 'open', 'high', ?, NULL, 'whatsapp_campaign', ?, ?, ?, ?, ?)`,
+  ).run(
+    taskId,
+    ownerUid,
+    `طلب تغيير فلاتر من حملة ${String(campaign.name || campaignId).slice(0, 120)}`,
+    now.toISOString().slice(0, 10),
+    campaignId,
+    customer?.id || null,
+    [
+      `هاتف العميل: ${phone}`,
+      `الحملة: ${campaign.name || campaignId}`,
+      `طلب العميل: ${details.slice(0, 1000)}`,
+    ].join("\n"),
+    now.toISOString(),
+    now.toISOString(),
+  );
+  clearWhatsAppCommerceSession(db, ownerUid, phone);
+  return {
+    handled: true,
+    kind: "campaign_filter_request_created",
+    reason: taskId,
+    reply: "تم تسجيل طلبك ✅ فتحنا متابعة لموظف المبيعات داخل CRM، وسيرد عليك هنا لتأكيد الفلاتر المناسبة.",
+  };
+}
+
 function handleCartQuestion(
   ownerUid: string,
   phone: string,
@@ -622,6 +729,95 @@ function handleCartQuestion(
     kind: isHumanHelpQuestion(text) ? "cart_human_handoff" : "cart_question_escalated",
     reason: taskId,
     reply: "وصل سؤالك، وأنشأت متابعة لموظف خدمة العملاء حتى يجيبك بمعلومة مؤكدة. سنرد عليك هنا.",
+  };
+}
+
+function handleDeliveryRating(
+  ownerUid: string,
+  phone: string,
+  text: string,
+  context: CommerceContext,
+  now: Date,
+): WhatsAppCommerceResult {
+  const review = context.deliveryReview;
+  if (!review?.orderId) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "delivery_review_context_missing" };
+  }
+  const rating = choiceNumber(text);
+  if (!rating || rating < 1 || rating > 5) {
+    return {
+      handled: true,
+      kind: "delivery_rating_retry",
+      reply: "فضلاً أرسل رقمًا واحدًا من 1 إلى 5 لتقييم تجربتك.",
+    };
+  }
+
+  const result = recordDeliveryRating(ownerUid, review.orderId, rating, now.toISOString());
+  if (!result.review) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "delivery_review_missing" };
+  }
+  if (rating <= 3) {
+    saveWhatsAppCommerceSession(db, {
+      ownerUid,
+      phone,
+      step: "awaiting_delivery_feedback",
+      context: context as Record<string, unknown>,
+      now: now.toISOString(),
+      ttlMinutes: Math.max(
+        60,
+        Math.min(7 * 24 * 60, Number(process.env.SALLA_DELIVERY_REVIEW_SESSION_MINUTES || 10080)),
+      ),
+    });
+    return {
+      handled: true,
+      kind: "delivery_rating_low",
+      reason: result.taskId || undefined,
+      reply: "نأسف أن تجربتك لم تكن بالمستوى المطلوب. ما الذي يمكننا تحسينه؟ اكتب ملاحظتك وسيتابعها فريقنا.",
+    };
+  }
+
+  clearWhatsAppCommerceSession(db, ownerUid, phone);
+  return {
+    handled: true,
+    kind: "delivery_rating_submitted",
+    reply: "شكرًا لتقييمك 🌟 سعدنا بخدمتك، ورأيك يساعدنا على تقديم تجربة أفضل.",
+  };
+}
+
+function handleDeliveryFeedback(
+  ownerUid: string,
+  phone: string,
+  originalText: string,
+  context: CommerceContext,
+  now: Date,
+): WhatsAppCommerceResult {
+  const review = context.deliveryReview;
+  if (!review?.orderId) {
+    clearWhatsAppCommerceSession(db, ownerUid, phone);
+    return { handled: false, reason: "delivery_review_context_missing" };
+  }
+  const feedback = originalText.trim();
+  if (feedback.length < 3) {
+    return {
+      handled: true,
+      kind: "delivery_feedback_retry",
+      reply: "اكتب ملاحظتك باختصار حتى يتمكن فريقنا من متابعتها معك.",
+    };
+  }
+  const result = recordDeliveryFeedback(
+    ownerUid,
+    review.orderId,
+    feedback,
+    now.toISOString(),
+  );
+  clearWhatsAppCommerceSession(db, ownerUid, phone);
+  return {
+    handled: true,
+    kind: "delivery_feedback_escalated",
+    reason: result.taskId || undefined,
+    reply: "شكرًا لتوضيحك. سجلنا ملاحظتك كمتابعة عاجلة وسيتواصل معك الفريق لمعالجتها.",
   };
 }
 
@@ -892,7 +1088,12 @@ function confirmBooking(
   context: CommerceContext,
   slot: SlotOption,
   now: Date,
-): { id: string; service: ServiceContext; technician: TechnicianRow } | null {
+): {
+  id: string;
+  service: ServiceContext;
+  technician: TechnicianRow;
+  technicianNotification: ReturnType<typeof queueBookingAssignmentNotification>;
+} | null {
   return db.transaction(() => {
     const customer = customerFromContext(ownerUid, phone, context);
     if (!customer) return null;
@@ -930,15 +1131,51 @@ function confirmBooking(
     }
 
     const duplicate = db.prepare(
-      `SELECT id
-         FROM bookings
-        WHERE owner_uid = ? AND customer_id = ? AND installation_id = ?
-          AND date = ? AND scheduled_time = ? AND status = 'confirmed'
+      `SELECT booking.id, booking.technician_id, booking.tech_name,
+              COALESCE(technician.phone, '') AS technician_phone
+         FROM bookings booking
+         LEFT JOIN technicians technician
+           ON technician.id = booking.technician_id
+          AND technician.owner_uid = booking.owner_uid
+        WHERE booking.owner_uid = ? AND booking.customer_id = ? AND booking.installation_id = ?
+          AND booking.date = ? AND booking.scheduled_time = ? AND booking.status = 'confirmed'
         LIMIT 1`,
-    ).get(ownerUid, customer.id, installationId, slot.date, slot.time) as { id?: string } | undefined;
+    ).get(ownerUid, customer.id, installationId, slot.date, slot.time) as {
+      id?: string;
+      technician_id?: string;
+      tech_name?: string;
+      technician_phone?: string;
+    } | undefined;
     if (duplicate?.id) {
+      const assignedTechnician: TechnicianRow = {
+        id: duplicate.technician_id || "",
+        name: duplicate.tech_name || "",
+        phone: duplicate.technician_phone || "",
+        max_daily: 0,
+      };
+      const technicianNotification = queueBookingAssignmentNotification({
+        ownerUid,
+        bookingId: duplicate.id,
+        technicianId: assignedTechnician.id,
+        technicianName: assignedTechnician.name,
+        technicianPhone: assignedTechnician.phone,
+        customerId: customer.id,
+        customerName: customer.name,
+        customerPhone: phone,
+        customerAddress: customerAddress(customer),
+        productId: service.productId,
+        productName: service.productName,
+        date: slot.date,
+        scheduledTime: slot.time,
+        createdAt: now.toISOString(),
+      });
       clearWhatsAppCommerceSession(db, ownerUid, phone);
-      return { id: duplicate.id, service: { ...service, installationId }, technician };
+      return {
+        id: duplicate.id,
+        service: { ...service, installationId },
+        technician: assignedTechnician,
+        technicianNotification,
+      };
     }
 
     const id = `wa_booking_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
@@ -969,8 +1206,29 @@ function confirmBooking(
       now.toISOString(),
       now.toISOString(),
     );
+    const technicianNotification = queueBookingAssignmentNotification({
+      ownerUid,
+      bookingId: id,
+      technicianId: technician.id,
+      technicianName: technician.name,
+      technicianPhone: technician.phone,
+      customerId: customer.id,
+      customerName: customer.name,
+      customerPhone: phone,
+      customerAddress: customerAddress(customer),
+      productId: service.productId,
+      productName: service.productName,
+      date: slot.date,
+      scheduledTime: slot.time,
+      createdAt: now.toISOString(),
+    });
     clearWhatsAppCommerceSession(db, ownerUid, phone);
-    return { id, service: { ...service, installationId }, technician };
+    return {
+      id,
+      service: { ...service, installationId },
+      technician,
+      technicianNotification,
+    };
   }).immediate();
 }
 
@@ -994,12 +1252,25 @@ export async function handleWhatsAppCommerceConversation(
   if (!whatsappCommerceStoreSupported()) return { handled: false, reason: "unsupported_store" };
   const phone = normalizePhoneDigits(input.fromPhone);
   if (!phone || !input.ownerUid) return { handled: false, reason: "invalid_identity" };
+  const selectedCampaignAction = campaignAction(input.text);
   const text = normalizedText(input.text);
   if (!text) return { handled: false, reason: "empty_text" };
   const now = (dependencies.now || (() => new Date()))();
   const createPaymentLink = dependencies.createPaymentLink || createPaymentLinkForInvoice;
   const queueSync = dependencies.queueFieldTechSync || queueFieldTechSync;
   const session = getWhatsAppCommerceSession(db, input.ownerUid, phone, now.toISOString());
+
+  if (selectedCampaignAction?.action === "change_filters") {
+    return beginCampaignFilterChange(
+      input.ownerUid,
+      phone,
+      selectedCampaignAction.campaignId,
+      now,
+    );
+  }
+  if (selectedCampaignAction?.action === "book_appointment") {
+    return beginBooking(input.ownerUid, phone, now);
+  }
 
   if (isCancelIntent(text)) {
     clearWhatsAppCommerceSession(db, input.ownerUid, phone);
@@ -1018,8 +1289,17 @@ export async function handleWhatsAppCommerceConversation(
   }
 
   const context = sessionContext(session);
+  if (session.step === "awaiting_delivery_rating") {
+    return handleDeliveryRating(input.ownerUid, phone, text, context, now);
+  }
+  if (session.step === "awaiting_delivery_feedback") {
+    return handleDeliveryFeedback(input.ownerUid, phone, input.text, context, now);
+  }
   if (session.step === "awaiting_cart_question") {
     return handleCartQuestion(input.ownerUid, phone, input.text, text, context, now);
+  }
+  if (session.step === "awaiting_campaign_filter_request") {
+    return handleCampaignFilterChange(input.ownerUid, phone, input.text, context, now);
   }
   if (!["awaiting_name", "awaiting_address"].includes(session.step)) {
     if (isPaymentIntent(text)) return sendPaymentLink(input.ownerUid, phone, now, createPaymentLink);

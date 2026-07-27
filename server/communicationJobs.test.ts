@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { createCommunicationJobStore, retryDelayMs } from "./communicationJobs";
+import {
+  createCommunicationJobStore,
+  PROVIDER_ATTEMPT_STARTED,
+  retryDelayMs,
+} from "./communicationJobs";
 
 function memoryStore() {
   const database = new Database(":memory:");
@@ -38,6 +42,26 @@ test("a claimed job is leased and cannot be claimed twice", () => {
   assert.equal(claimed?.status, "processing");
   assert.equal(claimed?.attempts, 1);
   assert.equal(store.claimNext(), null);
+  database.close();
+});
+
+test("a provider-attempt marker survives lease recovery for at-most-once campaign handling", () => {
+  const { database, store } = memoryStore();
+  const queued = store.enqueue({
+    ownerUid: "o1",
+    eventKey: "campaign:c1:recipient",
+    recipientPhone: "+966501234567",
+    templateName: "general_reminder",
+    campaignId: "c1",
+    campaignRecipientId: "r1",
+  });
+  store.claimNext(5_000);
+  assert.equal(store.markProviderAttemptStarted(queued.id)?.last_error, PROVIDER_ATTEMPT_STARTED);
+  database.prepare("UPDATE communication_jobs SET lease_until = ? WHERE id = ?")
+    .run("2000-01-01T00:00:00.000Z", queued.id);
+  const recovered = store.claimNext(5_000);
+  assert.equal(recovered?.id, queued.id);
+  assert.equal(recovered?.last_error, PROVIDER_ATTEMPT_STARTED);
   database.close();
 });
 

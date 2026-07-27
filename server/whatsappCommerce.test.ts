@@ -33,6 +33,10 @@ function clearCommerceFixtures() {
     "customers",
     "crm_tasks",
     "salla_abandoned_carts",
+    "communication_jobs",
+    "communication_campaign_recipients",
+    "communication_campaigns",
+    "technician_notifications",
   ]) {
     db.prepare(`DELETE FROM ${table}`).run();
   }
@@ -81,6 +85,15 @@ function seedIssuedInvoice() {
        230, 'SAR', '[]', ?, ?
      )`,
   ).run(ownerUid, now.toISOString(), existingPhone, now.toISOString(), now.toISOString());
+}
+
+function seedCampaign(id = "camp_action_test") {
+  db.prepare(
+    `INSERT INTO communication_campaigns (
+       id, owner_uid, name, template_name, status, audience_filter, template_vars
+     ) VALUES (?, ?, 'عرض فلاتر واتساب', 'campaign_offer_image', 'completed', '{}', '{}')`,
+  ).run(id, ownerUid);
+  return id;
 }
 
 test.beforeEach(() => {
@@ -294,6 +307,23 @@ test("an existing customer can reserve a real technician slot without duplicate 
   assert.equal(booking.scheduled_time, "14:00");
   assert.equal(booking.status, "confirmed");
   assert.equal(booking.source, "whatsapp");
+  const technicianJob = db.prepare(
+    `SELECT recipient_phone, template_name, role, payload
+       FROM communication_jobs
+      WHERE owner_uid = ? AND event_key = ?`,
+  ).get(ownerUid, `booking:${confirmation.bookingId}:technician-assignment:1`) as Record<string, unknown>;
+  assert.equal(technicianJob.recipient_phone, "966511111111");
+  assert.equal(technicianJob.template_name, "technician_assigned");
+  assert.equal(technicianJob.role, "agent");
+  assert.match(String(technicianJob.payload), /whatsapp_booking_technician_assignment/);
+  const technicianNotification = db.prepare(
+    `SELECT status, booking_id, technician_id, customer_phone
+       FROM technician_notifications
+      WHERE owner_uid = ? AND booking_id = ?`,
+  ).get(ownerUid, confirmation.bookingId) as Record<string, unknown>;
+  assert.equal(technicianNotification.status, "queued");
+  assert.equal(technicianNotification.technician_id, "tech-wa-1");
+  assert.equal(technicianNotification.customer_phone, existingPhone);
 
   const repeatedChoice = await handleWhatsAppCommerceConversation(
     { ownerUid, fromPhone: existingPhone, text: "1" },
@@ -355,4 +385,53 @@ test("a new WhatsApp customer is created, addressed, and booked against a select
   assert.equal(installation.product_id, "product-wa-1");
   assert.equal(installation.status, "pending_installation");
   assert.equal(installation.source, "whatsapp");
+});
+
+test("the change-filters campaign button collects details into a high-priority CRM task", async () => {
+  seedExistingCustomer();
+  const campaignId = seedCampaign();
+
+  const prompt = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: `campaign:change_filters:${campaignId}`,
+    },
+    { now: () => now },
+  );
+  assert.equal(prompt.kind, "campaign_filter_details_required");
+
+  const submitted = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "أحتاج فلتر 7 مراحل مع ثلاث شمعات إضافية",
+    },
+    { now: () => now },
+  );
+  assert.equal(submitted.kind, "campaign_filter_request_created");
+  const task = db.prepare(
+    `SELECT priority, related_type, related_id, customer_id, notes
+       FROM crm_tasks WHERE id = ?`,
+  ).get(submitted.reason) as Record<string, unknown>;
+  assert.equal(task.priority, "high");
+  assert.equal(task.related_type, "whatsapp_campaign");
+  assert.equal(task.related_id, campaignId);
+  assert.equal(task.customer_id, "customer-wa-1");
+  assert.match(String(task.notes), /7 مراحل/);
+});
+
+test("the book-appointment campaign button enters the existing self-service booking flow", async () => {
+  seedExistingCustomer();
+  const campaignId = seedCampaign();
+  const result = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: `campaign:book_appointment:${campaignId}`,
+    },
+    { now: () => now },
+  );
+  assert.equal(result.kind, "booking_kind");
+  assert.match(String(result.reply), /ما نوع الموعد/);
 });

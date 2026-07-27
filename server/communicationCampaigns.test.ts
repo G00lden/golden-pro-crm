@@ -5,6 +5,8 @@ import { createCommunicationCampaignStore } from "./communicationCampaigns";
 import { createCommunicationJobStore } from "./communicationJobs";
 import { createCommunicationPreferenceStore } from "./communicationPreferences";
 
+process.env.WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX = "https://goldenksa.store/";
+
 function system() {
   const database = new Database(":memory:");
   database.exec(`
@@ -26,6 +28,7 @@ function system() {
     CREATE TABLE communication_campaigns (
       id TEXT PRIMARY KEY, owner_uid TEXT, name TEXT, channel TEXT, template_name TEXT,
       status TEXT, audience_filter TEXT, template_vars TEXT, scheduled_at TEXT,
+      media_type TEXT, media_url TEXT, order_url TEXT,
       rate_limit_per_minute INTEGER, frequency_cap_days INTEGER, created_by TEXT,
       started_at TEXT, completed_at TEXT, created_at TEXT, updated_at TEXT
     );
@@ -145,5 +148,68 @@ test("delivered and read campaign receipts still enforce the frequency cap", () 
   const preview = campaigns.preview("o1", campaign.id)!;
   assert.equal(preview.eligible, 0);
   assert.deepEqual(preview.excluded, { frequency_cap: 1 });
+  database.close();
+});
+
+test("a queued recipient reserves the frequency cap across concurrent campaigns", () => {
+  const { database, preferences, campaigns } = system();
+  customer(database, "c1", "0501234567");
+  preferences.setPreference({ ownerUid: "o1", phone: "0501234567", status: "granted", evidence: "form" });
+  const first = campaigns.create({
+    ownerUid: "o1",
+    name: "First queued campaign",
+    templateName: "general_reminder",
+    audienceFilter: { allCustomers: true },
+    frequencyCapDays: 7,
+  });
+  const second = campaigns.create({
+    ownerUid: "o1",
+    name: "Second concurrent campaign",
+    templateName: "general_reminder",
+    audienceFilter: { allCustomers: true },
+    frequencyCapDays: 7,
+  });
+
+  campaigns.launch("o1", first.id);
+  const preview = campaigns.preview("o1", second.id)!;
+  assert.equal(preview.eligible, 0);
+  assert.deepEqual(preview.excluded, { frequency_cap: 1 });
+  const launched = campaigns.launch("o1", second.id)!;
+  assert.equal(launched.stats.queued, 0);
+  assert.equal(launched.stats.skipped, 1);
+  database.close();
+});
+
+test("media campaigns queue a Meta header plus fixed order, filter, and booking buttons", () => {
+  const { database, preferences, jobs, campaigns } = system();
+  customer(database, "c1", "0501234567");
+  preferences.setPreference({ ownerUid: "o1", phone: "0501234567", status: "granted", evidence: "form" });
+  const campaign = campaigns.create({
+    ownerUid: "o1",
+    name: "Filter image offer",
+    templateName: "campaign_offer_image",
+    audienceFilter: { allCustomers: true },
+    templateVars: { offer_text: "عرض خاص على الفلاتر" },
+    media: { type: "image", url: "https://cdn.example.test/filter-offer.jpg" },
+    orderUrl: "https://goldenksa.store/products/filter-kit",
+  });
+  assert.deepEqual(campaign.media, {
+    type: "image",
+    url: "https://cdn.example.test/filter-offer.jpg",
+  });
+
+  const launched = campaigns.launch("o1", campaign.id)!;
+  assert.equal(launched.stats.queued, 1);
+  const job = jobs.claimNext()!;
+  const options = job.payload.templateOptions as Record<string, any>;
+  assert.deepEqual(options.header, {
+    type: "image",
+    link: "https://cdn.example.test/filter-offer.jpg",
+  });
+  assert.deepEqual(options.buttons, [
+    { type: "url", index: 0, text: "products/filter-kit" },
+    { type: "quick_reply", index: 1, payload: `campaign:change_filters:${campaign.id}` },
+    { type: "quick_reply", index: 2, payload: `campaign:book_appointment:${campaign.id}` },
+  ]);
   database.close();
 });

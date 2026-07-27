@@ -21,6 +21,9 @@ export type TemplateName =
   | "missed_call_customer"
   | "missed_call_agent"
   | "abandoned_cart_support"
+  | "delivery_review_request"
+  | "campaign_offer_image"
+  | "campaign_offer_video"
   | "general_reminder";
 
 const DEFAULT_COMPANY = process.env.COMPANY_NAME || "Breexe Pro";
@@ -30,6 +33,13 @@ export const TEMPLATES: Record<TemplateName, string> = {
 لاحظنا أن {product_names} ما زالت في سلتك.
 إذا عندك استفسار عن السعر أو المواصفات أو التركيب، رد على هذه الرسالة وسنساعدك.
 رابط إكمال الطلب: {checkout_url}`,
+  delivery_review_request: `مرحبًا {customer_name} 👋
+تم توصيل طلبك رقم {order_number}.
+يهمنا رأيك في تجربتك معنا. قيّمها من 1 إلى 5 بالرد على هذه الرسالة.`,
+  campaign_offer_image: `مرحبًا {customer_name} 👋
+{offer_text}`,
+  campaign_offer_video: `مرحبًا {customer_name} 👋
+{offer_text}`,
   call_answered_customer: `شكراً لاتصالك بـ{company_name}.
 تم تسجيل اتصالك بنجاح. يمكنك كتابة ما تحتاجه هنا عبر واتساب، وسنتابع معك في أقرب فرصة.`,
   maintenance_reminder_first: `عزيزي {customer_name}،
@@ -69,10 +79,12 @@ export const TEMPLATES: Record<TemplateName, string> = {
   technician_assigned: `عزيزي الفني {technician_name}،
 تم تعيينك لموعد صيانة:
 - العميل: {customer_name}
+- الهاتف: {customer_phone}
 - المنتج: {product_name}
 - العنوان: {customer_address}
 - التاريخ: {maintenance_date}
-- الوقت: {scheduled_time}`,
+- الوقت: {scheduled_time}
+- رقم الحجز: {booking_id}`,
   completion_thanks: `شكراً لكم {customer_name} على ثقتكم.
 تم إنجاز صيانة {product_name} بنجاح.
 الموعد القادم: {next_maintenance_date}.
