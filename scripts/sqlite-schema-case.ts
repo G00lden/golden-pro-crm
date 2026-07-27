@@ -234,7 +234,12 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10600) throw new Error(`Expected schema 10600, got ${userVersion}`);
+if (userVersion !== 10700) throw new Error(`Expected schema 10700, got ${userVersion}`);
+for (const required of ["owner_uid", "phone", "step", "context_json", "expires_at"]) {
+  if (!columns("whatsapp_commerce_sessions").has(required)) {
+    throw new Error(`whatsapp_commerce_sessions.${required} is missing`);
+  }
+}
 
 for (const required of [
   "remote_status_id",
@@ -536,6 +541,8 @@ const ledgerHardeningMigration = db.prepare("SELECT release FROM schema_migratio
 if (ledgerHardeningMigration?.release !== "1.3.7-ledger-hardening") throw new Error("Invoice ledger hardening migration was not updated.");
 const mobileOnboardingMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10310").get() as { release?: string };
 if (mobileOnboardingMigration?.release !== "2.1.2-mobile-onboarding-clarity") throw new Error("Mobile onboarding migration was not updated.");
+const whatsappCommerceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10700").get() as { release?: string };
+if (whatsappCommerceMigration?.release !== "1.7.0-whatsapp-payment-booking") throw new Error("WhatsApp commerce migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

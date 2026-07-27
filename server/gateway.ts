@@ -160,7 +160,7 @@ export async function dispatchMessage(
   ownerUid: string,
   phone: string,
   body: string,
-  opts: { role: string; callId?: string } = { role: "customer" },
+  opts: { role: string; callId?: string; allowSmsFallback?: boolean } = { role: "customer" },
 ): Promise<{ channel: "whatsapp" | "sms"; to: string; body: string; accepted: boolean; status: string }> {
   const to = normalizePhoneDigits(phone);
   const wa = whatsappService.getStatus();
@@ -183,10 +183,18 @@ export async function dispatchMessage(
       const blocked = isDryRunSendResult(res);
       return { channel: "whatsapp", to, body, accepted: !blocked, status: blocked ? "dry_run" : "sent" };
     } catch (err) {
-      logError("gateway.whatsapp_send_failed_fallback_sms", err);
+      logError(
+        opts.allowSmsFallback === false
+          ? "gateway.whatsapp_send_failed"
+          : "gateway.whatsapp_send_failed_fallback_sms",
+        err,
+      );
     }
   }
 
+  if (opts.allowSmsFallback === false) {
+    return { channel: "whatsapp", to, body, accepted: false, status: "unavailable" };
+  }
   enqueueSms(ownerUid, to, body, opts.role, opts.callId);
   return { channel: "sms", to, body, accepted: true, status: "queued" };
 }

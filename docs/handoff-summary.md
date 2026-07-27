@@ -572,3 +572,15 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Verification completed locally: `394/394` unit tests, schema migration tests, TypeScript lint, production build, desktop visual inspection, mobile viewport inspection, and a consented link check confirming that `ttclid` reaches the same-origin redirect.
 - The first deploy preflight exposed an existing cross-process SQLite trigger recreation race. Trigger replacement now runs in one immediate transaction; the concurrent invoice-sequence suite passed three consecutive runs before deployment resumed.
 - The consent banner and both privacy-policy surfaces now name TikTok measurement explicitly and disclose the click identifier, campaign source, network/browser context, one-way phone hash, ninety-day attribution retention, and the exclusion of raw WhatsApp messages and raw phone numbers from TikTok delivery.
+
+## 2026-07-27 - WhatsApp Cloud payment links and self-service booking 1.7.0 [Codex]
+
+- Added an Arabic WhatsApp commerce conversation flow for payment, existing-customer maintenance, and new-customer installation/service booking.
+- Payment requests select the latest payable issued invoice by the WhatsApp sender phone and reuse the hardened Tap idempotency reservation; the customer return page reconciles Tap publicly without exposing customer PII.
+- Booking availability now uses technician slot conflicts, each technician's daily capacity, Riyadh lead time, configurable working slots, closed weekdays, and an immediate SQLite transaction for final assignment.
+- New WhatsApp customers, addresses, installations, confirmed bookings, evidence requirements, and FieldTech synchronization are created as one controlled CRM workflow.
+- Commerce sessions are durable and expiring under SQLite schema `10700`; `WHATSAPP_COMMERCE_ENABLED=false` is the isolated rollback switch.
+- WhatsApp bot responses never fall back silently to SMS, and webhook summaries do not log the response body or payment URL.
+- Added regression tests for payment-key reuse, existing-customer booking, new-customer onboarding, duplicate-choice handling, Tap return reconciliation, and schema migration.
+- Production was not activated: the current environment still uses the web provider, lacks the webhook verification/signature values and Tap key, and retains the outbound allowlist gate. The Meta app also remains unpublished and requires its application icon.
+- Arabic activation and rollback guide: `docs/whatsapp-cloud-payment-booking-ar.md`.

@@ -89,6 +89,9 @@ WHATSAPP_PROVIDER=cloud_api
 WHATSAPP_CLOUD_API_VERSION=v23.0
 WHATSAPP_CLOUD_PHONE_NUMBER_ID=
 WHATSAPP_CLOUD_API_TOKEN=
+WHATSAPP_WEBHOOK_VERIFY_TOKEN=
+WHATSAPP_APP_SECRET=
+WHATSAPP_COMMERCE_ENABLED=true
 WHATSAPP_CLOUD_TEMPLATE_NAME=
 WHATSAPP_CLOUD_TEMPLATE_LANGUAGE=ar
 ```
@@ -198,4 +201,5 @@ npm run test:smoke
 - `docs/model-context.md`: سياق شامل مخصص لإرساله لأي موديل لفهم المشروع بسرعة.
 - `docs/store-webhook-architecture.md`: تفاصيل رحلة سلة والويب هوك.
 - `docs/reminder-architecture.md`: تفاصيل التذكيرات والجدولة والإرسال.
+- `docs/whatsapp-cloud-payment-booking-ar.md`: تشغيل واتساب كلاود لروابط الدفع والحجز الذاتي واختبار القبول والتراجع.
 - `docs/vps-deployment-ar.md`: خطوات النشر المدعومة على VPS.

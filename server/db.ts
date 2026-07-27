@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import fs from "fs";
 import { PUBLIC_LEAD_SCHEMA_SQL } from "./publicLeadStorage";
 import { TIKTOK_ATTRIBUTION_SCHEMA_SQL } from "./tiktokAttributionStorage";
+import { WHATSAPP_COMMERCE_SCHEMA_SQL } from "./whatsappCommerceStorage";
 import { calculateDocumentTotals, normalizeVatPercent, type DiscountMode } from "../shared/financial";
 import { verifiableInvoiceItems } from "../shared/invoiceItems";
 
@@ -11,7 +12,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10600;
+const TARGET_SCHEMA_VERSION = 10700;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -1294,6 +1295,7 @@ db.exec(PUBLIC_LEAD_SCHEMA_SQL);
 // Delivery can be disabled independently without losing the local customer
 // journey, and production creates a pre-migration backup before this runs.
 db.exec(TIKTOK_ATTRIBUTION_SCHEMA_SQL);
+db.exec(WHATSAPP_COMMERCE_SCHEMA_SQL);
 
 for (const [table, columns] of [
   ["customers", [["address", "TEXT DEFAULT ''"], ["customer_address", "TEXT DEFAULT ''"]]],
@@ -1994,6 +1996,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10500, '1.5.0-unified-call-center');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10501, '1.5.1-salla-fieldtech-addresses');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10600, '1.6.0-tiktok-whatsapp-attribution');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10700, '1.7.0-whatsapp-payment-booking');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
