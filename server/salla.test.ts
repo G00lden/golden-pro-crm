@@ -647,7 +647,7 @@ test("uses independent customer pagination and requests bidirectional Salla scop
   assert.equal(salla.customerMaxSyncPages(), 200);
   assert.equal(
     salla.defaultScopes(),
-    "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write",
+    "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write carts.read",
   );
 });
 

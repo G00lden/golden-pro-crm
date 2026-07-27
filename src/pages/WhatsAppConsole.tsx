@@ -30,6 +30,8 @@ type TemplateVariableField = {
 const TEMPLATE_FIELD_DEFINITIONS = {
   customer_name: { key: "customer_name", label: "اسم العميل", placeholder: "مثال: محمد أحمد…", autoComplete: "name" },
   product_name: { key: "product_name", label: "اسم المنتج", placeholder: "مثال: فلتر المياه المنزلي…", autoComplete: "off" },
+  product_names: { key: "product_names", label: "منتجات السلة", placeholder: "مثال: فلتر المياه، شمعات بديلة…", autoComplete: "off" },
+  checkout_url: { key: "checkout_url", label: "رابط إكمال السلة", placeholder: "https://store.example/cart/…", autoComplete: "url", dir: "ltr" },
   maintenance_date: { key: "maintenance_date", label: "تاريخ الصيانة", placeholder: "مثال: 2026-08-15…", type: "date", autoComplete: "off", dir: "ltr" },
   scheduled_time: { key: "scheduled_time", label: "وقت الموعد", placeholder: "مثال: 14:30…", type: "time", autoComplete: "off", dir: "ltr" },
   technician_name: { key: "technician_name", label: "اسم الفني", placeholder: "مثال: أحمد علي…", autoComplete: "name" },
@@ -58,6 +60,7 @@ const TEMPLATE_VARIABLE_FIELDS: Record<string, TemplateVariableField[]> = {
   call_answered_customer: fieldsFor(),
   missed_call_customer: fieldsFor("department_name", "agent_name"),
   missed_call_agent: fieldsFor("department_name", "customer_phone", "call_time"),
+  abandoned_cart_support: fieldsFor("customer_name", "product_names", "checkout_url"),
   general_reminder: fieldsFor("message"),
 };
 

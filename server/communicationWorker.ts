@@ -7,6 +7,9 @@ import { logError, logEvent } from "./logger";
 import type { RenderVars } from "./whatsappTemplates";
 import { communicationCampaignStore } from "./communicationCampaigns";
 import { evaluateCallReplyRecipient, evaluateCallReplySource } from "./callReplyPolicy";
+import { communicationPreferenceStore } from "./communicationPreferences";
+import { sallaCartConciergeStore } from "./sallaCartConcierge";
+import { saveWhatsAppCommerceSession } from "./whatsappCommerceStorage";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -71,6 +74,66 @@ function updateBulkRun(job: CommunicationJob) {
   ).run(failures ? "completed_with_errors" : "completed", new Date().toISOString(), runId, job.owner_uid);
 }
 
+function sallaCartId(job: CommunicationJob) {
+  return job.payload.purpose === "salla_abandoned_cart"
+    ? String(job.payload.cartId || "").trim()
+    : "";
+}
+
+function blockSallaCartJob(job: CommunicationJob, reason: string) {
+  const blocked = communicationJobStore.markBlocked(job.id, reason);
+  const cartId = sallaCartId(job);
+  if (cartId) {
+    sallaCartConciergeStore.setOutreach(job.owner_uid, cartId, {
+      status: reason,
+      jobId: job.id,
+    });
+  }
+  return blocked;
+}
+
+function sallaCartAuthorization(job: CommunicationJob) {
+  const cartId = sallaCartId(job);
+  if (!cartId) return { allowed: true as const };
+  const cart = sallaCartConciergeStore.get(job.owner_uid, cartId);
+  if (!cart || cart.status !== "active") {
+    return { allowed: false as const, reason: cart ? `salla_cart_${cart.status}` : "salla_cart_missing" };
+  }
+  const consent = communicationPreferenceStore.marketingEligibility(
+    job.owner_uid,
+    job.recipient_phone,
+    "whatsapp",
+  );
+  if (!consent.eligible) {
+    return { allowed: false as const, reason: `salla_cart_${consent.reason || "not_eligible"}` };
+  }
+  return { allowed: true as const };
+}
+
+function startSallaCartConversation(job: CommunicationJob) {
+  const cartId = sallaCartId(job);
+  if (!cartId) return;
+  const checkoutUrl = String(job.payload.checkoutUrl || "").trim();
+  const products = Array.isArray(job.payload.products) ? job.payload.products : [];
+  saveWhatsAppCommerceSession(db, {
+    ownerUid: job.owner_uid,
+    phone: job.recipient_phone,
+    step: "awaiting_cart_question",
+    context: {
+      cart: {
+        cartId,
+        checkoutUrl,
+        customerName: String(job.payload.customerName || ""),
+        products,
+      },
+    },
+    ttlMinutes: Math.max(
+      60,
+      Math.min(7 * 24 * 60, Number(process.env.SALLA_CART_WHATSAPP_SESSION_MINUTES || 1440)),
+    ),
+  });
+}
+
 export async function processNextCommunicationJob(): Promise<CommunicationJob | null> {
   const job = communicationJobStore.claimNext();
   if (!job) return null;
@@ -101,6 +164,10 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
         return blocked;
       }
     }
+    const cartAuthorization = sallaCartAuthorization(job);
+    if (!cartAuthorization.allowed) {
+      return blockSallaCartJob(job, cartAuthorization.reason);
+    }
     const guard = communicationCampaignStore.guardJob(job);
     if (guard.action === "defer") {
       const deferred = communicationJobStore.defer(job.id, 60_000, guard.reason);
@@ -124,13 +191,25 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
       outboundCode: bulkAuth.outboundCode,
     });
     if (isDryRunSendResult(result)) {
-      const blocked = communicationJobStore.markBlocked(job.id, result.reason);
+      const blocked = sallaCartId(job)
+        ? blockSallaCartJob(job, result.reason)
+        : communicationJobStore.markBlocked(job.id, result.reason);
       if (blocked) updateCall(blocked, "blocked");
       if (blocked) communicationCampaignStore.updateRecipient(blocked, "blocked", result.reason);
       if (blocked) updateBulkRun(blocked);
       return blocked;
     }
     const sent = communicationJobStore.markSent(job.id, result.messageId);
+    const cartId = sallaCartId(job);
+    if (sent && cartId) {
+      sallaCartConciergeStore.setOutreach(job.owner_uid, cartId, {
+        status: "sent",
+        jobId: job.id,
+        providerMessageId: result.messageId,
+        sentAt: sent.sent_at,
+      });
+      startSallaCartConversation(job);
+    }
     if (sent) updateCall(sent, "sent", true);
     if (sent) communicationCampaignStore.updateRecipient(sent, "sent", null, result.messageId);
     if (sent) updateBulkRun(sent);
@@ -138,6 +217,13 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     return sent;
   } catch (error) {
     const failed = communicationJobStore.markFailed(job.id, error);
+    const cartId = sallaCartId(job);
+    if (failed && cartId) {
+      sallaCartConciergeStore.setOutreach(job.owner_uid, cartId, {
+        status: failed.status,
+        jobId: job.id,
+      });
+    }
     if (failed) updateCall(failed, failed.status);
     if (failed) communicationCampaignStore.updateRecipient(failed, failed.status, failed.last_error);
     if (failed && ["failed", "blocked", "expired"].includes(failed.status)) updateBulkRun(failed);

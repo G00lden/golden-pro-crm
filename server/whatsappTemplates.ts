@@ -20,11 +20,16 @@ export type TemplateName =
   | "call_answered_customer"
   | "missed_call_customer"
   | "missed_call_agent"
+  | "abandoned_cart_support"
   | "general_reminder";
 
 const DEFAULT_COMPANY = process.env.COMPANY_NAME || "Breexe Pro";
 
 export const TEMPLATES: Record<TemplateName, string> = {
+  abandoned_cart_support: `مرحبًا {customer_name} 👋
+لاحظنا أن {product_names} ما زالت في سلتك.
+إذا عندك استفسار عن السعر أو المواصفات أو التركيب، رد على هذه الرسالة وسنساعدك.
+رابط إكمال الطلب: {checkout_url}`,
   call_answered_customer: `شكراً لاتصالك بـ{company_name}.
 تم تسجيل اتصالك بنجاح. يمكنك كتابة ما تحتاجه هنا عبر واتساب، وسنتابع معك في أقرب فرصة.`,
   maintenance_reminder_first: `عزيزي {customer_name}،

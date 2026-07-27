@@ -30,6 +30,10 @@ const desiredEvents = [
   "product.created",
   "product.updated",
   "product.deleted",
+  "abandoned.cart",
+  "abandoned.cart.updated",
+  "abandoned.cart.status.changed",
+  "abandoned.cart.purchased",
 ];
 
 function requireValue(value, label) {
@@ -85,12 +89,23 @@ async function main() {
   requireValue(ownerUid, "SALLA_APP_OWNER_UID");
   requireValue(appUrl, "APP_URL");
   requireValue(secret, "SALLA_APP_WEBHOOK_SECRET");
-  const store = JSON.parse(await readFile(integrationPath, "utf8"));
+  let store;
+  try {
+    store = JSON.parse(await readFile(integrationPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(`No local Salla authorization store exists at ${integrationPath}. Connect or restore the production integration before reconciling webhooks.`);
+    }
+    throw error;
+  }
   const integration = store?.[ownerUid];
   const token = requireValue(integration?.access_token, "Connected Salla access token");
   const scope = String(integration?.scope || "").split(/\s+/);
   if (!scope.includes("webhooks.read_write")) {
     throw new Error("The connected Salla token does not include webhooks.read_write.");
+  }
+  if (!scope.includes("carts.read")) {
+    throw new Error("The connected Salla token does not include carts.read. Re-authorize the store before subscribing to abandoned-cart events.");
   }
 
   const available = new Set(dataRows(await request(token, "/webhooks/events")).map(eventName).filter(Boolean));

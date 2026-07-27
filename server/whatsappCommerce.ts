@@ -10,6 +10,10 @@ import {
   type WhatsAppCommerceSession,
   type WhatsAppCommerceStep,
 } from "./whatsappCommerceStorage";
+import {
+  sallaCartConciergeStore,
+} from "./sallaCartConcierge";
+import type { SallaCartProductContext } from "./sallaCartConciergeStorage";
 
 type CustomerRow = {
   id: string;
@@ -67,6 +71,13 @@ type CommerceContext = {
   customerId?: string;
   slots?: SlotOption[];
   service?: ServiceContext;
+  cart?: {
+    cartId: string;
+    checkoutUrl: string;
+    customerName?: string;
+    products: SallaCartProductContext[];
+    selectedProductIndex?: number;
+  };
 };
 
 export type WhatsAppCommerceResult = {
@@ -145,6 +156,34 @@ function isBookingIntent(text: string) {
 
 function isCancelIntent(text: string) {
   return /^(?:الغاء|إلغاء|الغي|ألغي|ابدأ من جديد|ابدا من جديد|reset)$/.test(text);
+}
+
+function isCartPriceQuestion(text: string) {
+  return /(?:سعر|بكم|كم سعر|تكلف|القيمه|القيمة)/.test(text);
+}
+
+function isCartAvailabilityQuestion(text: string) {
+  return /(?:متوفر|متاح|موجود|توفر|المخزون|مخزون)/.test(text);
+}
+
+function isCartDescriptionQuestion(text: string) {
+  return /(?:مواصف|تفاصيل|وصف|مميزات|مزايا|وش هو|ايش هو|ما هو)/.test(text);
+}
+
+function isCartServiceQuestion(text: string) {
+  return /(?:تركيب|صيانه|صيانة|خدمه|خدمة)/.test(text);
+}
+
+function isCartCheckoutQuestion(text: string) {
+  return /(?:اكمل|أكمل|اتمام|إتمام|اطلب|أطلب|اشتري|أشتري|رابط|السله|السلة|دفع|سداد)/.test(text);
+}
+
+function isHumanHelpQuestion(text: string) {
+  return /(?:موظف|مندوب|اتصال|كلمني|كلّموني|تواصل بشري|خدمة العملاء)/.test(text);
+}
+
+function isExplicitBookingCommand(text: string) {
+  return /^(?:حجز|احجز|أحجز|اريد حجز|أريد حجز|ابغى حجز|أبغى حجز)$/.test(text);
 }
 
 function sessionTtlMinutes() {
@@ -383,6 +422,207 @@ function formatSlot(slot: SlotOption) {
 
 function sessionContext(session: WhatsAppCommerceSession): CommerceContext {
   return session.context as CommerceContext;
+}
+
+function cartProducts(context: CommerceContext) {
+  return Array.isArray(context.cart?.products)
+    ? context.cart.products.filter((item) => item && typeof item.name === "string").slice(0, 20)
+    : [];
+}
+
+function formatMoney(value: number | null, currency: string) {
+  if (value === null || !Number.isFinite(Number(value))) return "السعر غير متوفر في الكتالوج";
+  return `${Number(value).toLocaleString("ar-SA", { maximumFractionDigits: 2 })} ${currency || "SAR"}`;
+}
+
+function selectedCartProduct(
+  context: CommerceContext,
+  text: string,
+): { product: SallaCartProductContext | null; index: number | null } {
+  const products = cartProducts(context);
+  const explicitChoice = choiceNumber(text);
+  if (explicitChoice && products[explicitChoice - 1]) {
+    return { product: products[explicitChoice - 1], index: explicitChoice - 1 };
+  }
+  const selectedIndex = Number(context.cart?.selectedProductIndex);
+  if (Number.isInteger(selectedIndex) && products[selectedIndex]) {
+    return { product: products[selectedIndex], index: selectedIndex };
+  }
+  const matchingIndex = products.findIndex((product) => {
+    const name = normalizedText(product.name);
+    return name.length >= 4 && (text.includes(name) || name.includes(text));
+  });
+  if (matchingIndex >= 0) return { product: products[matchingIndex], index: matchingIndex };
+  return products.length === 1
+    ? { product: products[0], index: 0 }
+    : { product: null, index: null };
+}
+
+function createCartQuestionTask(
+  ownerUid: string,
+  phone: string,
+  context: CommerceContext,
+  question: string,
+  now: Date,
+) {
+  const cartId = String(context.cart?.cartId || "");
+  const customer = findCustomer(ownerUid, phone);
+  const hash = crypto
+    .createHash("sha256")
+    .update(`${ownerUid}:${cartId}:${phone}:${normalizedText(question)}`)
+    .digest("hex")
+    .slice(0, 24);
+  const taskId = `wa_cart_${hash}`;
+  const productNames = cartProducts(context).map((item) => item.name).join("، ");
+  db.prepare(
+    `INSERT OR IGNORE INTO crm_tasks (
+       id, owner_uid, title, status, priority, due_date, assigned_to,
+       related_type, related_id, customer_id, notes, created_at, updated_at
+     ) VALUES (?, ?, ?, 'open', 'high', ?, NULL, 'salla_abandoned_cart', ?, ?, ?, ?, ?)`,
+  ).run(
+    taskId,
+    ownerUid,
+    `استفسار واتساب عن سلة ${cartId}`,
+    now.toISOString().slice(0, 10),
+    cartId,
+    customer?.id || null,
+    [
+      `هاتف العميل: ${phone}`,
+      `المنتجات: ${productNames || "غير محددة"}`,
+      `السؤال: ${question.slice(0, 1000)}`,
+      `رابط السلة: ${context.cart?.checkoutUrl || "غير متوفر"}`,
+    ].join("\n"),
+    now.toISOString(),
+    now.toISOString(),
+  );
+  if (cartId) {
+    sallaCartConciergeStore.recordQuestion(ownerUid, cartId, question, now.toISOString());
+  }
+  return taskId;
+}
+
+function handleCartQuestion(
+  ownerUid: string,
+  phone: string,
+  originalText: string,
+  text: string,
+  context: CommerceContext,
+  now: Date,
+): WhatsAppCommerceResult {
+  const cart = context.cart;
+  const products = cartProducts(context);
+  if (!cart || !cart.cartId) return { handled: false, reason: "cart_context_missing" };
+  sallaCartConciergeStore.recordQuestion(ownerUid, cart.cartId, originalText, now.toISOString());
+
+  if (isExplicitBookingCommand(text)) return beginBooking(ownerUid, phone, now);
+
+  if (isCartCheckoutQuestion(text)) {
+    return {
+      handled: true,
+      kind: "cart_checkout_link",
+      reply: cart.checkoutUrl
+        ? `تفضل رابط إكمال طلبك:\n${cart.checkoutUrl}`
+        : "رابط السلة غير متوفر الآن. سأحوّل طلبك لموظف ليتابع معك.",
+    };
+  }
+
+  const selected = selectedCartProduct(context, text);
+  const asksKnownQuestion = isCartPriceQuestion(text)
+    || isCartAvailabilityQuestion(text)
+    || isCartDescriptionQuestion(text)
+    || isCartServiceQuestion(text);
+
+  if (selected.index !== null && cart.selectedProductIndex !== selected.index) {
+    cart.selectedProductIndex = selected.index;
+    saveSession(ownerUid, phone, "awaiting_cart_question", context, now);
+  }
+
+  if (!selected.product && products.length > 1 && asksKnownQuestion) {
+    return {
+      handled: true,
+      kind: "cart_product_required",
+      reply: replyWithOptions(
+        "عن أي منتج تسأل؟",
+        products.map((product, index) => `${index + 1} - ${product.name}`),
+      ),
+    };
+  }
+
+  if (isCartPriceQuestion(text)) {
+    if (selected.product?.price !== null && selected.product?.price !== undefined) {
+      return {
+        handled: true,
+        kind: "cart_product_price",
+        reply: `سعر ${selected.product.name}: ${formatMoney(selected.product.price, selected.product.currency)}.`,
+      };
+    }
+    return {
+      handled: true,
+      kind: "cart_products_price",
+      reply: products.length
+        ? products.map((product) => `${product.name}: ${formatMoney(product.price, product.currency)}`).join("\n")
+        : "لم أجد سعرًا مؤكدًا في الكتالوج. سأحوّل السؤال لموظف.",
+    };
+  }
+
+  if (isCartAvailabilityQuestion(text) && selected.product) {
+    if (selected.product.isAvailable === null) {
+      const taskId = createCartQuestionTask(ownerUid, phone, context, originalText, now);
+      return {
+        handled: true,
+        kind: "cart_question_escalated",
+        reason: taskId,
+        reply: "حالة المخزون غير مؤكدة في آخر مزامنة. أنشأت متابعة لموظف ليتحقق ويجيبك هنا.",
+      };
+    }
+    const availability = selected.product.isAvailable === true
+      ? "متوفر حاليًا حسب آخر مزامنة للمتجر"
+      : "غير متوفر حسب آخر مزامنة للمتجر";
+    return {
+      handled: true,
+      kind: "cart_product_availability",
+      reply: `${selected.product.name}: ${availability}.`,
+    };
+  }
+
+  if (isCartDescriptionQuestion(text) && selected.product?.description) {
+    return {
+      handled: true,
+      kind: "cart_product_description",
+      reply: `${selected.product.name}:\n${selected.product.description.slice(0, 700)}`,
+    };
+  }
+
+  if (isCartServiceQuestion(text) && selected.product) {
+    if (["install_maintenance", "external_maintenance"].includes(selected.product.productType)) {
+      return {
+        handled: true,
+        kind: "cart_product_service",
+        reply: `نعم، نستطيع متابعة طلب تركيب أو صيانة ${selected.product.name}. اكتب "حجز" لاختيار الموعد المناسب.`,
+      };
+    }
+  }
+
+  if (
+    selected.product &&
+    products.length > 1 &&
+    choiceNumber(text) &&
+    !asksKnownQuestion
+  ) {
+    return {
+      handled: true,
+      kind: "cart_product_selected",
+      reply: `تمام، ما استفسارك عن ${selected.product.name}؟ يمكنك السؤال عن السعر أو المواصفات أو التركيب.`,
+    };
+  }
+
+  const taskId = createCartQuestionTask(ownerUid, phone, context, originalText, now);
+  return {
+    handled: true,
+    kind: isHumanHelpQuestion(text) ? "cart_human_handoff" : "cart_question_escalated",
+    reason: taskId,
+    reply: "وصل سؤالك، وأنشأت متابعة لموظف خدمة العملاء حتى يجيبك بمعلومة مؤكدة. سنرد عليك هنا.",
+  };
 }
 
 function customerFromContext(ownerUid: string, phone: string, context: CommerceContext) {
@@ -778,6 +1018,9 @@ export async function handleWhatsAppCommerceConversation(
   }
 
   const context = sessionContext(session);
+  if (session.step === "awaiting_cart_question") {
+    return handleCartQuestion(input.ownerUid, phone, input.text, text, context, now);
+  }
   if (!["awaiting_name", "awaiting_address"].includes(session.step)) {
     if (isPaymentIntent(text)) return sendPaymentLink(input.ownerUid, phone, now, createPaymentLink);
     if (isBookingIntent(text)) return beginBooking(input.ownerUid, phone, now);

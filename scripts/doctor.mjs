@@ -189,6 +189,22 @@ async function main() {
       warn("Salla API sync scheduler is disabled");
     }
 
+    if (env.SALLA_CART_WHATSAPP_ENABLED !== "false") {
+      const scopes = new Set(String(env.SALLA_SCOPES || "").split(/\s+/).filter(Boolean));
+      if (!scopes.has("carts.read")) {
+        fail("SALLA_SCOPES يحتاج carts.read لقراءة تفاصيل السلة المتروكة");
+      } else {
+        ok("صلاحية carts.read مضافة لتكامل سلة");
+      }
+      if (env.WHATSAPP_PROVIDER === "cloud_api" && !env.WHATSAPP_CLOUD_TEMPLATE_ABANDONED_CART_SUPPORT) {
+        fail("WHATSAPP_CLOUD_TEMPLATE_ABANDONED_CART_SUPPORT مطلوب لقالب استعادة السلة");
+      } else if (env.WHATSAPP_CLOUD_TEMPLATE_ABANDONED_CART_SUPPORT) {
+        ok("قالب واتساب لاستعادة السلة مربوط");
+      }
+    } else {
+      warn("SALLA_CART_WHATSAPP_ENABLED=false؛ متابعة السلات المتروكة متوقفة");
+    }
+
     if (env.WHATSAPP_PROVIDER === "cloud_api") {
       if (!env.WHATSAPP_CLOUD_PHONE_NUMBER_ID) fail("WHATSAPP_CLOUD_PHONE_NUMBER_ID مطلوب");
       else ok("WHATSAPP_CLOUD_PHONE_NUMBER_ID مضبوط");

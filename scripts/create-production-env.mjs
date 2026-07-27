@@ -17,7 +17,7 @@ function keep(name, fallback = "") {
 }
 
 function requiredScopes(value) {
-  return [...new Set(String(value || "").split(/\s+/).filter(Boolean).concat("customers.read"))].join(" ");
+  return [...new Set(String(value || "").split(/\s+/).filter(Boolean).concat("customers.read", "carts.read"))].join(" ");
 }
 
 const values = {
@@ -73,7 +73,7 @@ const values = {
   SALLA_CLIENT_ID: keep("SALLA_CLIENT_ID"),
   SALLA_CLIENT_SECRET: keep("SALLA_CLIENT_SECRET"),
   SALLA_REDIRECT_URI: `https://${domain}/api/integrations/salla/callback`,
-  SALLA_SCOPES: requiredScopes(keep("SALLA_SCOPES", "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write")),
+  SALLA_SCOPES: requiredScopes(keep("SALLA_SCOPES", "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write carts.read")),
   SALLA_SYNC_CRON_ENABLED: "true",
   SALLA_SYNC_CRON_SCHEDULE: keep("SALLA_SYNC_CRON_SCHEDULE", "*/15 * * * *"),
   SALLA_SYNC_MAX_PAGES: keep("SALLA_SYNC_MAX_PAGES", "200"),
@@ -89,6 +89,10 @@ const values = {
   SALLA_STATE_SECRET: secret("SALLA_STATE_SECRET"),
   SALLA_APP_WEBHOOK_SECRET: keep("SALLA_APP_WEBHOOK_SECRET") || secret("STORE_WEBHOOK_SECRET"),
   SALLA_APP_OWNER_UID: keep("SALLA_APP_OWNER_UID") || keep("STORE_WEBHOOK_OWNER_UID"),
+  SALLA_CART_WHATSAPP_ENABLED: keep("SALLA_CART_WHATSAPP_ENABLED", "true"),
+  SALLA_CART_WHATSAPP_DELAY_MINUTES: keep("SALLA_CART_WHATSAPP_DELAY_MINUTES", "30"),
+  SALLA_CART_WHATSAPP_EXPIRY_MINUTES: keep("SALLA_CART_WHATSAPP_EXPIRY_MINUTES", "1440"),
+  SALLA_CART_WHATSAPP_SESSION_MINUTES: keep("SALLA_CART_WHATSAPP_SESSION_MINUTES", "1440"),
 
   ENABLE_DAILY_CRON: "true",
   REMINDER_CRON_SCHEDULE: keep("REMINDER_CRON_SCHEDULE", "0 10 * * *"),
@@ -109,6 +113,7 @@ const values = {
   WHATSAPP_BOOKING_MIN_LEAD_HOURS: keep("WHATSAPP_BOOKING_MIN_LEAD_HOURS", "4"),
   WHATSAPP_BOOKING_CLOSED_WEEKDAYS: keep("WHATSAPP_BOOKING_CLOSED_WEEKDAYS", "5"),
   WHATSAPP_CLOUD_TEMPLATE_NAME: keep("WHATSAPP_CLOUD_TEMPLATE_NAME"),
+  WHATSAPP_CLOUD_TEMPLATE_ABANDONED_CART_SUPPORT: keep("WHATSAPP_CLOUD_TEMPLATE_ABANDONED_CART_SUPPORT"),
   WHATSAPP_CLOUD_TEMPLATE_LANGUAGE: keep("WHATSAPP_CLOUD_TEMPLATE_LANGUAGE", "ar"),
 
   CLOUDFLARE_ZONE_NAME: keep("CLOUDFLARE_ZONE_NAME", "breexe-pro.com"),

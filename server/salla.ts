@@ -36,6 +36,11 @@ import {
 } from "./productCatalog";
 import { firstSallaDate } from "./sallaDate";
 import { queueFieldTechSync } from "./fieldtechIntegration";
+import {
+  ingestSallaCartEvent,
+  sallaCartId,
+  SALLA_CART_EVENTS,
+} from "./sallaCartConcierge";
 
 type SallaIntegrationRecord = {
   provider: "salla";
@@ -373,6 +378,7 @@ function withRequiredSallaScopes(value: string) {
     "products.read_write",
     "customers.read_write",
     "webhooks.read_write",
+    "carts.read",
   ];
   const obsoleteReadOnly = new Set(["orders.read", "products.read", "customers.read", "webhooks.read"]);
   return [...new Set([...scopes.filter((scope) => !obsoleteReadOnly.has(scope)), ...required])].join(" ");
@@ -380,7 +386,7 @@ function withRequiredSallaScopes(value: string) {
 
 function defaultScopes() {
   return withRequiredSallaScopes(
-    process.env.SALLA_SCOPES || "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write",
+    process.env.SALLA_SCOPES || "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write carts.read",
   );
 }
 
@@ -2281,6 +2287,14 @@ function eventOrderRecord(data: Record<string, unknown>) {
   return data;
 }
 
+async function fetchSallaAbandonedCartDetails(session: SallaAuthorizedSession, cartId: string) {
+  const payload = await authorizedSallaGet<Record<string, unknown>>(
+    session,
+    `${SALLA_API_BASE}/carts/abandoned/${encodeURIComponent(cartId)}`,
+  );
+  return unwrapSallaData(payload) as Record<string, any>;
+}
+
 function signedWebhookHasCompleteOrder(remoteOrder: Record<string, any>) {
   const rawItems = remoteOrder.items || remoteOrder.products || remoteOrder.order_items || asRecord(remoteOrder.details).items;
   const normalized = mapSallaOrder(remoteOrder);
@@ -2956,6 +2970,64 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
       last_sync_error: null,
     });
     return { success: true, event, owner_uid: uid, linked: false };
+  }
+
+  if (SALLA_CART_EVENTS.has(event)) {
+    const signedPayload = asRecord(body.data);
+    const cartId = sallaCartId(signedPayload);
+    const inbox = await processSallaOrderInbox({
+      ownerUid: uid,
+      merchantId: merchantId || linkedMerchantId || null,
+      eventType: event,
+      remoteOrderId: cartId,
+      rawBody: verification.rawBody,
+      occurredAt: eventOccurredAt,
+    }, async () => {
+      let cartPayload = signedPayload;
+      if ((event === "abandoned.cart" || event === "abandoned.cart.updated") && cartId) {
+        try {
+          const { session } = await authorizedSessionForUser(uid);
+          const remoteCart = await fetchSallaAbandonedCartDetails(session, cartId);
+          const signedCart = asRecord(signedPayload.cart);
+          const normalizedSigned = Object.keys(signedCart).length ? signedCart : signedPayload;
+          cartPayload = {
+            ...remoteCart,
+            ...normalizedSigned,
+            customer: {
+              ...asRecord(remoteCart.customer),
+              ...asRecord(normalizedSigned.customer),
+            },
+            items: asArray(normalizedSigned.items).length
+              ? normalizedSigned.items
+              : remoteCart.items,
+          };
+        } catch {
+          // The authenticated webhook remains useful when the merchant has not
+          // re-authorized the new carts.read scope or Salla's read API is down.
+          // Incomplete carts are stored but never queued until phone and checkout
+          // URL are both present.
+        }
+      }
+      return ingestSallaCartEvent({
+        ownerUid: uid,
+        merchantId: merchantId || linkedMerchantId || null,
+        event,
+        payload: cartPayload,
+        eventAt: observedAt,
+      });
+    });
+    const result = inbox.result as ReturnType<typeof ingestSallaCartEvent> | null;
+    return {
+      success: true,
+      duplicate: inbox.duplicate,
+      inbox_id: inbox.inboxId,
+      event,
+      owner_uid: uid,
+      cart_id: cartId,
+      queued: result?.queued || false,
+      reason: "reason" in (result || {}) ? result?.reason : null,
+      terminal: "terminal" in (result || {}) ? result?.terminal : null,
+    };
   }
 
   if (SALLA_ORDER_EVENTS.has(event)) {

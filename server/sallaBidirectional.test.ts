@@ -17,6 +17,7 @@ process.env.SALLA_APP_OWNER_UID = "test-owner";
 process.env.SALLA_APP_WEBHOOK_SECRET = "test-webhook-secret";
 process.env.SALLA_FETCH_RETRY_BASE_DELAY_MS = "0";
 process.env.SALLA_FETCH_RETRY_MAX_DELAY_MS = "0";
+process.env.SALLA_CART_WHATSAPP_DELAY_MINUTES = "0";
 
 const sallaModule = await import("./salla");
 const {
@@ -30,6 +31,7 @@ const {
   updateSallaOrderStatusForUser,
 } = sallaModule;
 const { adminDb } = await import("./firebaseAdmin");
+const db = (await import("./db")).default;
 const { getStoreOrderDocId } = await import("./storeWebhook");
 const originalFetch = globalThis.fetch;
 
@@ -305,6 +307,84 @@ test("signed order.created payload imports immediately when Salla detail API ret
   assert.equal(stored.items[0].quantity, 2);
   const bookings = await adminDb.collection("bookings").where("createdBy", "==", uid).get();
   assert.equal(bookings.docs.some((doc) => doc.data().store_order_id === orderId), false, "an unscheduled order must not invent a technician appointment");
+});
+
+test("signed abandoned-cart webhooks queue one consent-gated outreach and purchase cancels it", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid, "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write carts.read");
+  db.prepare("DELETE FROM communication_jobs WHERE owner_uid = ?").run(uid);
+  db.prepare("DELETE FROM salla_abandoned_carts WHERE owner_uid = ?").run(uid);
+  db.prepare("DELETE FROM products WHERE owner_uid = ?").run(uid);
+  db.prepare(
+    `INSERT INTO products (
+       id, owner_uid, name, store_provider, store_product_id, price, sale_price,
+       currency, description, product_type, catalog_visible, is_available, stock_quantity
+     ) VALUES (
+       'cart-product-1', ?, 'فلتر جولدن المنزلي', 'salla', 'cart-p-1', 250, 199,
+       'SAR', 'فلتر منزلي متعدد المراحل.', 'install_maintenance', 1, 1, 5
+     )`,
+  ).run(uid);
+
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/carts/abandoned/cart-9001")) {
+      return jsonResponse({ error: "Forbidden" }, 403);
+    }
+    throw new Error(`Unexpected request ${url.pathname}`);
+  }) as typeof fetch;
+
+  const body = {
+    event: "abandoned.cart",
+    event_id: "evt-cart-9001",
+    merchant: "merchant-a",
+    created_at: "2026-07-27T09:00:00.000Z",
+    data: {
+      id: "cart-9001",
+      checkout_url: "https://store.example/checkout/cart-9001",
+      customer: { name: "عميل السلة", mobile: "0501234567" },
+      total: { amount: 199, currency: "SAR" },
+      items: [{ id: "line-1", product_id: "cart-p-1", quantity: 1 }],
+    },
+  };
+
+  const first = await handleSallaAppWebhook(webhookRequest(body) as never);
+  const duplicate = await handleSallaAppWebhook(webhookRequest(body) as never);
+  assert.equal(first.queued, true);
+  assert.equal(duplicate.duplicate, true);
+
+  const job = db.prepare(
+    "SELECT * FROM communication_jobs WHERE owner_uid = ? AND event_key = ?",
+  ).get(uid, "salla-cart:cart-9001:whatsapp:1") as Record<string, unknown>;
+  assert.equal(job.template_name, "abandoned_cart_support");
+  assert.equal(job.status, "pending");
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS count FROM communication_jobs WHERE owner_uid = ?").get(uid) as { count: number }).count,
+    1,
+  );
+  const cart = db.prepare(
+    "SELECT * FROM salla_abandoned_carts WHERE owner_uid = ? AND cart_id = ?",
+  ).get(uid, "cart-9001") as Record<string, unknown>;
+  assert.equal(cart.status, "active");
+  assert.match(String(cart.items_json), /فلتر جولدن المنزلي/);
+
+  const purchased = {
+    event: "abandoned.cart.purchased",
+    event_id: "evt-cart-9001-purchased",
+    merchant: "merchant-a",
+    created_at: "2026-07-27T09:10:00.000Z",
+    data: { id: "cart-9001", status: "purchased" },
+  };
+  const purchasedResult = await handleSallaAppWebhook(webhookRequest(purchased) as never);
+  assert.equal(purchasedResult.terminal, "purchased");
+  assert.equal(
+    (db.prepare("SELECT status FROM communication_jobs WHERE id = ?").get(job.id) as { status: string }).status,
+    "blocked",
+  );
+  assert.equal(
+    (db.prepare("SELECT status FROM salla_abandoned_carts WHERE owner_uid = ? AND cart_id = ?")
+      .get(uid, "cart-9001") as { status: string }).status,
+    "purchased",
+  );
 });
 
 test("partial signed status webhook preserves rich local order data when Salla detail API returns 403", async () => {
