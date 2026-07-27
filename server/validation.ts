@@ -79,7 +79,20 @@ export const whatsappConversationQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 }).passthrough();
 
-const campaignTemplateSchema = z.literal('general_reminder');
+const campaignTemplateSchema = z.enum([
+  'general_reminder',
+  'campaign_offer_image',
+  'campaign_offer_video',
+]);
+
+const campaignHttpsUrlSchema = z.string().trim().url().max(2048).refine((value) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}, 'A public HTTPS URL without embedded credentials is required');
 
 export const communicationPreferenceSchema = z.object({
   phone: z.string().min(1).max(32),
@@ -103,8 +116,45 @@ export const communicationCampaignSchema = z.object({
     'At least one audience criterion is required',
   ),
   template_vars: z.record(z.string().max(80), z.union([z.string().max(2000), z.number()])).optional(),
+  media: z.object({
+    type: z.enum(['image', 'video']),
+    url: campaignHttpsUrlSchema,
+  }).optional(),
+  order_url: campaignHttpsUrlSchema.optional(),
   rate_limit_per_minute: z.coerce.number().int().min(1).max(120).optional(),
   frequency_cap_days: z.coerce.number().int().min(1).max(90).optional(),
+}).superRefine((value, context) => {
+  if (value.template_name === 'general_reminder') {
+    if (value.media || value.order_url) {
+      context.addIssue({
+        code: 'custom',
+        path: ['media'],
+        message: 'Media and buttons require a campaign offer template',
+      });
+    }
+    return;
+  }
+  const expectedType = value.template_name === 'campaign_offer_video' ? 'video' : 'image';
+  if (!value.media) {
+    context.addIssue({ code: 'custom', path: ['media'], message: 'Campaign media is required' });
+  } else if (value.media.type !== expectedType) {
+    context.addIssue({
+      code: 'custom',
+      path: ['media', 'type'],
+      message: 'Media type must match the approved Meta template',
+    });
+  }
+  if (!value.order_url) {
+    context.addIssue({ code: 'custom', path: ['order_url'], message: 'Order URL is required' });
+  }
+  const offerText = String(value.template_vars?.offer_text || '').trim();
+  if (!offerText) {
+    context.addIssue({
+      code: 'custom',
+      path: ['template_vars', 'offer_text'],
+      message: 'Offer text is required',
+    });
+  }
 });
 
 export const communicationCampaignLaunchSchema = z.object({

@@ -10,6 +10,7 @@ import { cloudTemplateEnvKey, renderTemplate, templateToCloudParams, type Render
 import { normalizePhoneDigits, requirePhoneDigits } from "../shared/phone";
 import { advanceMessageStatus } from "./communicationStatus";
 import { communicationCampaignStore } from "./communicationCampaigns";
+import type { WhatsAppCloudTemplateOptions } from "./whatsappCampaignOffer";
 
 export type WhatsAppConnectionStatus =
   | "disconnected"
@@ -30,6 +31,10 @@ export type WhatsAppStatus = {
   connectedAt?: string;
   outbound?: ReturnType<typeof outboundSafetyStatus>;
   updatedAt: string;
+};
+
+type WhatsAppTemplateSendOptions = OutboundSendOptions & {
+  templateOptions?: WhatsAppCloudTemplateOptions;
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -343,12 +348,19 @@ export class WhatsAppService {
     return this.getStatus();
   }
 
-  async sendTemplate(phone: string, template: TemplateName, vars: RenderVars = {}, options: OutboundSendOptions = {}) {
+  async sendTemplate(
+    phone: string,
+    template: TemplateName,
+    vars: RenderVars = {},
+    options: WhatsAppTemplateSendOptions = {},
+  ) {
     const decision = decideOutbound(phone, options);
     if (!decision.allowed) {
       return dryRunSendResult(phone, this.provider, decision.reason);
     }
-    if (this.provider === "cloud_api") return this.sendCloudTemplate(phone, template, vars);
+    if (this.provider === "cloud_api") {
+      return this.sendCloudTemplate(phone, template, vars, options.templateOptions);
+    }
     return this.sendText(phone, renderTemplate(template, vars, { strict: false }), options);
   }
 
@@ -618,15 +630,41 @@ export class WhatsAppService {
     }
   }
 
-  private async sendCloudTemplate(phone: string, template: TemplateName, vars: RenderVars) {
+  private async sendCloudTemplate(
+    phone: string,
+    template: TemplateName,
+    vars: RenderVars,
+    templateOptions?: WhatsAppCloudTemplateOptions,
+  ) {
     const to = this.toInternationalPhone(phone);
     const envKey = cloudTemplateEnvKey(template);
     const templateName = process.env[envKey] || (template === "general_reminder" ? this.cloudTemplateName() : "");
     if (!templateName) throw new Error(`WhatsApp Cloud template mapping is missing: ${envKey}`);
     const rendered = templateToCloudParams(template, vars);
-    const components = rendered.parameters?.length
-      ? [{ type: "body", parameters: rendered.parameters }]
-      : undefined;
+    const components: Array<Record<string, unknown>> = [];
+    if (templateOptions?.header) {
+      const header = templateOptions.header;
+      components.push({
+        type: "header",
+        parameters: [{
+          type: header.type,
+          [header.type]: { link: header.link },
+        }],
+      });
+    }
+    if (rendered.parameters?.length) {
+      components.push({ type: "body", parameters: rendered.parameters });
+    }
+    for (const button of templateOptions?.buttons || []) {
+      components.push({
+        type: "button",
+        sub_type: button.type,
+        index: String(button.index),
+        parameters: button.type === "url"
+          ? [{ type: "text", text: button.text }]
+          : [{ type: "payload", payload: button.payload }],
+      });
+    }
     return this.postCloudPayload(to, {
       messaging_product: "whatsapp",
       recipient_type: "individual",
@@ -635,7 +673,7 @@ export class WhatsAppService {
       template: {
         name: templateName,
         language: { code: this.cloudTemplateLanguage() },
-        ...(components ? { components } : {}),
+        ...(components.length ? { components } : {}),
       },
     });
   }
@@ -778,11 +816,15 @@ export async function sendWhatsAppTemplate(opts: {
   booking_id?: string;
   owner_uid?: string;
   outboundCode?: string;
+  templateOptions?: WhatsAppCloudTemplateOptions;
 }) {
   // strict:false → a missing/empty variable becomes "" instead of leaking the
   // literal "{placeholder}" to the customer (e.g. "عزيزي {customer_name}،").
   const body = renderTemplate(opts.template, opts.vars || {}, { strict: false });
-  const result = await whatsappService.sendTemplate(opts.phone, opts.template, opts.vars || {}, { confirmationCode: opts.outboundCode });
+  const result = await whatsappService.sendTemplate(opts.phone, opts.template, opts.vars || {}, {
+    confirmationCode: opts.outboundCode,
+    templateOptions: opts.templateOptions,
+  });
 
   recordWhatsAppMessage({
     type: "template",
@@ -797,7 +839,11 @@ export async function sendWhatsAppTemplate(opts: {
     installation_id: opts.installation_id,
     booking_id: opts.booking_id,
     owner_uid: opts.owner_uid,
-    metadata: { template: opts.template, vars: opts.vars || {} },
+    metadata: {
+      template: opts.template,
+      vars: opts.vars || {},
+      ...(opts.templateOptions ? { templateOptions: opts.templateOptions } : {}),
+    },
   });
 
   return { ...result, template: opts.template, body };

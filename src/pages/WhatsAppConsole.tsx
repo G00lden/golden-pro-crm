@@ -44,6 +44,7 @@ const TEMPLATE_FIELD_DEFINITIONS = {
   booking_id: { key: "booking_id", label: "رقم الحجز", placeholder: "مثال: BK-12345…", autoComplete: "off", dir: "ltr" },
   call_time: { key: "call_time", label: "وقت المكالمة", placeholder: "مثال: 2026-07-13 14:30…", type: "datetime-local", autoComplete: "off", dir: "ltr" },
   message: { key: "message", label: "نص التذكير", placeholder: "اكتب الرسالة التي ستظهر داخل القالب…", autoComplete: "off", multiline: true },
+  offer_text: { key: "offer_text", label: "نص العرض", placeholder: "مثال: عرض خاص لفترة محدودة…", autoComplete: "off", multiline: true },
 } satisfies Record<string, TemplateVariableField>;
 
 type TemplateFieldKey = keyof typeof TEMPLATE_FIELD_DEFINITIONS;
@@ -64,6 +65,8 @@ const TEMPLATE_VARIABLE_FIELDS: Record<string, TemplateVariableField[]> = {
   missed_call_agent: fieldsFor("department_name", "customer_phone", "call_time"),
   abandoned_cart_support: fieldsFor("customer_name", "product_names", "checkout_url"),
   delivery_review_request: fieldsFor("customer_name", "order_number"),
+  campaign_offer_image: fieldsFor("customer_name", "offer_text"),
+  campaign_offer_video: fieldsFor("customer_name", "offer_text"),
   general_reminder: fieldsFor("message"),
 };
 
@@ -550,7 +553,7 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
               onChange={(event) => changeSendTemplate(event.target.value)}
             >
               <option value="">— رسالة يدوية —</option>
-              {templates.map((t) => (
+              {templates.filter((t) => !["campaign_offer_image", "campaign_offer_video"].includes(t.name)).map((t) => (
                 <option key={t.name} value={t.name}>{t.name}</option>
               ))}
             </select>

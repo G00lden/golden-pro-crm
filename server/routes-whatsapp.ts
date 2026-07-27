@@ -1,4 +1,4 @@
-import type { Express, Request, Response, NextFunction } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import {
   sendWhatsAppTemplate,
   whatsAppStats,
@@ -37,6 +37,15 @@ import { communicationPreferenceStore } from "./communicationPreferences";
 import { communicationCampaignStore } from "./communicationCampaigns";
 import { hasAppCapability } from "../shared/accessControl";
 import { visibleWhatsAppStatus } from "./whatsappStatusVisibility";
+import {
+  buildCampaignCloudTemplateOptions,
+  isCampaignOfferTemplate,
+  type CampaignMedia,
+} from "./whatsappCampaignOffer";
+import {
+  saveWhatsAppCampaignMedia,
+  whatsappCampaignMediaFile,
+} from "./whatsappCampaignMedia";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -117,6 +126,21 @@ export interface WhatsAppRouteOptions {
 
 export function registerWhatsAppWebhookRoutes(app: Express, options: WhatsAppRouteOptions) {
   const { webhookRateLimit, whatsappOwnerUid } = options;
+
+  app.get(
+    "/public/whatsapp-campaign-media/:filename",
+    (req, res) => {
+      const media = whatsappCampaignMediaFile(String(req.params.filename || ""));
+      if (!media) {
+        res.status(404).json({ error: "Campaign media not found." });
+        return;
+      }
+      res.setHeader("Content-Type", media.contentType);
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.sendFile(media.filePath);
+    },
+  );
 
   // WhatsApp Cloud API webhook (works for direct Meta callbacks AND Kapso.ai
   // forwarded webhooks). GET handles Meta's hub.challenge verification handshake;
@@ -256,6 +280,35 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
   );
 
   app.post(
+    "/api/whatsapp/campaign-media",
+    requireCampaignManager,
+    express.raw({
+      type: ["image/jpeg", "image/png", "video/mp4"],
+      limit: "16mb",
+    }),
+    (req, res) => {
+      try {
+        const publicBaseUrl = String(
+          process.env.PUBLIC_BASE_URL
+            || process.env.APP_BASE_URL
+            || process.env.APP_URL
+            || "",
+        ).trim();
+        const media = saveWhatsAppCampaignMedia({
+          contentType: String(req.get("content-type") || ""),
+          body: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
+          publicBaseUrl,
+        });
+        res.status(201).json({ media });
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : "Campaign media upload failed.",
+        });
+      }
+    },
+  );
+
+  app.post(
     "/api/whatsapp/connect",
     requireAdmin,
     asyncRoute(async (_req, res) => {
@@ -326,6 +379,7 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
           technician_name: "{technician_name}",
           customer_address: "{customer_address}",
           message: "{message}",
+          offer_text: "{offer_text}",
           next_maintenance_date: "{next_maintenance_date}",
         }, { strict: false }),
       })),
@@ -347,6 +401,9 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
         outboundCode?: string;
       };
       if (!body.phone || !body.template) throw httpError(400, "phone and template are required.");
+      if (isCampaignOfferTemplate(body.template)) {
+        throw httpError(400, "Media campaign templates must be sent through the campaign builder.");
+      }
       try {
         const result = await sendWhatsAppTemplate({
           phone: body.phone,
@@ -508,6 +565,8 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
         template_name: TemplateName;
         audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
         template_vars?: Record<string, string | number>;
+        media?: CampaignMedia;
+        order_url?: string;
         rate_limit_per_minute?: number;
         frequency_cap_days?: number;
       };
@@ -517,6 +576,8 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
         templateName: body.template_name,
         audienceFilter: body.audience_filter,
         templateVars: body.template_vars,
+        media: body.media,
+        orderUrl: body.order_url,
         rateLimitPerMinute: body.rate_limit_per_minute,
         frequencyCapDays: body.frequency_cap_days,
         createdBy: user.uid,
@@ -556,6 +617,20 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
             : ""
         );
         if (!mapped) throw httpError(409, `Approved Meta template mapping is missing: ${envKey}`);
+      }
+      if (isCampaignOfferTemplate(campaign.template_name)) {
+        try {
+          buildCampaignCloudTemplateOptions({
+            campaignId: campaign.id,
+            media: campaign.media!,
+            orderUrl: campaign.order_url!,
+          });
+        } catch (error) {
+          throw httpError(
+            409,
+            error instanceof Error ? error.message : "Campaign media or buttons are not ready.",
+          );
+        }
       }
       const launched = communicationCampaignStore.launch(ownerUid, campaign.id, req.body.scheduled_at);
       res.json({ campaign: launched });

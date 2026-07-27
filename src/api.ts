@@ -4452,6 +4452,8 @@ export type CommunicationCampaign = {
   status: "draft" | "scheduled" | "running" | "paused" | "completed" | "cancelled";
   audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
   template_vars: Record<string, string | number>;
+  media?: { type: "image" | "video"; url: string } | null;
+  order_url?: string | null;
   scheduled_at?: string | null;
   rate_limit_per_minute: number;
   frequency_cap_days: number;
@@ -4500,12 +4502,28 @@ export const createCommunicationCampaign = (data: {
   template_name: string;
   audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
   template_vars?: Record<string, string | number>;
+  media?: { type: "image" | "video"; url: string };
+  order_url?: string;
   rate_limit_per_minute?: number;
   frequency_cap_days?: number;
 }) => apiFetch<{ campaign: CommunicationCampaign }>("/api/whatsapp/campaigns", {
   method: "POST",
   body: JSON.stringify(data),
 });
+
+export const uploadCommunicationCampaignMedia = (file: File) =>
+  apiFetch<{
+    media: {
+      type: "image" | "video";
+      url: string;
+      bytes: number;
+      contentType: "image/jpeg" | "image/png" | "video/mp4";
+    };
+  }>("/api/whatsapp/campaign-media", {
+    method: "POST",
+    headers: { "Content-Type": file.type },
+    body: file,
+  });
 
 export const previewCommunicationCampaign = (id: string) =>
   apiFetch<CampaignPreview>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/preview`);

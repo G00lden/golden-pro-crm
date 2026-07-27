@@ -24,6 +24,7 @@ export type WhatsAppCommerceStep =
   | "awaiting_product"
   | "awaiting_slot"
   | "awaiting_cart_question"
+  | "awaiting_campaign_filter_request"
   | "awaiting_delivery_rating"
   | "awaiting_delivery_feedback";
 

@@ -34,6 +34,8 @@ function clearCommerceFixtures() {
     "crm_tasks",
     "salla_abandoned_carts",
     "communication_jobs",
+    "communication_campaign_recipients",
+    "communication_campaigns",
     "technician_notifications",
   ]) {
     db.prepare(`DELETE FROM ${table}`).run();
@@ -83,6 +85,15 @@ function seedIssuedInvoice() {
        230, 'SAR', '[]', ?, ?
      )`,
   ).run(ownerUid, now.toISOString(), existingPhone, now.toISOString(), now.toISOString());
+}
+
+function seedCampaign(id = "camp_action_test") {
+  db.prepare(
+    `INSERT INTO communication_campaigns (
+       id, owner_uid, name, template_name, status, audience_filter, template_vars
+     ) VALUES (?, ?, 'عرض فلاتر واتساب', 'campaign_offer_image', 'completed', '{}', '{}')`,
+  ).run(id, ownerUid);
+  return id;
 }
 
 test.beforeEach(() => {
@@ -374,4 +385,53 @@ test("a new WhatsApp customer is created, addressed, and booked against a select
   assert.equal(installation.product_id, "product-wa-1");
   assert.equal(installation.status, "pending_installation");
   assert.equal(installation.source, "whatsapp");
+});
+
+test("the change-filters campaign button collects details into a high-priority CRM task", async () => {
+  seedExistingCustomer();
+  const campaignId = seedCampaign();
+
+  const prompt = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: `campaign:change_filters:${campaignId}`,
+    },
+    { now: () => now },
+  );
+  assert.equal(prompt.kind, "campaign_filter_details_required");
+
+  const submitted = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "أحتاج فلتر 7 مراحل مع ثلاث شمعات إضافية",
+    },
+    { now: () => now },
+  );
+  assert.equal(submitted.kind, "campaign_filter_request_created");
+  const task = db.prepare(
+    `SELECT priority, related_type, related_id, customer_id, notes
+       FROM crm_tasks WHERE id = ?`,
+  ).get(submitted.reason) as Record<string, unknown>;
+  assert.equal(task.priority, "high");
+  assert.equal(task.related_type, "whatsapp_campaign");
+  assert.equal(task.related_id, campaignId);
+  assert.equal(task.customer_id, "customer-wa-1");
+  assert.match(String(task.notes), /7 مراحل/);
+});
+
+test("the book-appointment campaign button enters the existing self-service booking flow", async () => {
+  seedExistingCustomer();
+  const campaignId = seedCampaign();
+  const result = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: `campaign:book_appointment:${campaignId}`,
+    },
+    { now: () => now },
+  );
+  assert.equal(result.kind, "booking_kind");
+  assert.match(String(result.reply), /ما نوع الموعد/);
 });

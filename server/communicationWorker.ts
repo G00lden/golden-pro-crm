@@ -15,6 +15,7 @@ import {
   bookingAssignmentNotificationId,
   updateBookingAssignmentNotification,
 } from "./bookingAssignmentNotification";
+import { sanitizeWhatsAppCloudTemplateOptions } from "./whatsappCampaignOffer";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -266,12 +267,14 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
       throw new Error(`Unsupported communication job: ${job.kind}/${job.template_name || "missing-template"}`);
     }
     const vars = renderVars(job.payload.vars && typeof job.payload.vars === "object" ? job.payload.vars : job.payload);
+    const templateOptions = sanitizeWhatsAppCloudTemplateOptions(job.payload.templateOptions);
     const result = await sendWhatsAppTemplate({
       phone: job.recipient_phone,
       template: job.template_name,
       vars,
       owner_uid: job.owner_uid,
       outboundCode: bulkAuth.outboundCode,
+      templateOptions,
     });
     if (isDryRunSendResult(result)) {
       const blocked = sallaCartId(job)

@@ -1,5 +1,18 @@
-import { Ban, CheckCircle2, Clock3, Megaphone, Pause, Play, RefreshCcw, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  Ban,
+  CalendarPlus,
+  CheckCircle2,
+  Clock3,
+  Megaphone,
+  Pause,
+  Play,
+  RefreshCcw,
+  ShieldCheck,
+  ShoppingCart,
+  SlidersHorizontal,
+  Upload,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import * as api from "../api";
 
 type Notifier = (message: string, ok?: boolean) => void;
@@ -27,14 +40,16 @@ function fmt(value?: string | null) {
 
 export function CampaignsPage({ notify }: { notify: Notifier }) {
   const [campaigns, setCampaigns] = useState<api.CommunicationCampaign[]>([]);
-  const [templates, setTemplates] = useState<api.WhatsAppTemplateInfo[]>([]);
   const [suppressions, setSuppressions] = useState<api.CommunicationSuppression[]>([]);
   const [providerStatus, setProviderStatus] = useState<api.WhatsAppStatus | null>(null);
   const [preview, setPreview] = useState<api.CampaignPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [name, setName] = useState("");
-  const [template, setTemplate] = useState("general_reminder");
+  const [campaignKind, setCampaignKind] = useState<"text" | "image" | "video">("image");
+  const [mediaUrl, setMediaUrl] = useState("");
+  const [orderUrl, setOrderUrl] = useState("");
+  const [uploadedFileName, setUploadedFileName] = useState("");
   const [message, setMessage] = useState("");
   const [city, setCity] = useState("");
   const [source, setSource] = useState("");
@@ -49,14 +64,12 @@ export function CampaignsPage({ notify }: { notify: Notifier }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [campaignData, templateData, suppressionData, statusData] = await Promise.all([
+      const [campaignData, suppressionData, statusData] = await Promise.all([
         api.listCommunicationCampaigns(),
-        api.getWhatsAppTemplates(),
         api.listCommunicationSuppressions(),
         api.getWhatsAppStatus(),
       ]);
       setCampaigns(campaignData.campaigns);
-      setTemplates(templateData.templates);
       setSuppressions(suppressionData.suppressions);
       setProviderStatus(statusData);
     } catch (error) {
@@ -76,6 +89,43 @@ export function CampaignsPage({ notify }: { notify: Notifier }) {
     && providerStatus.status === "connected"
     && providerStatus.outbound?.mode === "production"
     && providerStatus.outbound.launchApproved;
+  const mediaCampaign = campaignKind !== "text";
+  const mediaType: "image" | "video" = campaignKind === "video" ? "video" : "image";
+  const campaignTemplate = campaignKind === "text"
+    ? "general_reminder"
+    : mediaType === "video"
+      ? "campaign_offer_video"
+      : "campaign_offer_image";
+
+  const uploadMedia = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const expected = mediaType === "video"
+      ? ["video/mp4"]
+      : ["image/jpeg", "image/png"];
+    if (!expected.includes(file.type)) {
+      notify(
+        mediaType === "video"
+          ? "اختر ملف MP4 للحملة المصورة."
+          : "اختر صورة JPEG أو PNG.",
+        false,
+      );
+      return;
+    }
+    setBusy("upload");
+    try {
+      const result = await api.uploadCommunicationCampaignMedia(file);
+      setCampaignKind(result.media.type);
+      setMediaUrl(result.media.url);
+      setUploadedFileName(file.name);
+      notify("تم رفع الوسائط وحفظ رابط HTTPS العام للحملة.", true);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "تعذر رفع الوسائط", false);
+    } finally {
+      setBusy("");
+    }
+  };
 
   const createCampaign = async (event: FormEvent) => {
     event.preventDefault();
@@ -88,9 +138,15 @@ export function CampaignsPage({ notify }: { notify: Notifier }) {
       };
       const created = await api.createCommunicationCampaign({
         name: name.trim(),
-        template_name: template,
+        template_name: campaignTemplate,
         audience_filter,
-        template_vars: message.trim() ? { message: message.trim() } : {},
+        template_vars: campaignKind === "text"
+          ? { message: message.trim() }
+          : { offer_text: message.trim() },
+        ...(mediaCampaign ? {
+          media: { type: mediaType, url: mediaUrl.trim() },
+          order_url: orderUrl.trim(),
+        } : {}),
         rate_limit_per_minute: rate,
         frequency_cap_days: frequencyDays,
       });
@@ -188,10 +244,71 @@ export function CampaignsPage({ notify }: { notify: Notifier }) {
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(330px,1fr))", gap: 16 }}>
         <form className="card" style={{ padding: 16, display: "grid", gap: 10 }} onSubmit={createCampaign}>
-          <h3 style={{ margin: 0 }}>إنشاء مسودة حملة</h3>
+          <h3 style={{ margin: 0 }}>إنشاء عرض جماعي تفاعلي</h3>
           <label className="field"><span>اسم الحملة</span><input className="input" required value={name} onChange={(e) => setName(e.target.value)} /></label>
-          <label className="field"><span>القالب المعتمد</span><select className="input" value={template} onChange={(e) => setTemplate(e.target.value)}>{templates.filter((item) => item.name === "general_reminder").map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label>
-          <label className="field"><span>نص متغير القالب</span><textarea className="input textarea" rows={3} value={message} onChange={(e) => setMessage(e.target.value)} placeholder="يستخدم مع general_reminder" /></label>
+          <label className="field">
+            <span>نوع الحملة</span>
+            <select
+              className="input"
+              value={campaignKind}
+              onChange={(e) => {
+                setCampaignKind(e.target.value as "text" | "image" | "video");
+                setMediaUrl("");
+                setUploadedFileName("");
+              }}
+            >
+              <option value="text">رسالة نصية</option>
+              <option value="image">صورة — JPEG أو PNG</option>
+              <option value="video">فيديو — MP4</option>
+            </select>
+          </label>
+          {mediaCampaign && <>
+            <label className="field">
+              <span>إرفاق {mediaType === "video" ? "فيديو" : "صورة"}</span>
+              <span className="btn muted" style={{ justifyContent: "center", cursor: busy === "upload" ? "wait" : "pointer" }}>
+                <Upload size={14} /> {busy === "upload" ? "جاري الرفع…" : uploadedFileName || "اختر ملفًا من جهازك"}
+                <input
+                  hidden
+                  type="file"
+                  disabled={busy === "upload"}
+                  accept={mediaType === "video" ? "video/mp4" : "image/jpeg,image/png"}
+                  onChange={uploadMedia}
+                />
+              </span>
+            </label>
+            <label className="field">
+              <span>أو رابط HTTPS عام للوسائط</span>
+              <input
+                className="input"
+                dir="ltr"
+                type="url"
+                required
+                value={mediaUrl}
+                onChange={(e) => {
+                  setMediaUrl(e.target.value);
+                  setUploadedFileName("");
+                }}
+                placeholder={mediaType === "video" ? "https://cdn.example/offer.mp4" : "https://cdn.example/offer.jpg"}
+              />
+            </label>
+            {mediaUrl && (
+              <div style={{ borderRadius: 10, overflow: "hidden", border: "1px solid rgba(255,255,255,.1)", background: "#111" }}>
+                {mediaType === "video"
+                  ? <video controls preload="metadata" src={mediaUrl} style={{ display: "block", width: "100%", maxHeight: 260 }} />
+                  : <img src={mediaUrl} alt="معاينة وسائط العرض" style={{ display: "block", width: "100%", maxHeight: 260, objectFit: "contain" }} />}
+              </div>
+            )}
+          </>}
+          <label className="field"><span>{mediaCampaign ? "نص العرض" : "نص الرسالة"}</span><textarea className="input textarea" required rows={4} maxLength={2000} value={message} onChange={(e) => setMessage(e.target.value)} placeholder={mediaCampaign ? "مثال: عرض خاص على فلاتر المياه لفترة محدودة…" : "اكتب الرسالة الجماعية…"} /></label>
+          {mediaCampaign && <>
+            <label className="field"><span>رابط زر «اطلب الآن»</span><input className="input" dir="ltr" type="url" required value={orderUrl} onChange={(e) => setOrderUrl(e.target.value)} placeholder="https://goldenksa.store/product/…" /></label>
+            <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+              <a className="btn primary" href={orderUrl || undefined} target="_blank" rel="noreferrer" onClick={(event) => { if (!orderUrl) event.preventDefault(); }}><ShoppingCart size={14} /> اطلب الآن</a>
+              <button className="btn muted" type="button" disabled><SlidersHorizontal size={14} /> غيّر الفلاتر</button>
+              <button className="btn muted" type="button" disabled><CalendarPlus size={14} /> احجز موعد</button>
+            </div>
+            <small style={{ opacity: 0.68 }}>أسماء الأزرار ثابتة في قالب Meta المعتمد. زر الفلاتر يفتح متابعة داخل CRM، وزر الموعد يبدأ الحجز الذاتي ويرسل الموعد للفني المعيّن.</small>
+          </>}
           <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={allCustomers} onChange={(e) => setAllCustomers(e.target.checked)} /> كل العملاء الموافقين</label>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <label className="field"><span>المدينة</span><input className="input" value={city} onChange={(e) => setCity(e.target.value)} /></label>
@@ -199,7 +316,18 @@ export function CampaignsPage({ notify }: { notify: Notifier }) {
             <label className="field"><span>رسالة/دقيقة</span><input className="input" type="number" min={1} max={120} value={rate} onChange={(e) => setRate(Number(e.target.value))} /></label>
             <label className="field"><span>حد التكرار/يوم</span><input className="input" type="number" min={1} max={90} value={frequencyDays} onChange={(e) => setFrequencyDays(Number(e.target.value))} /></label>
           </div>
-          <button className="btn primary" disabled={busy === "create" || (!allCustomers && !city.trim() && !source.trim())}><Megaphone size={14} /> إنشاء ومعاينة</button>
+          <button
+            className="btn primary"
+            disabled={
+              busy === "create"
+              || busy === "upload"
+              || !message.trim()
+              || (mediaCampaign && (!mediaUrl.trim() || !orderUrl.trim()))
+              || (!allCustomers && !city.trim() && !source.trim())
+            }
+          >
+            <Megaphone size={14} /> إنشاء ومعاينة
+          </button>
         </form>
 
         <form className="card" style={{ padding: 16, display: "grid", gap: 10, alignContent: "start" }} onSubmit={savePreference}>
@@ -215,6 +343,15 @@ export function CampaignsPage({ notify }: { notify: Notifier }) {
 
       {preview && selectedCampaign && <div className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
         <h3 style={{ margin: 0 }}>معاينة: {selectedCampaign.name}</h3>
+        {selectedCampaign.media && (
+          <div style={{ maxWidth: 520, borderRadius: 12, overflow: "hidden", background: "#111" }}>
+            {selectedCampaign.media.type === "video"
+              ? <video controls preload="metadata" src={selectedCampaign.media.url} style={{ display: "block", width: "100%", maxHeight: 320 }} />
+              : <img src={selectedCampaign.media.url} alt={`وسائط ${selectedCampaign.name}`} style={{ display: "block", width: "100%", maxHeight: 320, objectFit: "contain" }} />}
+          </div>
+        )}
+        {selectedCampaign.template_vars.offer_text && <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{selectedCampaign.template_vars.offer_text}</p>}
+        {selectedCampaign.media && <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}><a className="btn primary" href={selectedCampaign.order_url || undefined} target="_blank" rel="noreferrer"><ShoppingCart size={14} /> اطلب الآن</a><button className="btn muted" type="button" disabled><SlidersHorizontal size={14} /> غيّر الفلاتر</button><button className="btn muted" type="button" disabled><CalendarPlus size={14} /> احجز موعد</button></div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 8 }}><Metric label="الجمهور" value={preview.audience} /><Metric label="المؤهل" value={preview.eligible} good />{Object.entries(preview.excluded).map(([reason, count]) => <Metric key={reason} label={REASON_LABEL[reason] || reason} value={count} />)}</div>
         <label className="field"><span>موعد التشغيل (اختياري)</span><input className="input" type="datetime-local" value={scheduleAt} onChange={(e) => setScheduleAt(e.target.value)} /></label>
         <div><button className="btn primary" type="button" onClick={() => launch(selectedCampaign)} disabled={!preview.eligible || !launchReady || busy.startsWith("launch:")}><Play size={14} /> {scheduleAt ? "جدولة" : "تشغيل الآن"}</button></div>
@@ -223,7 +360,7 @@ export function CampaignsPage({ notify }: { notify: Notifier }) {
       <div className="card" style={{ padding: 16 }}><h3 style={{ marginTop: 0 }}>الحملات ({campaigns.length})</h3><div style={{ display: "grid", gap: 10 }}>
         {campaigns.map((campaign) => <div key={campaign.id} style={{ border: "1px solid rgba(255,255,255,.1)", borderRadius: 10, padding: 12, display: "grid", gap: 8 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}><strong>{campaign.name}</strong><span>{STATUS_LABEL[campaign.status] || campaign.status}</span></div>
-          <small style={{ opacity: 0.7 }}><Clock3 size={12} /> {fmt(campaign.created_at)} · <code>{campaign.template_name}</code> · {campaign.rate_limit_per_minute}/دقيقة</small>
+          <small style={{ opacity: 0.7 }}><Clock3 size={12} /> {fmt(campaign.created_at)} · {campaign.media?.type === "video" ? "فيديو" : campaign.media?.type === "image" ? "صورة" : "نص"} · <code>{campaign.template_name}</code> · {campaign.rate_limit_per_minute}/دقيقة</small>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 13 }}><span>بالطابور: {campaign.stats.queued + campaign.stats.processing + campaign.stats.retry}</span><span style={{ color: "#0fbf6c" }}>أُرسلت: {campaign.stats.sent + campaign.stats.delivered + campaign.stats.read}</span><span>قُرئت: {campaign.stats.read}</span><span style={{ color: "#ef4444" }}>فشل/حظر: {campaign.stats.failed + campaign.stats.blocked}</span><span>مستبعد: {campaign.stats.skipped}</span></div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}><button className="btn muted" type="button" onClick={() => inspect(campaign.id)}>معاينة</button>{campaign.status === "running" && <button className="btn muted" type="button" onClick={() => action(campaign, "pause")}><Pause size={13} /> إيقاف</button>}{campaign.status === "paused" && <button className="btn primary" type="button" onClick={() => action(campaign, "resume")}><Play size={13} /> استكمال</button>}{["draft", "scheduled", "running", "paused"].includes(campaign.status) && <button className="btn danger" type="button" onClick={() => action(campaign, "cancel")}><Ban size={13} /> إلغاء</button>}{campaign.status === "completed" && <span style={{ color: "#0fbf6c" }}><CheckCircle2 size={14} /> مكتملة</span>}</div>
         </div>)}

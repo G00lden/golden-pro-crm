@@ -22,14 +22,10 @@ import { normalizePhoneDigits, phoneTail } from "../shared/phone";
 import { communicationEventStore } from "./communicationEvents";
 import { routeInboundConversation } from "./inboundConversation";
 import { captureInboundWhatsAppAttribution } from "./tiktokAttribution";
-
-export type WhatsAppWebhookMessage = {
-  from?: string;
-  id?: string;
-  timestamp?: string;
-  text?: { body?: string };
-  type?: string;
-};
+import {
+  whatsappInboundContent,
+  type WhatsAppWebhookMessage,
+} from "./whatsappWebhookMessage";
 
 export type WhatsAppWebhookStatus = {
   id?: string;
@@ -239,7 +235,8 @@ export async function handleWebhook(
             payload: message,
           })) continue;
           try {
-          const text = message?.text?.body || "";
+          const inbound = whatsappInboundContent(message);
+          const text = inbound.text;
           // 1. Persist inbound message for the conversation viewer.
           recordWhatsAppMessage({
             type: "received",
@@ -251,7 +248,11 @@ export async function handleWebhook(
             message_id: message?.id,
             status: "delivered",
             owner_uid: ownerUid,
-            metadata: { wa_type: message?.type, timestamp: message?.timestamp },
+            metadata: {
+              wa_type: message?.type,
+              timestamp: message?.timestamp,
+              ...(inbound.actionId ? { action_id: inbound.actionId } : {}),
+            },
           });
 
           // A tracked CTA appends an opaque reference on its own line. Missing
@@ -323,7 +324,7 @@ export async function handleWebhook(
             const routed = await routeInboundConversation({
               ownerUid,
               fromPhone: String(message?.from || ""),
-              text,
+              text: inbound.routeText,
               source: "whatsapp_cloud",
             });
             summary.push({ kind: "conversation_route", phone: message?.from, ...routed });
