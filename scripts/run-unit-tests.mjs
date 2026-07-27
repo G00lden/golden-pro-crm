@@ -41,6 +41,7 @@ const files = [
   "server/invoiceSequence.test.ts",
   "server/invoiceDocumentWriter.test.ts",
   "server/routes-payment.test.ts",
+  "server/bookingAssignmentNotification.test.ts",
   "server/whatsappCommerce.test.ts",
   "server/crmApi.productCatalog.test.ts",
   "server/communicationStatus.test.ts",

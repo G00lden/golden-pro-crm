@@ -41,6 +41,7 @@ const TEMPLATE_FIELD_DEFINITIONS = {
   agent_name: { key: "agent_name", label: "اسم الموظف المتابع", placeholder: "مثال: سارة أحمد…", autoComplete: "name" },
   customer_phone: { key: "customer_phone", label: "رقم العميل", placeholder: "مثال: 0500000000…", type: "tel", inputMode: "tel", autoComplete: "tel", dir: "ltr" },
   order_number: { key: "order_number", label: "رقم الطلب", placeholder: "مثال: 12345…", inputMode: "numeric", autoComplete: "off", dir: "ltr" },
+  booking_id: { key: "booking_id", label: "رقم الحجز", placeholder: "مثال: BK-12345…", autoComplete: "off", dir: "ltr" },
   call_time: { key: "call_time", label: "وقت المكالمة", placeholder: "مثال: 2026-07-13 14:30…", type: "datetime-local", autoComplete: "off", dir: "ltr" },
   message: { key: "message", label: "نص التذكير", placeholder: "اكتب الرسالة التي ستظهر داخل القالب…", autoComplete: "off", multiline: true },
 } satisfies Record<string, TemplateVariableField>;
@@ -56,7 +57,7 @@ const TEMPLATE_VARIABLE_FIELDS: Record<string, TemplateVariableField[]> = {
   booking_confirmed: fieldsFor("customer_name", "product_name", "maintenance_date", "scheduled_time", "technician_name"),
   booking_rescheduled: fieldsFor("customer_name", "product_name", "maintenance_date", "scheduled_time", "technician_name"),
   booking_cancelled: fieldsFor("customer_name", "product_name", "maintenance_date"),
-  technician_assigned: fieldsFor("technician_name", "customer_name", "product_name", "customer_address", "maintenance_date", "scheduled_time"),
+  technician_assigned: fieldsFor("technician_name", "customer_name", "customer_phone", "product_name", "customer_address", "maintenance_date", "scheduled_time", "booking_id"),
   completion_thanks: fieldsFor("customer_name", "product_name", "next_maintenance_date"),
   call_answered_customer: fieldsFor(),
   missed_call_customer: fieldsFor("department_name", "agent_name"),

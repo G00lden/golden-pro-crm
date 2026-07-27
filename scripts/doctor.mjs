@@ -223,6 +223,18 @@ async function main() {
       warn("SALLA_DELIVERY_REVIEW_ENABLED=false؛ طلب تقييم ما بعد التوصيل متوقف");
     }
 
+    if (env.WHATSAPP_BOOKING_TECHNICIAN_NOTIFY_ENABLED !== "false") {
+      if (env.WHATSAPP_PROVIDER === "cloud_api" && !env.WHATSAPP_CLOUD_TEMPLATE_TECHNICIAN_ASSIGNED) {
+        fail("WHATSAPP_CLOUD_TEMPLATE_TECHNICIAN_ASSIGNED مطلوب لإشعار المندوب بالحجز");
+      } else if (env.WHATSAPP_CLOUD_TEMPLATE_TECHNICIAN_ASSIGNED) {
+        ok("قالب واتساب لإشعار المندوب بالحجز مربوط");
+      } else {
+        warn("إشعار المندوب مفعل، لكن الإرسال الحالي يعتمد WhatsApp Web وليس قالب Cloud API");
+      }
+    } else {
+      warn("WHATSAPP_BOOKING_TECHNICIAN_NOTIFY_ENABLED=false؛ إشعار المندوب بالحجز متوقف");
+    }
+
     if (env.WHATSAPP_PROVIDER === "cloud_api") {
       if (!env.WHATSAPP_CLOUD_PHONE_NUMBER_ID) fail("WHATSAPP_CLOUD_PHONE_NUMBER_ID مطلوب");
       else ok("WHATSAPP_CLOUD_PHONE_NUMBER_ID مضبوط");

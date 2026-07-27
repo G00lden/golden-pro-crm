@@ -11,6 +11,10 @@ import { communicationPreferenceStore } from "./communicationPreferences";
 import { sallaCartConciergeStore } from "./sallaCartConcierge";
 import { saveWhatsAppCommerceSession } from "./whatsappCommerceStorage";
 import { deliveryReviewStore } from "./deliveryReview";
+import {
+  bookingAssignmentNotificationId,
+  updateBookingAssignmentNotification,
+} from "./bookingAssignmentNotification";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -205,6 +209,9 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
   const job = communicationJobStore.claimNext();
   if (!job) return null;
   updateCall(job, "processing");
+  if (bookingAssignmentNotificationId(job)) {
+    updateBookingAssignmentNotification(job, "processing");
+  }
   if (job.campaign_id) communicationCampaignStore.updateRecipient(job, "processing");
 
   try {
@@ -212,6 +219,11 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
     if (!bulkAuth.allowed) {
       const blocked = communicationJobStore.markBlocked(job.id, "call_bulk_authorization_missing");
       if (blocked) updateCall(blocked, "blocked");
+      if (blocked) {
+        updateBookingAssignmentNotification(blocked, "blocked", {
+          error: "call_bulk_authorization_missing",
+        });
+      }
       if (blocked) updateBulkRun(blocked);
       return blocked;
     }
@@ -268,6 +280,9 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
           ? blockDeliveryReviewJob(job, result.reason)
           : communicationJobStore.markBlocked(job.id, result.reason);
       if (blocked) updateCall(blocked, "blocked");
+      if (blocked) {
+        updateBookingAssignmentNotification(blocked, "blocked", { error: result.reason });
+      }
       if (blocked) communicationCampaignStore.updateRecipient(blocked, "blocked", result.reason);
       if (blocked) updateBulkRun(blocked);
       return blocked;
@@ -294,6 +309,12 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
       startDeliveryReviewConversation(job);
     }
     if (sent) updateCall(sent, "sent", true);
+    if (sent) {
+      updateBookingAssignmentNotification(sent, "sent", {
+        providerMessageId: result.messageId,
+        provider: "provider" in result ? String(result.provider || "") : null,
+      });
+    }
     if (sent) communicationCampaignStore.updateRecipient(sent, "sent", null, result.messageId);
     if (sent) updateBulkRun(sent);
     logEvent("info", "communication.job.sent", { jobId: job.id, kind: job.kind, role: job.role });
@@ -315,6 +336,11 @@ export async function processNextCommunicationJob(): Promise<CommunicationJob | 
       });
     }
     if (failed) updateCall(failed, failed.status);
+    if (failed) {
+      updateBookingAssignmentNotification(failed, failed.status, {
+        error: failed.last_error,
+      });
+    }
     if (failed) communicationCampaignStore.updateRecipient(failed, failed.status, failed.last_error);
     if (failed && ["failed", "blocked", "expired"].includes(failed.status)) updateBulkRun(failed);
     logError("communication.job.failed", error, { jobId: job.id, attempts: job.attempts });

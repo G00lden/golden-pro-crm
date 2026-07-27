@@ -33,6 +33,8 @@ function clearCommerceFixtures() {
     "customers",
     "crm_tasks",
     "salla_abandoned_carts",
+    "communication_jobs",
+    "technician_notifications",
   ]) {
     db.prepare(`DELETE FROM ${table}`).run();
   }
@@ -294,6 +296,23 @@ test("an existing customer can reserve a real technician slot without duplicate 
   assert.equal(booking.scheduled_time, "14:00");
   assert.equal(booking.status, "confirmed");
   assert.equal(booking.source, "whatsapp");
+  const technicianJob = db.prepare(
+    `SELECT recipient_phone, template_name, role, payload
+       FROM communication_jobs
+      WHERE owner_uid = ? AND event_key = ?`,
+  ).get(ownerUid, `booking:${confirmation.bookingId}:technician-assignment:1`) as Record<string, unknown>;
+  assert.equal(technicianJob.recipient_phone, "966511111111");
+  assert.equal(technicianJob.template_name, "technician_assigned");
+  assert.equal(technicianJob.role, "agent");
+  assert.match(String(technicianJob.payload), /whatsapp_booking_technician_assignment/);
+  const technicianNotification = db.prepare(
+    `SELECT status, booking_id, technician_id, customer_phone
+       FROM technician_notifications
+      WHERE owner_uid = ? AND booking_id = ?`,
+  ).get(ownerUid, confirmation.bookingId) as Record<string, unknown>;
+  assert.equal(technicianNotification.status, "queued");
+  assert.equal(technicianNotification.technician_id, "tech-wa-1");
+  assert.equal(technicianNotification.customer_phone, existingPhone);
 
   const repeatedChoice = await handleWhatsAppCommerceConversation(
     { ownerUid, fromPhone: existingPhone, text: "1" },

@@ -602,3 +602,5 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Added authenticated visibility at `GET /api/integrations/salla/delivery-reviews`, an isolated `SALLA_DELIVERY_REVIEW_ENABLED` rollback switch, Meta-template readiness checks, and regression coverage for API `403`, duplicate events, consent, sending, positive ratings, and low-rating escalation.
 - Production sending was not activated: the local environment remains on `WHATSAPP_PROVIDER=web`, `OUTBOUND_MODE=allowlist`, and `OFFICIAL_LAUNCH_APPROVED=false`; the approved Meta template name is still required for Cloud API launch.
 - Setup, verification, monitoring, and rollback are documented in `docs/salla-delivery-rating-whatsapp-ar.md`.
+- Completed the WhatsApp self-service booking handoff: confirmed CRM bookings now enqueue one idempotent `technician_assigned` template for the assigned representative with customer phone/address, service, date, time, and booking id.
+- Technician delivery is tracked in both `communication_jobs` and `technician_notifications`; an invalid technician phone creates a high-priority CRM task instead of silently losing the appointment.

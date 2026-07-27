@@ -18,6 +18,7 @@ import {
   recordDeliveryFeedback,
   recordDeliveryRating,
 } from "./deliveryReview";
+import { queueBookingAssignmentNotification } from "./bookingAssignmentNotification";
 
 type CustomerRow = {
   id: string;
@@ -49,6 +50,7 @@ type ProductRow = {
 type TechnicianRow = {
   id: string;
   name: string;
+  phone: string;
   max_daily: number;
 };
 
@@ -374,7 +376,7 @@ function closedWeekdays() {
 
 function bookingTechnicians(ownerUid: string) {
   return db.prepare(
-    `SELECT id, name, MAX(1, COALESCE(max_daily, 4)) AS max_daily
+    `SELECT id, name, phone, MAX(1, COALESCE(max_daily, 4)) AS max_daily
        FROM technicians
       WHERE owner_uid = ?
       ORDER BY name ASC`,
@@ -990,7 +992,12 @@ function confirmBooking(
   context: CommerceContext,
   slot: SlotOption,
   now: Date,
-): { id: string; service: ServiceContext; technician: TechnicianRow } | null {
+): {
+  id: string;
+  service: ServiceContext;
+  technician: TechnicianRow;
+  technicianNotification: ReturnType<typeof queueBookingAssignmentNotification>;
+} | null {
   return db.transaction(() => {
     const customer = customerFromContext(ownerUid, phone, context);
     if (!customer) return null;
@@ -1028,15 +1035,51 @@ function confirmBooking(
     }
 
     const duplicate = db.prepare(
-      `SELECT id
-         FROM bookings
-        WHERE owner_uid = ? AND customer_id = ? AND installation_id = ?
-          AND date = ? AND scheduled_time = ? AND status = 'confirmed'
+      `SELECT booking.id, booking.technician_id, booking.tech_name,
+              COALESCE(technician.phone, '') AS technician_phone
+         FROM bookings booking
+         LEFT JOIN technicians technician
+           ON technician.id = booking.technician_id
+          AND technician.owner_uid = booking.owner_uid
+        WHERE booking.owner_uid = ? AND booking.customer_id = ? AND booking.installation_id = ?
+          AND booking.date = ? AND booking.scheduled_time = ? AND booking.status = 'confirmed'
         LIMIT 1`,
-    ).get(ownerUid, customer.id, installationId, slot.date, slot.time) as { id?: string } | undefined;
+    ).get(ownerUid, customer.id, installationId, slot.date, slot.time) as {
+      id?: string;
+      technician_id?: string;
+      tech_name?: string;
+      technician_phone?: string;
+    } | undefined;
     if (duplicate?.id) {
+      const assignedTechnician: TechnicianRow = {
+        id: duplicate.technician_id || "",
+        name: duplicate.tech_name || "",
+        phone: duplicate.technician_phone || "",
+        max_daily: 0,
+      };
+      const technicianNotification = queueBookingAssignmentNotification({
+        ownerUid,
+        bookingId: duplicate.id,
+        technicianId: assignedTechnician.id,
+        technicianName: assignedTechnician.name,
+        technicianPhone: assignedTechnician.phone,
+        customerId: customer.id,
+        customerName: customer.name,
+        customerPhone: phone,
+        customerAddress: customerAddress(customer),
+        productId: service.productId,
+        productName: service.productName,
+        date: slot.date,
+        scheduledTime: slot.time,
+        createdAt: now.toISOString(),
+      });
       clearWhatsAppCommerceSession(db, ownerUid, phone);
-      return { id: duplicate.id, service: { ...service, installationId }, technician };
+      return {
+        id: duplicate.id,
+        service: { ...service, installationId },
+        technician: assignedTechnician,
+        technicianNotification,
+      };
     }
 
     const id = `wa_booking_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
@@ -1067,8 +1110,29 @@ function confirmBooking(
       now.toISOString(),
       now.toISOString(),
     );
+    const technicianNotification = queueBookingAssignmentNotification({
+      ownerUid,
+      bookingId: id,
+      technicianId: technician.id,
+      technicianName: technician.name,
+      technicianPhone: technician.phone,
+      customerId: customer.id,
+      customerName: customer.name,
+      customerPhone: phone,
+      customerAddress: customerAddress(customer),
+      productId: service.productId,
+      productName: service.productName,
+      date: slot.date,
+      scheduledTime: slot.time,
+      createdAt: now.toISOString(),
+    });
     clearWhatsAppCommerceSession(db, ownerUid, phone);
-    return { id, service: { ...service, installationId }, technician };
+    return {
+      id,
+      service: { ...service, installationId },
+      technician,
+      technicianNotification,
+    };
   }).immediate();
 }
 

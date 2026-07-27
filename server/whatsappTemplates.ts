@@ -73,10 +73,12 @@ export const TEMPLATES: Record<TemplateName, string> = {
   technician_assigned: `عزيزي الفني {technician_name}،
 تم تعيينك لموعد صيانة:
 - العميل: {customer_name}
+- الهاتف: {customer_phone}
 - المنتج: {product_name}
 - العنوان: {customer_address}
 - التاريخ: {maintenance_date}
-- الوقت: {scheduled_time}`,
+- الوقت: {scheduled_time}
+- رقم الحجز: {booking_id}`,
   completion_thanks: `شكراً لكم {customer_name} على ثقتكم.
 تم إنجاز صيانة {product_name} بنجاح.
 الموعد القادم: {next_maintenance_date}.
