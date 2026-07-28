@@ -162,3 +162,18 @@ WHATSAPP_COMMERCE_ENABLED=false
 - [Function Calling](https://api-docs.deepseek.com/guides/function_calling/)
 - [Tool Calls](https://api-docs.deepseek.com/guides/tool_calls)
 - [JSON Output](https://api-docs.deepseek.com/guides/json_mode/)
+
+## سجل النشر — 2026-07-29
+
+- نُشر الإصدار `1.9.5` إلى `https://crm.breexe-pro.com` بالبناء
+  `8f7d24e6c021`.
+- أنشأت معاملة النشر نسخة احتياطية، وحافظت على ملف بيئة الخادم، وتحققت من
+  صحة CRM وواجهة Odoo قبل اعتماد الإصدار.
+- أعاد فحص مستقل بعد النشر `status=ok` و`runtime=production` والحاوية
+  `healthy`.
+- بقي التشغيل في وضع الأمان: مزود واتساب `web`، والإرسال `allowlist`،
+  و`OFFICIAL_LAUNCH_APPROVED=false`، و`WHATSAPP_COMMERCE_ENABLED=false`،
+  و`WHATSAPP_AI_ENABLED` غير مفعّل.
+- لم يُستخدم المفتاح الظاهر في صورة أو دردشة ولم تُنفذ تجربة DeepSeek حية.
+  يلزم إلغاء المفتاح المكشوف، ووضع بديل جديد مباشرة على الخادم، ثم تنفيذ
+  Canary من رقم مسموح قبل اعتبار الاتصال جاهزاً.
