@@ -21,6 +21,11 @@ import {
 import { queueBookingAssignmentNotification } from "./bookingAssignmentNotification";
 import { communicationCampaignStore } from "./communicationCampaigns";
 import { communicationPreferenceStore } from "./communicationPreferences";
+import {
+  classifyWhatsAppIntent,
+  type WhatsAppAiClassification,
+  type WhatsAppAiDepartment,
+} from "./whatsappAi";
 
 type CustomerRow = {
   id: string;
@@ -61,6 +66,22 @@ type InvoiceRow = {
   invoice_number: string;
   total_with_vat: number;
   currency: string;
+};
+
+type StoreOrderRow = {
+  id: string;
+  order_number: string | null;
+  store_order_id: string | null;
+  order_id: string | null;
+  remote_status_name: string | null;
+  remote_status_slug: string | null;
+  order_status: string | null;
+  status: string | null;
+  shipment_status: string | null;
+  shipping_company: string | null;
+  tracking_number: string | null;
+  tracking_link: string | null;
+  order_created_at: string | null;
 };
 
 type SlotOption = {
@@ -111,6 +132,11 @@ type WhatsAppCommerceDependencies = {
   now?: () => Date;
   createPaymentLink?: typeof createPaymentLinkForInvoice;
   queueFieldTechSync?: (reason: string) => unknown;
+  classifyIntent?: (input: {
+    ownerUid: string;
+    phone: string;
+    text: string;
+  }) => Promise<WhatsAppAiClassification>;
 };
 
 const CUSTOMER_PHONE_SQL = `
@@ -120,6 +146,9 @@ const INSTALLATION_PHONE_SQL = `
   REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(customer_phone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '')
 `;
 const INVOICE_PHONE_SQL = `
+  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(customer_phone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '')
+`;
+const ORDER_PHONE_SQL = `
   REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(customer_phone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '')
 `;
 
@@ -170,6 +199,22 @@ function isBookingIntent(text: string) {
     || /احجز|أحجز/.test(text);
 }
 
+function isOrderStatusIntent(text: string) {
+  return /(?:حاله|حالة|تتبع|وين|اين|أين).*(?:طلب|شحن)/.test(text)
+    || /(?:طلب|شحن).*(?:حاله|حالة|تتبع|وين|اين|أين)/.test(text);
+}
+
+function orderNumberFromText(text: string) {
+  const normalized = normalizedText(text);
+  const labelled = normalized.match(
+    /(?:طلب|order)\s*(?:رقم|number|no\.?)?\s*[:#-]?\s*([a-z0-9][a-z0-9_-]{1,59})/i,
+  )?.[1];
+  if (!labelled || /^(?:هو|الذي|اللي|وصل|وين|اين|أين|حاله|حالة)$/i.test(labelled)) {
+    return undefined;
+  }
+  return labelled;
+}
+
 function isCancelIntent(text: string) {
   return /^(?:الغاء|إلغاء|الغي|ألغي|ابدأ من جديد|ابدا من جديد|reset)$/.test(text);
 }
@@ -195,7 +240,13 @@ function isCartCheckoutQuestion(text: string) {
 }
 
 function isHumanHelpQuestion(text: string) {
-  return /(?:موظف|مندوب|اتصال|كلمني|كلّموني|تواصل بشري|خدمة العملاء)/.test(text);
+  return /(?:موظف|مندوب|اتصال|كلمني|كلّموني|تواصل بشري|خدمة العملاء|حولني|حوّلني|تحويل)/.test(text);
+}
+
+function departmentFromText(text: string): WhatsAppAiDepartment {
+  if (/(?:مبيعات|شراء|sales)/i.test(text)) return "sales";
+  if (/(?:صيانة|صيانه|فني|تركيب|maintenance|technical)/i.test(text)) return "maintenance";
+  return "support";
 }
 
 function isExplicitBookingCommand(text: string) {
@@ -244,8 +295,10 @@ function mainMenu() {
     "اختر الخدمة:",
     "1 - رابط دفع فاتورة",
     "2 - حجز موعد تركيب أو صيانة",
+    "3 - معرفة حالة الطلب",
+    "4 - التحويل إلى موظف",
     "",
-    "يمكنك أيضًا كتابة: دفع أو حجز.",
+    "يمكنك أيضًا كتابة طلبك بطريقتك.",
   ].join("\n");
 }
 
@@ -263,6 +316,226 @@ function findCustomer(ownerUid: string, phone: string): CustomerRow | null {
       ORDER BY updated_at DESC, created_at DESC
       LIMIT 1`,
   ).get(ownerUid, `%${tail}`) as CustomerRow | undefined || null;
+}
+
+function safeReplyLine(value: unknown, maxLength = 120) {
+  return String(value || "")
+    .replace(/[\r\n\t\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function safeHttpsUrl(value: unknown) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    return parsed.protocol === "https:" ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function latestCustomerOrder(
+  ownerUid: string,
+  phone: string,
+  orderNumber?: string,
+): StoreOrderRow | null {
+  const tail = phoneTail(phone);
+  if (!tail) return null;
+  const orderFilter = orderNumber
+    ? `AND (
+         order_number = @orderNumber
+         OR store_order_id = @orderNumber
+         OR order_id = @orderNumber
+       )`
+    : "";
+  return db.prepare(
+    `SELECT id, order_number, store_order_id, order_id, remote_status_name,
+            remote_status_slug, order_status, status, shipment_status,
+            shipping_company, tracking_number, tracking_link, order_created_at
+       FROM store_orders
+      WHERE owner_uid = @ownerUid
+        AND ${ORDER_PHONE_SQL} LIKE @phoneTail
+        AND remote_deleted_at IS NULL
+        ${orderFilter}
+      ORDER BY COALESCE(order_created_at, imported_at, created_at) DESC
+      LIMIT 1`,
+  ).get({
+    ownerUid,
+    phoneTail: `%${tail}`,
+    orderNumber: orderNumber || "",
+  }) as StoreOrderRow | undefined || null;
+}
+
+function orderStatusReply(
+  ownerUid: string,
+  phone: string,
+  orderNumber?: string,
+): WhatsAppCommerceResult {
+  const order = latestCustomerOrder(ownerUid, phone, orderNumber);
+  if (!order) {
+    return {
+      handled: true,
+      kind: "order_not_found",
+      reply: orderNumber
+        ? "لم أجد هذا الطلب مرتبطًا برقم واتساب الحالي. تحقق من رقم الطلب أو اطلب التحويل إلى موظف."
+        : "لم أجد طلبًا مرتبطًا برقم واتساب الحالي. أرسل رقم الطلب أو اكتب: موظف.",
+    };
+  }
+  const displayNumber = safeReplyLine(
+    order.order_number || order.store_order_id || order.order_id || order.id,
+    60,
+  );
+  const status = safeReplyLine(
+    order.remote_status_name
+      || order.order_status
+      || order.shipment_status
+      || order.remote_status_slug
+      || order.status
+      || "قيد المتابعة",
+  );
+  const shipping = safeReplyLine(order.shipping_company, 80);
+  const trackingNumber = safeReplyLine(order.tracking_number, 80);
+  const trackingLink = safeHttpsUrl(order.tracking_link);
+  return {
+    handled: true,
+    kind: "order_status",
+    reply: [
+      `حالة الطلب ${displayNumber}: ${status}`,
+      shipping ? `شركة الشحن: ${shipping}` : "",
+      trackingNumber ? `رقم التتبع: ${trackingNumber}` : "",
+      trackingLink ? `رابط التتبع: ${trackingLink}` : "",
+      "",
+      "هذه الحالة من آخر مزامنة مع المتجر.",
+    ].filter(Boolean).join("\n"),
+  };
+}
+
+function departmentLabel(department: WhatsAppAiDepartment) {
+  if (department === "sales") return "المبيعات";
+  if (department === "maintenance") return "الصيانة";
+  return "خدمة العملاء";
+}
+
+function handoffAssignee(ownerUid: string, department: WhatsAppAiDepartment) {
+  const rows = db.prepare(
+    `SELECT department.name AS department_name, agent.user_id, agent.name, agent.sort_order
+       FROM ivr_department_agents agent
+       JOIN ivr_departments department ON department.id = agent.department_id
+      WHERE agent.owner_uid = ?
+        AND department.owner_uid = ?
+        AND agent.active = 1
+        AND department.active = 1
+      ORDER BY department.sort_order ASC, agent.sort_order ASC`,
+  ).all(ownerUid, ownerUid) as Array<{
+    department_name: string;
+    user_id: string | null;
+    name: string;
+  }>;
+  const patterns: Record<WhatsAppAiDepartment, RegExp> = {
+    sales: /مبيعات|sales/i,
+    maintenance: /صيانة|صيانه|فني|maintenance|technical/i,
+    support: /دعم|خدمة|عملاء|support|customer/i,
+  };
+  const preferred = rows.find((row) => patterns[department].test(row.department_name));
+  const selected = preferred;
+  return selected ? safeReplyLine(selected.user_id || selected.name, 120) : "";
+}
+
+function createHumanHandoff(
+  ownerUid: string,
+  phone: string,
+  message: string,
+  department: WhatsAppAiDepartment,
+  now: Date,
+): WhatsAppCommerceResult {
+  const customer = findCustomer(ownerUid, phone);
+  const timeBucket = Math.floor(now.getTime() / (30 * 60_000));
+  const handoffKey = crypto.createHash("sha256")
+    .update(`${ownerUid}\0${phoneTail(phone)}\0${department}\0${timeBucket}`)
+    .digest("hex")
+    .slice(0, 28);
+  const taskId = `wa_handoff_${handoffKey}`;
+  const assignedTo = handoffAssignee(ownerUid, department);
+  db.prepare(
+    `INSERT OR IGNORE INTO crm_tasks (
+       id, owner_uid, title, status, priority, due_date, assigned_to,
+       related_type, related_id, customer_id, notes, created_at, updated_at
+     ) VALUES (?, ?, ?, 'open', 'high', ?, ?, 'whatsapp_ai_handoff', ?, ?, ?, ?, ?)`,
+  ).run(
+    taskId,
+    ownerUid,
+    `تحويل محادثة واتساب إلى ${departmentLabel(department)}`,
+    now.toISOString(),
+    assignedTo,
+    handoffKey,
+    customer?.id || null,
+    [
+      `القسم المطلوب: ${departmentLabel(department)}`,
+      `رقم واتساب: ${normalizePhoneDigits(phone)}`,
+      `رسالة العميل: ${safeReplyLine(message, 500)}`,
+    ].join("\n"),
+    now.toISOString(),
+    now.toISOString(),
+  );
+  clearWhatsAppCommerceSession(db, ownerUid, phone);
+  return {
+    handled: true,
+    kind: "human_handoff",
+    reason: taskId,
+    reply: [
+      `تم تحويل طلبك إلى ${departmentLabel(department)} ✅`,
+      assignedTo
+        ? "تم إسناد المتابعة إلى موظف متاح، وسيتواصل معك بأقرب وقت."
+        : "تم إنشاء متابعة عاجلة في خدمة العملاء، وسيتواصل معك موظف بأقرب وقت.",
+      `رقم المتابعة: ${taskId.slice(-10)}`,
+    ].join("\n"),
+  };
+}
+
+async function routeAiClassification(
+  input: {
+    ownerUid: string;
+    phone: string;
+    text: string;
+    now: Date;
+    createPaymentLink: typeof createPaymentLinkForInvoice;
+  },
+  classification: WhatsAppAiClassification,
+): Promise<WhatsAppCommerceResult> {
+  if (classification.status !== "ok") {
+    saveSession(input.ownerUid, input.phone, "awaiting_action", {}, input.now);
+    return {
+      handled: true,
+      kind: "ai_fallback_menu",
+      reason: classification.reason || classification.status,
+      reply: "تعذر فهم الطلب تلقائيًا الآن.\n\n" + mainMenu(),
+    };
+  }
+  if (classification.intent === "payment_link") {
+    return sendPaymentLink(input.ownerUid, input.phone, input.now, input.createPaymentLink);
+  }
+  if (classification.intent === "booking") {
+    return beginBooking(input.ownerUid, input.phone, input.now);
+  }
+  if (classification.intent === "order_status") {
+    return orderStatusReply(input.ownerUid, input.phone, classification.orderNumber);
+  }
+  if (classification.intent === "human_handoff") {
+    return createHumanHandoff(
+      input.ownerUid,
+      input.phone,
+      input.text,
+      classification.department || "support",
+      input.now,
+    );
+  }
+  saveSession(input.ownerUid, input.phone, "awaiting_action", {}, input.now);
+  return {
+    handled: true,
+    kind: classification.intent === "menu" ? "commerce_menu" : "ai_unknown_menu",
+    reply: mainMenu(),
+  };
 }
 
 function customerAddress(customer: CustomerRow) {
@@ -1331,6 +1604,9 @@ export async function handleWhatsAppCommerceConversation(
   if (!whatsappCommerceStoreSupported()) return { handled: false, reason: "unsupported_store" };
   const createPaymentLink = dependencies.createPaymentLink || createPaymentLinkForInvoice;
   const queueSync = dependencies.queueFieldTechSync || queueFieldTechSync;
+  const classifyIntent = dependencies.classifyIntent
+    || ((classificationInput: { ownerUid: string; phone: string; text: string }) =>
+      classifyWhatsAppIntent(classificationInput, { now: () => now }));
   const session = getWhatsAppCommerceSession(db, input.ownerUid, phone, now.toISOString());
 
   if (selectedCampaignAction?.action === "change_filters") {
@@ -1354,11 +1630,40 @@ export async function handleWhatsAppCommerceConversation(
   if (!session) {
     if (isPaymentIntent(text)) return sendPaymentLink(input.ownerUid, phone, now, createPaymentLink);
     if (isBookingIntent(text)) return beginBooking(input.ownerUid, phone, now);
+    if (isOrderStatusIntent(text)) {
+      return orderStatusReply(input.ownerUid, phone, orderNumberFromText(input.text));
+    }
+    if (isHumanHelpQuestion(text)) {
+      return createHumanHandoff(
+        input.ownerUid,
+        phone,
+        input.text,
+        departmentFromText(text),
+        now,
+      );
+    }
     if (isGreeting(text)) {
       saveSession(input.ownerUid, phone, "awaiting_action", {}, now);
       return { handled: true, kind: "commerce_menu", reply: mainMenu() };
     }
-    return { handled: false, reason: "no_commerce_intent" };
+    const classification = await classifyIntent({
+      ownerUid: input.ownerUid,
+      phone,
+      text: input.text,
+    });
+    if (classification.status === "disabled" || classification.status === "not_configured") {
+      return { handled: false, reason: classification.reason || "ai_unavailable" };
+    }
+    return routeAiClassification(
+      {
+        ownerUid: input.ownerUid,
+        phone,
+        text: input.text,
+        now,
+        createPaymentLink,
+      },
+      classification,
+    );
   }
 
   const context = sessionContext(session);
@@ -1387,7 +1692,26 @@ export async function handleWhatsAppCommerceConversation(
     const choice = choiceNumber(text);
     if (choice === 1) return sendPaymentLink(input.ownerUid, phone, now, createPaymentLink);
     if (choice === 2) return beginBooking(input.ownerUid, phone, now);
-    return { handled: true, kind: "commerce_menu_retry", reply: mainMenu() };
+    if (choice === 3) return orderStatusReply(input.ownerUid, phone);
+    if (choice === 4) return createHumanHandoff(input.ownerUid, phone, input.text, "support", now);
+    const classification = await classifyIntent({
+      ownerUid: input.ownerUid,
+      phone,
+      text: input.text,
+    });
+    if (classification.status === "disabled" || classification.status === "not_configured") {
+      return { handled: true, kind: "commerce_menu_retry", reply: mainMenu() };
+    }
+    return routeAiClassification(
+      {
+        ownerUid: input.ownerUid,
+        phone,
+        text: input.text,
+        now,
+        createPaymentLink,
+      },
+      classification,
+    );
   }
 
   if (session.step === "awaiting_name") {

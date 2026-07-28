@@ -25,6 +25,7 @@ const { dispatchMessage } = await import("./gateway");
 
 function clearCommerceFixtures() {
   for (const table of [
+    "whatsapp_ai_intents",
     "whatsapp_commerce_sessions",
     "bookings",
     "installations",
@@ -41,6 +42,9 @@ function clearCommerceFixtures() {
     "communication_preferences",
     "communication_suppressions",
     "technician_notifications",
+    "store_orders",
+    "ivr_department_agents",
+    "ivr_departments",
   ]) {
     db.prepare(`DELETE FROM ${table}`).run();
   }
@@ -77,18 +81,62 @@ function seedExistingCustomer() {
   ).run(ownerUid, existingPhone);
 }
 
-function seedIssuedInvoice() {
+function seedIssuedInvoice(input: {
+  id?: string;
+  number?: string;
+  sequence?: number;
+  issueDate?: string;
+} = {}) {
   db.prepare(
     `INSERT INTO invoices (
        id, owner_uid, invoice_number, document_kind, sequence_no, issued_at,
        idempotency_key, customer_name, customer_phone, status, issue_date,
        total_with_vat, currency, items, created_at, updated_at
      ) VALUES (
-       'invoice-wa-1', ?, 'INV-WA-001', 'invoice', 1, ?,
-       'invoice:wa:1', 'عميل واتساب', ?, 'issued', '2026-07-27',
+       ?, ?, ?, 'invoice', ?, ?,
+       ?, 'عميل واتساب', ?, 'issued', ?,
        230, 'SAR', '[]', ?, ?
      )`,
-  ).run(ownerUid, now.toISOString(), existingPhone, now.toISOString(), now.toISOString());
+  ).run(
+    input.id || "invoice-wa-1",
+    ownerUid,
+    input.number || "INV-WA-001",
+    input.sequence || 1,
+    now.toISOString(),
+    `invoice:wa:${input.sequence || 1}`,
+    existingPhone,
+    input.issueDate || "2026-07-27",
+    now.toISOString(),
+    now.toISOString(),
+  );
+}
+
+function seedStoreOrder(input: {
+  id?: string;
+  owner?: string;
+  phone?: string;
+  number?: string;
+  status?: string;
+}) {
+  const id = input.id || "store-order-wa-1";
+  db.prepare(
+    `INSERT INTO store_orders (
+       id, owner_uid, customer_phone, order_number, store_order_id,
+       remote_status_name, remote_status_slug, shipping_company,
+       tracking_number, tracking_link, order_created_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, 'in_progress', 'شركة الشحن',
+               'TRACK-123', 'https://tracking.example.test/TRACK-123',
+               '2026-07-27T05:00:00.000Z', ?, ?)`,
+  ).run(
+    id,
+    input.owner || ownerUid,
+    input.phone || existingPhone,
+    input.number || "S-1001",
+    input.number || "S-1001",
+    input.status || "قيد التجهيز",
+    now.toISOString(),
+    now.toISOString(),
+  );
 }
 
 function seedCampaign(id = "camp_action_test") {
@@ -120,6 +168,8 @@ function seedReminderCampaign(id = "camp_reminder_test") {
 
 test.beforeEach(() => {
   delete process.env.WHATSAPP_COMMERCE_ENABLED;
+  delete process.env.WHATSAPP_AI_ENABLED;
+  delete process.env.DEEPSEEK_API_KEY;
   clearCommerceFixtures();
   seedTechnician();
   seedProduct();
@@ -261,6 +311,265 @@ test("WhatsApp creates an idempotent payment link for the latest payable invoice
     },
   );
   assert.equal(calls[1].idempotencyKey, calls[0].idempotencyKey);
+});
+
+test("DeepSeek classification can route free-form Arabic to the existing payment tool without generating a URL", async () => {
+  seedExistingCustomer();
+  seedIssuedInvoice({
+    id: "invoice-wa-ai-2",
+    number: "INV-WA-AI-002",
+    sequence: 2,
+    issueDate: "2026-07-28",
+  });
+  let classifierCalls = 0;
+  const result = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "أرسل لي الشيء اللي أقدر أكمل الحساب منه",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => {
+        classifierCalls += 1;
+        return {
+          attempted: true,
+          status: "ok",
+          intent: "payment_link",
+          confidence: 0.94,
+        };
+      },
+      createPaymentLink: async (input) => ({
+        success: true,
+        id: "pay_ai_1",
+        payment_id: "pay_ai_1",
+        invoice_id: input.invoiceId,
+        tap_charge_id: "chg_ai_1",
+        amount: 230,
+        currency: "SAR",
+        redirect_url: "https://tap.test/pay/from-crm-only",
+        status: "pending",
+        created_at: now.toISOString(),
+      }),
+    },
+  );
+  assert.equal(classifierCalls, 1);
+  assert.equal(result.kind, "payment_link");
+  assert.match(String(result.reply), /https:\/\/tap\.test\/pay\/from-crm-only/);
+});
+
+test("order status is returned only for the sender phone and current owner", async () => {
+  seedStoreOrder({});
+  seedStoreOrder({
+    id: "store-order-other-customer",
+    phone: "966599999999",
+    number: "S-SECRET-CUSTOMER",
+    status: "طلب عميل آخر",
+  });
+  seedStoreOrder({
+    id: "store-order-other-owner",
+    owner: "another-owner",
+    number: "S-SECRET-TENANT",
+    status: "طلب متجر آخر",
+  });
+
+  const latest = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "خبرني وين وصلت الشغلة اللي طلبتها",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => ({
+        attempted: true,
+        status: "ok",
+        intent: "order_status",
+        confidence: 0.96,
+      }),
+    },
+  );
+  assert.equal(latest.kind, "order_status");
+  assert.match(String(latest.reply), /S-1001/);
+  assert.match(String(latest.reply), /قيد التجهيز/);
+  assert.match(String(latest.reply), /tracking\.example\.test/);
+  assert.doesNotMatch(String(latest.reply), /SECRET/);
+
+  const forged = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "تابع S-SECRET-CUSTOMER",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => ({
+        attempted: true,
+        status: "ok",
+        intent: "order_status",
+        orderNumber: "S-SECRET-CUSTOMER",
+        confidence: 0.99,
+      }),
+    },
+  );
+  assert.equal(forged.kind, "order_not_found");
+  assert.doesNotMatch(String(forged.reply), /طلب عميل آخر/);
+
+  let directClassifierCalls = 0;
+  const directForged = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "ما حالة الطلب S-SECRET-CUSTOMER؟",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => {
+        directClassifierCalls += 1;
+        throw new Error("the deterministic status command must not call AI");
+      },
+    },
+  );
+  assert.equal(directForged.kind, "order_not_found");
+  assert.equal(directClassifierCalls, 0);
+  assert.doesNotMatch(String(directForged.reply), /طلب عميل آخر/);
+
+  const crossTenant = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "تابع S-SECRET-TENANT",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => ({
+        attempted: true,
+        status: "ok",
+        intent: "order_status",
+        orderNumber: "S-SECRET-TENANT",
+        confidence: 0.99,
+      }),
+    },
+  );
+  assert.equal(crossTenant.kind, "order_not_found");
+  assert.doesNotMatch(String(crossTenant.reply), /طلب متجر آخر/);
+});
+
+test("human handoff creates one high-priority CRM task and safely reuses it", async () => {
+  seedExistingCustomer();
+  db.prepare(
+    `INSERT INTO ivr_departments (id, owner_uid, digit, name, active, sort_order)
+     VALUES ('dept-sales-wa', ?, '1', 'المبيعات', 1, 1)`,
+  ).run(ownerUid);
+  db.prepare(
+    `INSERT INTO ivr_department_agents (
+       id, department_id, owner_uid, user_id, name, phone, active, sort_order
+     ) VALUES ('agent-sales-wa', 'dept-sales-wa', ?, 'sales-user-1', 'موظف المبيعات',
+               '966511111112', 1, 1)`,
+  ).run(ownerUid);
+  const dependencies = {
+    now: () => now,
+    classifyIntent: async () => ({
+      attempted: true as const,
+      status: "ok" as const,
+      intent: "human_handoff" as const,
+      department: "sales" as const,
+      confidence: 0.93,
+    }),
+  };
+  const first = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "ودي أحد يفهم مشكلتي ويتابعها معي",
+    },
+    dependencies,
+  );
+  let directClassifierCalls = 0;
+  const second = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "حولني لموظف المبيعات",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => {
+        directClassifierCalls += 1;
+        throw new Error("explicit handoff must not call AI");
+      },
+    },
+  );
+  assert.equal(first.kind, "human_handoff");
+  assert.equal(second.kind, "human_handoff");
+  assert.equal(first.reason, second.reason);
+  assert.equal(directClassifierCalls, 0);
+  const tasks = db.prepare(
+    `SELECT priority, customer_id, related_type, assigned_to, notes
+       FROM crm_tasks
+      WHERE owner_uid = ? AND related_type = 'whatsapp_ai_handoff'`,
+  ).all(ownerUid) as Array<Record<string, unknown>>;
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].priority, "high");
+  assert.equal(tasks[0].customer_id, "customer-wa-1");
+  assert.equal(tasks[0].assigned_to, "sales-user-1");
+  assert.match(String(tasks[0].notes), /المبيعات/);
+});
+
+test("an active booking data-entry session never calls the AI classifier", async () => {
+  let classifierCalls = 0;
+  saveWhatsAppCommerceSession(db, {
+    ownerUid,
+    phone: newPhone,
+    step: "awaiting_name",
+    now: now.toISOString(),
+    context: {},
+  });
+  const result = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: newPhone,
+      text: "عبدالله محمد",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => {
+        classifierCalls += 1;
+        throw new Error("AI must not run during booking data entry");
+      },
+    },
+  );
+  assert.equal(result.kind, "booking_address_required");
+  assert.equal(classifierCalls, 0);
+});
+
+test("AI failures and unknown output fall back to the deterministic menu without inventing an action", async () => {
+  const failed = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: "ممكن تساعدني",
+    },
+    {
+      now: () => now,
+      classifyIntent: async () => ({
+        attempted: true,
+        status: "failed",
+        intent: "unknown",
+        reason: "invalid_response",
+      }),
+    },
+  );
+  assert.equal(failed.kind, "ai_fallback_menu");
+  assert.match(String(failed.reply), /1 - رابط دفع فاتورة/);
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS count FROM payments").get() as { count: number }).count,
+    0,
+  );
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS count FROM bookings").get() as { count: number }).count,
+    0,
+  );
 });
 
 test("a cart reply answers catalog facts and escalates unknown product questions without inventing an answer", async () => {

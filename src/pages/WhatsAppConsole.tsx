@@ -1,4 +1,5 @@
 import {
+  Bot,
   CheckCircle2,
   CircleAlert,
   LinkIcon,
@@ -448,6 +449,54 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
           </div>
         </div>
       )}
+
+      <Panel title="مساعد واتساب الذكي" icon={<Bot size={16} aria-hidden="true" />}>
+        <div role="status" aria-live="polite">
+          <p style={{ margin: 0 }}>
+            <strong style={{ color: status?.ai?.ready ? "#0fbf6c" : "#fbbf24" }}>
+              {status?.ai?.ready
+                ? "جاهز وتم التحقق من اتصال DeepSeek"
+                : status?.ai?.prerequisitesReady
+                  ? "مهيأ — بانتظار تحقق حي"
+                  : "غير جاهز بعد"}
+            </strong>
+          </p>
+          <p style={{ margin: "6px 0 0", fontSize: 13, lineHeight: 1.7 }}>
+            DeepSeek يفهم نية العميل فقط. إنشاء رابط الدفع والحجز وقراءة حالة الطلب
+            والتحويل إلى موظف تنفذها أدوات الـCRM المقيدة.
+          </p>
+          <ul style={{ margin: "8px 0 0", paddingInlineStart: 20, fontSize: 12, lineHeight: 1.8 }}>
+            <li>التفعيل: {status?.ai?.enabled ? "مفعّل" : "متوقف"}</li>
+            <li>المفتاح: {status?.ai?.configured ? "موجود في بيئة الخادم" : "غير مضبوط"}</li>
+            <li>مسار الدفع والحجز: {status?.ai?.commerceEnabled ? "مفعّل" : "متوقف"}</li>
+            <li>مخزن البيانات: {status?.ai?.storeSupported ? "مدعوم" : "غير مدعوم لهذا المسار"}</li>
+            <li>
+              التحقق الحي:{" "}
+              {status?.ai?.verified
+                ? `ناجح في ${fmtDateTime(status.ai.verifiedAt)}`
+                : "لم ينجح بعد للإعداد الحالي"}
+            </li>
+            <li>
+              النموذج:{" "}
+              <code translate="no" dir="ltr" style={{ overflowWrap: "anywhere" }}>
+                {status?.ai?.model || "—"}
+              </code>
+            </li>
+          </ul>
+          {!status?.ai?.prerequisitesReady && (
+            <p className="note" role="note" style={{ marginBottom: 0 }}>
+              ألغِ أي مفتاح ظهر في محادثة أو صورة، ثم ضع مفتاحًا جديدًا مباشرة في
+              بيئة الخادم وفعّل <code translate="no">WHATSAPP_AI_ENABLED</code>.
+            </p>
+          )}
+          {status?.ai?.prerequisitesReady && !status.ai.ready && (
+            <p className="note" role="note" style={{ marginBottom: 0 }}>
+              نفّذ محادثة Canary من رقم اختبار. تتحول الحالة إلى «جاهز» فقط بعد
+              استجابة DeepSeek ناجحة خلال آخر 24 ساعة.
+            </p>
+          )}
+        </div>
+      </Panel>
 
       {/* Stats row */}
       <div className="wa-stat-grid">

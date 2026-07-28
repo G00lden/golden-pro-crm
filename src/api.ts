@@ -369,6 +369,18 @@ export type WhatsAppStatus = {
     allowlistCount: number;
     dryRun: boolean;
   };
+  ai?: {
+    provider: "deepseek";
+    enabled: boolean;
+    configured: boolean;
+    commerceEnabled: boolean;
+    storeSupported: boolean;
+    prerequisitesReady: boolean;
+    verified: boolean;
+    verifiedAt?: string;
+    ready: boolean;
+    model: string;
+  };
   updatedAt?: string;
 };
 

@@ -248,6 +248,7 @@
 body {
   margin: 0;
   min-width: 320px;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
 }
@@ -3013,7 +3014,13 @@ img.quote-cover-logo {
 }
 
 .wa-template-card {
+  min-width: 0;
   padding: 10px;
+}
+
+.wa-template-card strong {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .wa-template-card pre {
