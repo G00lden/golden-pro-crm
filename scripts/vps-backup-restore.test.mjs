@@ -397,6 +397,9 @@ test("VPS restore confines trusted sources and rejects writable or swapped paylo
 test("manual VPS deployment uploads immutable inputs then delegates one locked transaction", () => {
   assert.match(deployVps, /npm run test:unit\s+Assert-NativeSuccess "Unit test suite"/);
   assert.match(deployVps, /AllowFirstDeployWithoutBackup/);
+  assert.match(deployVps, /UseExistingEnvironment/);
+  assert.match(deployVps, /if \(-not \$UseExistingEnvironment\) \{\s+scp .*"\.env\.production"/);
+  assert.match(deployVps, /USE_EXISTING_ENV='\$useExistingEnv'/);
   assert.match(deployVps, /TRUST_PROXY_HEADERS.*-cne "true"/);
   assert.match(deployVps, /VITE_PUBLIC_CONTACT_PHONE/);
   assert.match(deployVps, /\^\\\+\[1-9\]\[0-9\]\{7,14\}\$/);

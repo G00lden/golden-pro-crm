@@ -28,6 +28,9 @@ Copy-Item .env.production.example .env.production
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-vps.ps1 `
   -HostName "SERVER_IP" -SshKey "C:\path\to\key.pem" -SkipDns
 
+# عند تحديث خادم قائم مع الحفاظ على أسرار البيئة الموجودة داخله:
+# أضف -UseExistingEnvironment
+
 # لأول نشر فقط، وبعد التأكد أنه لا توجد خدمة أو بيانات سابقة:
 # أضف -AllowFirstDeployWithoutBackup
 
