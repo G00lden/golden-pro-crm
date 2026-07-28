@@ -215,6 +215,18 @@ export async function buildFieldTechSnapshot(ownerUid: string, updatedSince?: st
         customer?.city ||
         "العنوان غير مسجل في CRM",
       ).trim();
+      const latitude = Number(
+        booking.customer_latitude ??
+        booking.latitude ??
+        installation?.customer_latitude ??
+        installation?.latitude,
+      );
+      const longitude = Number(
+        booking.customer_longitude ??
+        booking.longitude ??
+        installation?.customer_longitude ??
+        installation?.longitude,
+      );
       return {
         id: booking.id,
         technicianId: String(booking.technician_id || ""),
@@ -229,6 +241,13 @@ export async function buildFieldTechSnapshot(ownerUid: string, updatedSince?: st
         scheduledTime: String(booking.scheduled_time || ""),
         scheduledAt: scheduledAt(booking.date, booking.scheduled_time),
         address,
+        latitude: Number.isFinite(latitude) && latitude >= -90 && latitude <= 90 ? latitude : null,
+        longitude: Number.isFinite(longitude) && longitude >= -180 && longitude <= 180 ? longitude : null,
+        locationUrl: String(
+          booking.location_url ||
+          installation?.location_url ||
+          "",
+        ) || null,
         status: String(booking.status || "confirmed"),
         priority: String(booking.priority || "عادي"),
         note: String(booking.notes || booking.note || booking.product_name || "").slice(0, 2_000),

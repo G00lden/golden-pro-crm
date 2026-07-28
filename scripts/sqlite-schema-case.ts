@@ -234,7 +234,7 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10901) throw new Error(`Expected schema 10901, got ${userVersion}`);
+if (userVersion !== 10903) throw new Error(`Expected schema 10903, got ${userVersion}`);
 for (const required of ["media_type", "media_url", "order_url"]) {
   if (!columns("communication_campaigns").has(required)) {
     throw new Error(`communication_campaigns.${required} is missing`);
@@ -296,8 +296,22 @@ for (const required of [
   "is_read",
   "is_price_quote",
   "metadata_contract_version",
+  "customer_latitude",
+  "customer_longitude",
+  "location_url",
+  "shipment_id",
+  "shipment_labels",
+  "tracking_number",
+  "tracking_link",
+  "salla_admin_url",
+  "salla_customer_url",
 ]) {
   if (!columns("store_orders").has(required)) throw new Error(`store_orders.${required} is missing`);
+}
+for (const table of ["installations", "bookings"]) {
+  for (const required of ["customer_latitude", "customer_longitude", "location_url"]) {
+    if (!columns(table).has(required)) throw new Error(`${table}.${required} is missing`);
+  }
 }
 
 for (const required of [

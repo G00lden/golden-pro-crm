@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10901;
+const TARGET_SCHEMA_VERSION = 10903;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -154,6 +154,15 @@ for (const col of [
   ["customer_phone", "TEXT"],
   ["customer_city", "TEXT"],
   ["customer_address", "TEXT"],
+  ["customer_latitude", "REAL"],
+  ["customer_longitude", "REAL"],
+  ["location_url", "TEXT"],
+  ["shipment_id", "TEXT"],
+  ["shipment_labels", "TEXT DEFAULT '[]'"],
+  ["tracking_number", "TEXT"],
+  ["tracking_link", "TEXT"],
+  ["salla_admin_url", "TEXT"],
+  ["salla_customer_url", "TEXT"],
   ["product_name", "TEXT"],
   ["product_sku", "TEXT"],
   ["order_status", "TEXT"],
@@ -355,6 +364,9 @@ db.exec(`
     last_remind_attempt_at TEXT,
     source TEXT DEFAULT 'manual',
     customer_address TEXT DEFAULT '',
+    customer_latitude REAL,
+    customer_longitude REAL,
+    location_url TEXT,
     store_order_id TEXT,
     store_order_number TEXT,
     order_item_type TEXT,
@@ -392,6 +404,9 @@ db.exec(`
     booking_type TEXT DEFAULT 'maintenance',
     source TEXT DEFAULT 'manual',
     customer_address TEXT DEFAULT '',
+    customer_latitude REAL,
+    customer_longitude REAL,
+    location_url TEXT,
     notes TEXT DEFAULT '',
     parts TEXT DEFAULT '[]',
     fieldtech_require_before_photo INTEGER DEFAULT 1,
@@ -1308,11 +1323,19 @@ for (const [table, columns] of [
   ["customers", [["address", "TEXT DEFAULT ''"], ["customer_address", "TEXT DEFAULT ''"]]],
   ["installations", [
     ["customer_address", "TEXT DEFAULT ''"],
+    ["customer_latitude", "REAL"],
+    ["customer_longitude", "REAL"],
+    ["location_url", "TEXT"],
     ["store_order_id", "TEXT"],
     ["store_order_number", "TEXT"],
     ["order_item_type", "TEXT"],
   ]],
-  ["bookings", [["customer_address", "TEXT DEFAULT ''"]]],
+  ["bookings", [
+    ["customer_address", "TEXT DEFAULT ''"],
+    ["customer_latitude", "REAL"],
+    ["customer_longitude", "REAL"],
+    ["location_url", "TEXT"],
+  ]],
 ] as const) {
   for (const [column, definition] of columns) {
     if (hasColumn(table, column)) continue;
@@ -2017,6 +2040,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10800, '1.8.0-salla-cart-whatsapp-concierge');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10900, '1.9.0-salla-delivery-rating-whatsapp');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10901, '1.9.1-whatsapp-media-campaigns');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10903, '1.9.3-salla-order-dispatch');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

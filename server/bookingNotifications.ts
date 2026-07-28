@@ -18,6 +18,10 @@ type Booking = {
   status: "confirmed" | "completed" | "cancelled";
   booking_type?: "installation" | "maintenance" | "external_maintenance";
   store_order_number?: string;
+  customer_address?: string;
+  customer_latitude?: number | null;
+  customer_longitude?: number | null;
+  location_url?: string | null;
   createdBy: string;
 };
 
@@ -48,9 +52,31 @@ function triggerText(trigger?: string) {
   return "تنبيه موعد مؤكد";
 }
 
+function bookingLocationUrl(booking: Booking) {
+  const latitude = Number(booking.customer_latitude);
+  const longitude = Number(booking.customer_longitude);
+  if (
+    Number.isFinite(latitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    Number.isFinite(longitude) &&
+    longitude >= -180 &&
+    longitude <= 180
+  ) {
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${latitude},${longitude}`)}`;
+  }
+  try {
+    const url = new URL(String(booking.location_url || ""));
+    return url.protocol === "https:" ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
 const COMPANY_NAME = process.env.COMPANY_NAME || "BreeXe Pro";
 
 export function buildTechnicianBookingMessage(booking: Booking, technician: Technician, trigger?: string) {
+  const locationUrl = bookingLocationUrl(booking);
   if (trigger === "pre_alert") {
     return [
       `🔔 تذكير قبل الموعد`,
@@ -60,6 +86,8 @@ export function buildTechnicianBookingMessage(booking: Booking, technician: Tech
       `- العميل: ${booking.customer_name}`,
       `- الهاتف: ${booking.customer_phone || "-"}`,
       `- المنتج: ${booking.product_name}`,
+      booking.customer_address ? `- العنوان: ${booking.customer_address}` : null,
+      locationUrl ? `- فتح الموقع: ${locationUrl}` : null,
       `- الوقت: ${booking.scheduled_time}`,
       `يرجى الالتزام بالموعد.`,
       `${COMPANY_NAME}`,
@@ -73,6 +101,8 @@ export function buildTechnicianBookingMessage(booking: Booking, technician: Tech
     `- العميل: ${booking.customer_name}`,
     `- المنتج: ${booking.product_name}`,
     `- الهاتف: ${booking.customer_phone || "-"}`,
+    booking.customer_address ? `- العنوان: ${booking.customer_address}` : null,
+    locationUrl ? `- فتح الموقع: ${locationUrl}` : null,
     booking.store_order_number ? `- رقم طلب المتجر: ${booking.store_order_number}` : null,
     booking.booking_type ? `- نوع المهمة: ${booking.booking_type}` : null,
     `- التاريخ: ${booking.date}`,

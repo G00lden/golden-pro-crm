@@ -1,9 +1,12 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import {
   deduplicateProductsForUser,
+  describeSallaDependencyError,
   getSallaStatus,
   getSallaConnectUrl,
   getSallaOrderStatusesForUser,
+  getSallaOrderShipmentsForUser,
+  sallaTrustedIpHints,
   syncSallaProductsForUser,
   syncSallaStoreForUser,
   updateSallaOrderForUser,
@@ -31,7 +34,7 @@ function httpError(status: number, message: string) {
 }
 
 export function toSallaDependencyError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error || "");
+  const message = describeSallaDependencyError(error);
   return httpError(424, message || "تعذر تحميل حالات الطلب من سلة.");
 }
 
@@ -52,6 +55,7 @@ export function registerSallaRoutes(app: Express) {
           data: [],
           available: false,
           ...availability,
+          trusted_ips: sallaTrustedIpHints(),
           reason: "تكامل سلة غير مهيأ على الخادم. أكمل إعداد مفاتيح التطبيق من الإعدادات أولًا.",
         });
         return;
@@ -62,6 +66,7 @@ export function registerSallaRoutes(app: Express) {
           data: [],
           available: false,
           ...availability,
+          trusted_ips: sallaTrustedIpHints(),
           reason: "متجر سلة غير متصل بهذا الحساب. اربط المتجر من الإعدادات قبل المزامنة أو تعديل الطلبات.",
         });
         return;
@@ -83,13 +88,20 @@ export function registerSallaRoutes(app: Express) {
           })),
           available: true,
           ...availability,
+          trusted_ips: sallaTrustedIpHints(),
           reason: null,
         });
       } catch (error) {
         // Every failure in this block originated while reading the external
         // Salla dependency. Preserve the message, but never expose an upstream
         // 401/403 as if the CRM itself rejected the signed-in user.
-        throw toSallaDependencyError(error);
+        res.json({
+          data: [],
+          available: false,
+          ...availability,
+          trusted_ips: sallaTrustedIpHints(),
+          reason: describeSallaDependencyError(error),
+        });
       }
     }),
   );
@@ -212,6 +224,18 @@ export function registerSallaRoutes(app: Express) {
         warning: capped ? "Product usage summary reached the 10,000-row safety cap." : null,
         products: mapped,
       });
+    }),
+  );
+
+  app.get(
+    "/api/integrations/salla/orders/:id/shipments",
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      try {
+        res.json(await getSallaOrderShipmentsForUser(userReq.user.uid, req.params.id));
+      } catch (error) {
+        throw toSallaDependencyError(error);
+      }
     }),
   );
 

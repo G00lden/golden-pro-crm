@@ -63,6 +63,7 @@ test("Salla status discovery is typed and fail-closed before configuration or li
         configured: false,
         linked: false,
         status: "not_configured",
+        trusted_ips: [],
         reason: "تكامل سلة غير مهيأ على الخادم. أكمل إعداد مفاتيح التطبيق من الإعدادات أولًا.",
       });
 
@@ -76,6 +77,7 @@ test("Salla status discovery is typed and fail-closed before configuration or li
         configured: true,
         linked: false,
         status: "ready_to_connect",
+        trusted_ips: [],
         reason: "متجر سلة غير متصل بهذا الحساب. اربط المتجر من الإعدادات قبل المزامنة أو تعديل الطلبات.",
       });
     });

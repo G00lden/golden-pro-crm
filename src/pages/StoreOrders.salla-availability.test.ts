@@ -10,7 +10,9 @@ test("disconnected Salla operations are disabled with a visible reason", () => {
   assert.match(source, /disabled=\{orders\.loading \|\| sallaStatuses\.loading \|\| !sallaRemoteActionsAvailable\}/);
   assert.match(source, /disabled=\{sallaStatuses\.loading \|\| !sallaRemoteActionsAvailable\}/);
   assert.match(source, /disabled=\{!sallaRemoteActionsAvailable\}[\s\S]{0,180}?تعديل بيانات سلة/);
-  assert.match(source, /عمليات سلة البعيدة متوقفة:/);
+  assert.match(source, /التحكم البعيد في سلة متوقف:/);
+  assert.match(source, /استقبال الطلبات الجديدة وتحويلها للفنيين مستمران/);
+  assert.match(source, /App Trusted IPs/);
   assert.match(source, /role=\{sallaStatuses\.error \? "alert" : "status"\}/);
   assert.match(source, /aria-live=\{sallaStatuses\.error \? undefined : "polite"\}/);
   assert.match(source, /aria-describedby="salla-remote-actions-status"/);
