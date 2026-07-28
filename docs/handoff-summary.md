@@ -615,3 +615,15 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Local verification passed: CRM TypeScript lint, production build, `423/423` unit tests, `9/9` schema tests, FieldTech integration tests, packing-list XSS regression tests, and desktop/mobile browser QA of the Salla documents workflow. The standalone FieldTech server also passed syntax checks and `8/8` tests.
 - Deployed CRM release `1.9.3` at build `fb4cbf8f7854` through the locked backup/build/health transaction. Deployed FieldTech commit `599f9c0` after an integrity-checked SQLite backup at `/data/backups/pre-deploy-20260728T105616Z.sqlite`; both public health endpoints and both Docker health checks returned healthy.
 - Remaining external gate: sign into `portal.salla.partners`, add the two production egress IPs shown by the CRM to the app trusted list, save, then use `إعادة التحقق من اتصال سلة`. Until that save succeeds, incoming signed webhooks and technician dispatch remain active, while remote status changes and live AWB retrieval stay intentionally unavailable.
+
+## 2026-07-28 - WhatsApp bulk campaigns and weekly customer reminders 1.9.4 [Codex]
+
+- Rebuilt the campaign composer for text, image, or video marketing templates with the fixed Meta buttons `اطلب الآن`, `ذكّرني بعد أسبوع`, and `إيقاف الرسائل`.
+- Added Arabic/English `CSV` and `TXT` audience import with Saudi phone normalization, duplicate/invalid/overflow reporting, a hard 10,000-recipient limit, and mandatory documented marketing consent for every imported list.
+- Added durable weekly follow-up jobs. Repeated clicks reuse the active reminder; after it is sent, the customer can request another seven-day cycle. Consent and suppression are rechecked immediately before every follow-up.
+- The opt-out button records an active WhatsApp marketing suppression immediately. Reminder and opt-out actions remain available even when the separate payment/booking commerce switch is disabled.
+- Added three logical Meta templates (`campaign_offer_text_reminder`, `campaign_offer_image_reminder`, and `campaign_offer_video_reminder`), exact approval-shape checks, safe store-URL prefix enforcement, and production environment mappings.
+- Advanced the SQLite target to `10904` with `communication_campaign_audience`; campaign queues now allow 10,000 recipients and extend expiry to cover the selected delivery rate.
+- Local verification passed: TypeScript lint, production build, `428/428` unit tests, `9/9` schema tests, targeted campaign tests, and isolated desktop/mobile browser QA. Browser QA confirmed 2 valid, 1 duplicate, and 1 invalid sample record, a 2-recipient preview, no mobile horizontal overflow, and an intentionally disabled launch button.
+- Production code may be deployed safely, but real bulk sending must remain locked until WhatsApp Cloud API is live, all three Meta templates are approved and mapped, `OUTBOUND_MODE=production`, and `OFFICIAL_LAUNCH_APPROVED=true`.
+- Arabic setup and operating guide: `docs/whatsapp-media-campaigns-ar.md`.

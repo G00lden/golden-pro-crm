@@ -24,6 +24,9 @@ export type TemplateName =
   | "delivery_review_request"
   | "campaign_offer_image"
   | "campaign_offer_video"
+  | "campaign_offer_text_reminder"
+  | "campaign_offer_image_reminder"
+  | "campaign_offer_video_reminder"
   | "general_reminder";
 
 const DEFAULT_COMPANY = process.env.COMPANY_NAME || "Breexe Pro";
@@ -39,6 +42,12 @@ export const TEMPLATES: Record<TemplateName, string> = {
   campaign_offer_image: `مرحبًا {customer_name} 👋
 {offer_text}`,
   campaign_offer_video: `مرحبًا {customer_name} 👋
+{offer_text}`,
+  campaign_offer_text_reminder: `مرحبًا {customer_name} 👋
+{offer_text}`,
+  campaign_offer_image_reminder: `مرحبًا {customer_name} 👋
+{offer_text}`,
+  campaign_offer_video_reminder: `مرحبًا {customer_name} 👋
 {offer_text}`,
   call_answered_customer: `شكراً لاتصالك بـ{company_name}.
 تم تسجيل اتصالك بنجاح. يمكنك كتابة ما تحتاجه هنا عبر واتساب، وسنتابع معك في أقرب فرصة.`,

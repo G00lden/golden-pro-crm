@@ -73,6 +73,7 @@ const files = [
   "src/outboundCallers.test.ts",
   "src/sallaAvailability.test.ts",
   "src/singleFlight.test.ts",
+  "src/campaignAudienceImport.test.ts",
   "src/localInvoiceLedger.test.ts",
   "src/pages/OutboundActions.test.ts",
   "src/pages/AdminUsers.role-policy.test.ts",

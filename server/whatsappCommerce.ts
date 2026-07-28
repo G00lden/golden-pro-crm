@@ -19,6 +19,8 @@ import {
   recordDeliveryRating,
 } from "./deliveryReview";
 import { queueBookingAssignmentNotification } from "./bookingAssignmentNotification";
+import { communicationCampaignStore } from "./communicationCampaigns";
+import { communicationPreferenceStore } from "./communicationPreferences";
 
 type CustomerRow = {
   id: string;
@@ -202,11 +204,15 @@ function isExplicitBookingCommand(text: string) {
 
 function campaignAction(value: string) {
   const match = String(value || "").trim().match(
-    /^campaign:(change_filters|book_appointment):([a-z0-9_-]{6,100})$/i,
+    /^campaign:(change_filters|book_appointment|remind_week|stop_marketing):([a-z0-9_-]{6,100})$/i,
   );
   if (!match) return null;
   return {
-    action: match[1].toLowerCase() as "change_filters" | "book_appointment",
+    action: match[1].toLowerCase() as
+      | "change_filters"
+      | "book_appointment"
+      | "remind_week"
+      | "stop_marketing",
     campaignId: match[2],
   };
 }
@@ -543,6 +549,58 @@ function beginCampaignFilterChange(
     handled: true,
     kind: "campaign_filter_details_required",
     reply: "أكيد. اكتب نوع الفلتر أو الجهاز والمقاس أو الكمية المطلوبة، وسيفتح النظام متابعة لموظف المبيعات داخل CRM.",
+  };
+}
+
+function scheduleCampaignWeekReminder(
+  ownerUid: string,
+  phone: string,
+  campaignId: string,
+  now: Date,
+): WhatsAppCommerceResult {
+  const result = communicationCampaignStore.scheduleWeekFollowup(
+    ownerUid,
+    campaignId,
+    phone,
+    now,
+  );
+  if (!result.scheduled) {
+    return {
+      handled: true,
+      kind: "campaign_week_reminder_rejected",
+      reply: result.reason === "suppressed"
+        ? "لا يمكن جدولة التذكير لأن الرسائل التسويقية متوقفة لهذا الرقم."
+        : "تعذر جدولة هذا التذكير. يمكنك مراسلتنا متى شئت وسنساعدك.",
+    };
+  }
+  return {
+    handled: true,
+    kind: result.created ? "campaign_week_reminder_scheduled" : "campaign_week_reminder_exists",
+    reply: result.created
+      ? "تم ✅ سنعيد إرسال العرض لك بعد 7 أيام، ويمكنك إلغاء الرسائل في أي وقت."
+      : "التذكير مسجل مسبقًا ✅ سنرسل العرض في موعده بعد 7 أيام.",
+  };
+}
+
+function stopCampaignMarketing(
+  ownerUid: string,
+  phone: string,
+  campaignId: string,
+): WhatsAppCommerceResult {
+  const campaign = communicationCampaignStore.get(ownerUid, campaignId);
+  if (!campaign) return { handled: false, reason: "campaign_action_missing" };
+  communicationPreferenceStore.suppress({
+    ownerUid,
+    phone,
+    channel: "whatsapp",
+    reason: "campaign_button_opt_out",
+    source: "whatsapp_campaign",
+    evidence: `campaign:${campaignId}:stop_marketing`,
+  });
+  return {
+    handled: true,
+    kind: "campaign_marketing_stopped",
+    reply: "تم إيقاف الرسائل التسويقية لهذا الرقم. لن تصلك حملات جديدة إلا بعد موافقة جديدة موثقة.",
   };
 }
 
@@ -1246,16 +1304,31 @@ export async function handleWhatsAppCommerceConversation(
   },
   dependencies: WhatsAppCommerceDependencies = {},
 ): Promise<WhatsAppCommerceResult> {
-  if (process.env.WHATSAPP_COMMERCE_ENABLED === "false") {
-    return { handled: false, reason: "commerce_disabled" };
-  }
-  if (!whatsappCommerceStoreSupported()) return { handled: false, reason: "unsupported_store" };
   const phone = normalizePhoneDigits(input.fromPhone);
   if (!phone || !input.ownerUid) return { handled: false, reason: "invalid_identity" };
   const selectedCampaignAction = campaignAction(input.text);
   const text = normalizedText(input.text);
   if (!text) return { handled: false, reason: "empty_text" };
   const now = (dependencies.now || (() => new Date()))();
+  if (selectedCampaignAction?.action === "remind_week") {
+    return scheduleCampaignWeekReminder(
+      input.ownerUid,
+      phone,
+      selectedCampaignAction.campaignId,
+      now,
+    );
+  }
+  if (selectedCampaignAction?.action === "stop_marketing") {
+    return stopCampaignMarketing(
+      input.ownerUid,
+      phone,
+      selectedCampaignAction.campaignId,
+    );
+  }
+  if (process.env.WHATSAPP_COMMERCE_ENABLED === "false") {
+    return { handled: false, reason: "commerce_disabled" };
+  }
+  if (!whatsappCommerceStoreSupported()) return { handled: false, reason: "unsupported_store" };
   const createPaymentLink = dependencies.createPaymentLink || createPaymentLinkForInvoice;
   const queueSync = dependencies.queueFieldTechSync || queueFieldTechSync;
   const session = getWhatsAppCommerceSession(db, input.ownerUid, phone, now.toISOString());

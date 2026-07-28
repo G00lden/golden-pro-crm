@@ -4473,6 +4473,9 @@ export type CampaignStats = {
   blocked: number;
   skipped: number;
   cancelled: number;
+  followups_scheduled: number;
+  followups_sent: number;
+  followups_failed: number;
 };
 
 export type CommunicationCampaign = {
@@ -4480,7 +4483,13 @@ export type CommunicationCampaign = {
   name: string;
   template_name: string;
   status: "draft" | "scheduled" | "running" | "paused" | "completed" | "cancelled";
-  audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+  audience_filter: {
+    allCustomers?: boolean;
+    city?: string;
+    source?: string;
+    customerIds?: string[];
+    importedAudience?: boolean;
+  };
   template_vars: Record<string, string | number>;
   media?: { type: "image" | "video"; url: string } | null;
   order_url?: string | null;
@@ -4530,7 +4539,19 @@ export const listCommunicationCampaigns = (limit = 100) =>
 export const createCommunicationCampaign = (data: {
   name: string;
   template_name: string;
-  audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+  audience_filter: {
+    allCustomers?: boolean;
+    city?: string;
+    source?: string;
+    customerIds?: string[];
+    importedAudience?: boolean;
+  };
+  audience_members?: Array<{ phone: string; name?: string }>;
+  audience_consent?: {
+    granted: true;
+    evidence: string;
+    source?: string;
+  };
   template_vars?: Record<string, string | number>;
   media?: { type: "image" | "video"; url: string };
   order_url?: string;

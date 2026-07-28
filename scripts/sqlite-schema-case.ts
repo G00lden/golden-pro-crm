@@ -234,7 +234,7 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10903) throw new Error(`Expected schema 10903, got ${userVersion}`);
+if (userVersion !== 10904) throw new Error(`Expected schema 10904, got ${userVersion}`);
 for (const required of ["media_type", "media_url", "order_url"]) {
   if (!columns("communication_campaigns").has(required)) {
     throw new Error(`communication_campaigns.${required} is missing`);
@@ -415,6 +415,7 @@ for (const table of [
   "communication_preferences",
   "communication_suppressions",
   "communication_campaigns",
+  "communication_campaign_audience",
   "communication_campaign_recipients",
 ]) {
   const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
@@ -597,6 +598,8 @@ const deliveryReviewMigration = db.prepare("SELECT release FROM schema_migration
 if (deliveryReviewMigration?.release !== "1.9.0-salla-delivery-rating-whatsapp") throw new Error("Salla delivery review migration was not updated.");
 const mediaCampaignMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10901").get() as { release?: string };
 if (mediaCampaignMigration?.release !== "1.9.1-whatsapp-media-campaigns") throw new Error("WhatsApp media campaign migration was not updated.");
+const bulkReminderMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10904").get() as { release?: string };
+if (bulkReminderMigration?.release !== "1.9.4-whatsapp-bulk-reminders") throw new Error("WhatsApp bulk reminder migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

@@ -38,6 +38,26 @@ test("campaign order buttons are restricted to the approved Meta URL prefix", (t
   assert.equal(options.buttons?.[2].type, "quick_reply");
 });
 
+test("text marketing campaigns use order, remind-week, and opt-out buttons", (t) => {
+  const original = process.env.WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX;
+  t.after(() => {
+    if (original === undefined) delete process.env.WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX;
+    else process.env.WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX = original;
+  });
+  process.env.WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX = "https://goldenksa.store/";
+  const options = buildCampaignCloudTemplateOptions({
+    campaignId: "camp_reminder",
+    orderUrl: "https://goldenksa.store/offers/filter",
+    templateName: "campaign_offer_text_reminder",
+  });
+  assert.equal(options.header, undefined);
+  assert.deepEqual(options.buttons, [
+    { type: "url", index: 0, text: "offers/filter" },
+    { type: "quick_reply", index: 1, payload: "campaign:remind_week:camp_reminder" },
+    { type: "quick_reply", index: 2, payload: "campaign:stop_marketing:camp_reminder" },
+  ]);
+});
+
 function mp4Box(type: string, ...parts: Buffer[]) {
   const payload = Buffer.concat(parts);
   const output = Buffer.alloc(8 + payload.length);
@@ -150,6 +170,20 @@ test("Cloud template quick replies route by payload while keeping the Arabic tit
       text: "احجز موعد",
       routeText: "campaign:book_appointment:camp_123456",
       actionId: "campaign:book_appointment:camp_123456",
+    },
+  );
+  assert.deepEqual(
+    whatsappInboundContent({
+      type: "button",
+      button: {
+        text: "ذكّرني بعد أسبوع",
+        payload: "campaign:remind_week:camp_123456",
+      },
+    }),
+    {
+      text: "ذكّرني بعد أسبوع",
+      routeText: "campaign:remind_week:camp_123456",
+      actionId: "campaign:remind_week:camp_123456",
     },
   );
 });
