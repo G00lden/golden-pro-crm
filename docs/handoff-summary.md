@@ -604,3 +604,13 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Setup, verification, monitoring, and rollback are documented in `docs/salla-delivery-rating-whatsapp-ar.md`.
 - Completed the WhatsApp self-service booking handoff: confirmed CRM bookings now enqueue one idempotent `technician_assigned` template for the assigned representative with customer phone/address, service, date, time, and booking id.
 - Technician delivery is tracked in both `communication_jobs` and `technician_notifications`; an invalid technician phone creates a high-priority CRM task instead of silently losing the appointment.
+
+## 2026-07-28 - Salla order control, documents, and location dispatch 1.9.3 [Codex]
+
+- Diagnosed production Salla reads returning `403` while the connected Salla integration remained healthy: the CRM server egress addresses must be allowlisted in Salla Partners under `App setup` -> `App Trusted IPs`. The UI now explains this dependency and exposes only the configured non-secret IP hints.
+- Added ownership-isolated Salla order status updates and shipment reads, including safe AWB/label and tracking-link normalization. The documents dialog always offers a local Arabic packing list and uses stored or live Salla labels when available.
+- Signed Salla webhooks now preserve customer coordinates, a safe Google Maps URL, shipment identifiers, labels, tracking details, and Salla order links across both SQLite and Supabase storage.
+- Manual and automatic order-to-technician workflows now copy the address, coordinates, and map URL into installations and bookings; the same map link is included in FieldTech snapshots and technician WhatsApp assignment/pre-alert messages.
+- Advanced the SQLite target to `10903`, added Supabase migration `20260728133000_salla_order_dispatch_location.sql`, and updated the separate FieldTech bridge to persist CRM job coordinates.
+- Local verification passed: CRM TypeScript lint, production build, `423/423` unit tests, `9/9` schema tests, FieldTech integration tests, packing-list XSS regression tests, and desktop/mobile browser QA of the Salla documents workflow. The standalone FieldTech server also passed syntax checks and `8/8` tests.
+- Remaining external gate: sign into `portal.salla.partners`, add the two production egress IPs shown by the CRM to the app trusted list, save, then use `إعادة التحقق من اتصال سلة`. Until that save succeeds, incoming signed webhooks and technician dispatch remain active, while remote status changes and live AWB retrieval stay intentionally unavailable.

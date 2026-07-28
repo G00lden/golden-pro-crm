@@ -50,6 +50,10 @@ test("FieldTech snapshot maps Breexe technicians and bookings and signature matc
     date: "2026-07-17",
     scheduled_time: "10:30",
     booking_type: "installation",
+    customer_address: "الرياض، حي الاختبار",
+    customer_latitude: 24.7136,
+    customer_longitude: 46.6753,
+    location_url: "https://www.google.com/maps/search/?api=1&query=24.7136%2C46.6753",
     parts: ["قطعة اختبار × 1"],
     fieldtech_require_before_photo: true,
     fieldtech_require_after_photo: false,
@@ -63,7 +67,10 @@ test("FieldTech snapshot maps Breexe technicians and bookings and signature matc
   assert.equal(snapshot.technicians.length, 1);
   assert.equal(snapshot.bookings.length, 1);
   assert.equal(snapshot.bookings[0].type, "تركيب");
-  assert.equal(snapshot.bookings[0].address, "الرياض");
+  assert.equal(snapshot.bookings[0].address, "الرياض، حي الاختبار");
+  assert.equal(snapshot.bookings[0].latitude, 24.7136);
+  assert.equal(snapshot.bookings[0].longitude, 46.6753);
+  assert.match(String(snapshot.bookings[0].locationUrl), /google\.com\/maps/);
   assert.equal(snapshot.bookings[0].scheduledAt, "2026-07-17T07:30:00.000Z");
   assert.deepEqual(snapshot.bookings[0].parts, ["قطعة اختبار × 1"]);
   assert.deepEqual(snapshot.bookings[0].completionRequirements, {

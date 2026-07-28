@@ -383,6 +383,7 @@ function withRequiredSallaScopes(value: string) {
     "customers.read_write",
     "webhooks.read_write",
     "carts.read",
+    "shipping.read",
   ];
   const obsoleteReadOnly = new Set(["orders.read", "products.read", "customers.read", "webhooks.read"]);
   return [...new Set([...scopes.filter((scope) => !obsoleteReadOnly.has(scope)), ...required])].join(" ");
@@ -390,7 +391,7 @@ function withRequiredSallaScopes(value: string) {
 
 function defaultScopes() {
   return withRequiredSallaScopes(
-    process.env.SALLA_SCOPES || "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write carts.read",
+    process.env.SALLA_SCOPES || "offline_access orders.read_write products.read_write customers.read_write webhooks.read_write carts.read shipping.read",
   );
 }
 
@@ -537,10 +538,16 @@ function numericValue(value: unknown): number | undefined {
 
 function optionalNumberValue(...values: unknown[]) {
   for (const value of values) {
+    if (value === null || value === undefined || String(value).trim() === "") continue;
     const n = numericValue(value);
     if (n !== undefined) return n;
   }
   return undefined;
+}
+
+function coordinateValue(minimum: number, maximum: number, ...values: unknown[]) {
+  const value = optionalNumberValue(...values);
+  return value !== undefined && value >= minimum && value <= maximum ? value : undefined;
 }
 
 function asArray(value: unknown): Record<string, any>[] {
@@ -666,6 +673,47 @@ function sallaOrderMetadata(remoteOrder: Record<string, any>, syncedAt: string) 
       : [];
   const isRead = optionalBoolean(remoteOrder.is_read, remoteOrder.read, metadata.is_read);
   const isUnread = optionalBoolean(remoteOrder.unread, metadata.unread);
+  const shipTo = asRecord(remoteOrder.ship_to || shipping.ship_to || shipment.ship_to);
+  const geoCoordinates = asRecord(
+    shipTo.geo_coordinates ||
+    shippingAddress.geo_coordinates ||
+    shipping.geo_coordinates ||
+    remoteOrder.geo_coordinates ||
+    metadata.geo_coordinates,
+  );
+  const latitude = coordinateValue(
+    -90,
+    90,
+    shipTo.latitude,
+    shipTo.lat,
+    geoCoordinates.latitude,
+    geoCoordinates.lat,
+    shippingAddress.latitude,
+    shippingAddress.lat,
+    shipping.latitude,
+    shipping.lat,
+    remoteOrder.latitude,
+    remoteOrder.lat,
+  );
+  const longitude = coordinateValue(
+    -180,
+    180,
+    shipTo.longitude,
+    shipTo.lng,
+    shipTo.lon,
+    geoCoordinates.longitude,
+    geoCoordinates.lng,
+    geoCoordinates.lon,
+    shippingAddress.longitude,
+    shippingAddress.lng,
+    shippingAddress.lon,
+    shipping.longitude,
+    shipping.lng,
+    shipping.lon,
+    remoteOrder.longitude,
+    remoteOrder.lng,
+    remoteOrder.lon,
+  );
 
   // List Orders and Order Details do not always expose the same optional
   // fields. Only project an optional field when this payload actually carries
@@ -682,6 +730,16 @@ function sallaOrderMetadata(remoteOrder: Record<string, any>, syncedAt: string) 
     projected.order_timezone = created.timezone;
   }
   if (updated) projected.remote_updated_at = updated.createdAt;
+  if (latitude !== undefined && longitude !== undefined) {
+    projected.customer_latitude = latitude;
+    projected.customer_longitude = longitude;
+    projected.location_url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${latitude},${longitude}`)}`;
+  }
+  if (hasOwnField(remoteOrder, "urls", "admin_url", "url")) {
+    const urls = asRecord(remoteOrder.urls);
+    projected.salla_admin_url = safeSallaDocumentUrl(firstText(urls.admin, remoteOrder.admin_url));
+    projected.salla_customer_url = safeSallaDocumentUrl(firstText(urls.customer, urls.store, remoteOrder.url));
+  }
 
   if (hasOwnField(remoteOrder, "payment_method") || hasOwnField(payment, "method", "payment_method", "name")) {
     projected.payment_method = firstDisplayValue(
@@ -719,6 +777,27 @@ function sallaOrderMetadata(remoteOrder: Record<string, any>, syncedAt: string) 
       shipping.status,
       shipping.shipment_status,
     ) || null;
+  }
+  if (hasOwnField(remoteOrder, "shipment", "shipments")) {
+    const tracking = asRecord(shipment.tracking);
+    projected.shipment_id = firstText(shipment.id, shipment.shipment_id) || null;
+    projected.shipment_labels = shipmentList
+      .flatMap((item) => shipmentLabelUrls(asRecord(item)))
+      .concat(shipmentLabelUrls(shipment))
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .slice(0, 20);
+    projected.tracking_number = firstText(
+      shipment.tracking_number,
+      shipment.tracking_id,
+      tracking.number,
+      tracking.id,
+    ) || null;
+    projected.tracking_link = safeSallaDocumentUrl(firstText(
+      shipment.tracking_link,
+      shipment.tracking_url,
+      tracking.url,
+      tracking.link,
+    ));
   }
   if (
     hasOwnField(remoteOrder, "country") ||
@@ -2128,6 +2207,49 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
   const amounts = asRecord(remoteOrder.amounts);
   const { created, updated } = sallaOrderDates(remoteOrder);
   const metadata = asRecord(remoteOrder.metadata);
+  const shipmentList = Array.isArray(remoteOrder.shipments) ? remoteOrder.shipments : [];
+  const shipment = asRecord(remoteOrder.shipment || shipmentList[0]);
+  const shipTo = asRecord(remoteOrder.ship_to || shipping.ship_to || shipment.ship_to);
+  const geoCoordinates = asRecord(
+    shipTo.geo_coordinates ||
+    shippingAddress.geo_coordinates ||
+    shipping.geo_coordinates ||
+    remoteOrder.geo_coordinates ||
+    metadata.geo_coordinates,
+  );
+  const customerLatitude = coordinateValue(
+    -90,
+    90,
+    shipTo.latitude,
+    shipTo.lat,
+    geoCoordinates.latitude,
+    geoCoordinates.lat,
+    shippingAddress.latitude,
+    shippingAddress.lat,
+    shipping.latitude,
+    shipping.lat,
+    remoteOrder.latitude,
+    remoteOrder.lat,
+  );
+  const customerLongitude = coordinateValue(
+    -180,
+    180,
+    shipTo.longitude,
+    shipTo.lng,
+    shipTo.lon,
+    geoCoordinates.longitude,
+    geoCoordinates.lng,
+    geoCoordinates.lon,
+    shippingAddress.longitude,
+    shippingAddress.lng,
+    shippingAddress.lon,
+    shipping.longitude,
+    shipping.lng,
+    shipping.lon,
+    remoteOrder.longitude,
+    remoteOrder.lng,
+    remoteOrder.lon,
+  );
   const scheduled = firstSallaDate([
     remoteOrder.installation_date,
     remoteOrder.appointment_date,
@@ -2157,6 +2279,11 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       firstText(shippingAddress.postal_code, shipping.postal_code),
       firstText(shippingAddress.country, shipping.country, customer.country),
     ].filter(Boolean))).join("، "), 300),
+    customerLatitude,
+    customerLongitude,
+    locationUrl: customerLatitude !== undefined && customerLongitude !== undefined
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${customerLatitude},${customerLongitude}`)}`
+      : undefined,
     orderDate: created?.orderDate || "",
     scheduledDate: scheduled?.orderDate,
     scheduledTime: truncate(firstText(
@@ -2289,6 +2416,30 @@ function eventOrderRecord(data: Record<string, unknown>) {
   const candidate = asRecord(data.order);
   if (Object.keys(candidate).length) return candidate;
   return data;
+}
+
+export function sallaTrustedIpHints() {
+  return String(process.env.SALLA_TRUSTED_IPS || process.env.SALLA_PUBLIC_EGRESS_IPS || "")
+    .split(/[\s,;]+/)
+    .map((value) => value.trim())
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+    .slice(0, 8);
+}
+
+export function describeSallaDependencyError(error: unknown) {
+  if (error instanceof SallaRequestError && error.status === 403) {
+    const ips = sallaTrustedIpHints();
+    const ipText = ips.length ? ` العناوين المطلوب السماح بها: ${ips.join("، ")}.` : "";
+    return `سلة رفضت عنوان خروج خادم CRM (403). أضف عنوان الخادم في Salla Partners ← App setup ← App Trusted IPs ثم أعد التحقق.${ipText}`;
+  }
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/not configured/i.test(message)) {
+    return "تكامل سلة غير مهيأ على الخادم. أكمل إعداد مفاتيح التطبيق أولًا.";
+  }
+  if (/not connected|not linked/i.test(message)) {
+    return "متجر سلة غير متصل بهذا الحساب. أعد ربط التطبيق ثم حاول مجددًا.";
+  }
+  return message || "تعذر الاتصال بسلة.";
 }
 
 async function fetchSallaAbandonedCartDetails(session: SallaAuthorizedSession, cartId: string) {
@@ -2609,6 +2760,138 @@ export async function getSallaOrderStatusesForUser(currentUid: string) {
   const { session } = await authorizedSessionForUser(currentUid);
   const response = await authorizedSallaGet(session, `${SALLA_API_BASE}/orders/statuses`);
   return normalizeSallaStatuses(response);
+}
+
+function safeSallaDocumentUrl(value: unknown) {
+  const raw = firstText(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return null;
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function shipmentLabelUrls(shipment: Record<string, any>) {
+  const urls: string[] = [];
+  const visit = (value: unknown, depth = 0) => {
+    if (depth > 3 || value === null || value === undefined) return;
+    if (typeof value === "string") {
+      const url = safeSallaDocumentUrl(value);
+      if (url && !urls.includes(url)) urls.push(url);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.slice(0, 20).forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    const record = asRecord(value);
+    for (const key of ["url", "href", "label", "pdf_label", "file", "download_url"]) {
+      if (record[key] !== undefined) visit(record[key], depth + 1);
+    }
+  };
+  visit(shipment.pdf_label);
+  visit(shipment.label);
+  visit(shipment.labels);
+  visit(shipment.awb);
+  return urls.slice(0, 20);
+}
+
+function normalizedShipmentDocument(shipment: Record<string, any>, fallbackId: string) {
+  const courier = asRecord(shipment.courier || shipment.shipping_company);
+  const tracking = asRecord(shipment.tracking);
+  const labels = shipmentLabelUrls(shipment);
+  return {
+    id: firstText(shipment.id, shipment.shipment_id, shipment.reference_id, fallbackId),
+    status: firstDisplayValue(shipment.status, shipment.shipment_status) || null,
+    courier_name: firstDisplayValue(
+      shipment.courier_name,
+      shipment.shipping_company,
+      shipment.courier,
+      courier.name,
+    ) || null,
+    tracking_number: firstText(
+      shipment.tracking_number,
+      shipment.tracking_id,
+      tracking.number,
+      tracking.id,
+    ) || null,
+    tracking_link: safeSallaDocumentUrl(firstText(
+      shipment.tracking_link,
+      shipment.tracking_url,
+      tracking.url,
+      tracking.link,
+    )),
+    label_urls: labels,
+    label_url: labels[0] || null,
+  };
+}
+
+function localShipmentDocuments(order: Record<string, unknown>) {
+  const rawLabels = Array.isArray(order.shipment_labels)
+    ? order.shipment_labels
+    : Array.isArray(order.shipmentLabels)
+      ? order.shipmentLabels
+      : [];
+  const labels = rawLabels
+    .map(safeSallaDocumentUrl)
+    .filter((value): value is string => Boolean(value));
+  const trackingLink = safeSallaDocumentUrl(order.tracking_link ?? order.trackingLink);
+  if (!labels.length && !order.tracking_number && !trackingLink && !order.shipment_status) return [];
+  return [{
+    id: firstText(order.shipment_id, order.shipmentId, "local-shipment"),
+    status: firstDisplayValue(order.shipment_status, order.shipmentStatus) || null,
+    courier_name: firstDisplayValue(order.shipping_company, order.shippingCompany) || null,
+    tracking_number: firstText(order.tracking_number, order.trackingNumber) || null,
+    tracking_link: trackingLink,
+    label_urls: labels,
+    label_url: labels[0] || null,
+  }];
+}
+
+export async function getSallaOrderShipmentsForUser(currentUid: string, orderDocId: string) {
+  const identity = await ownedSallaOrderIdentity(currentUid, orderDocId);
+  const local = localShipmentDocuments(identity.order);
+  try {
+    const { session } = await authorizedSessionForUser(currentUid);
+    const url = new URL(`${SALLA_API_BASE}/shipments`);
+    url.searchParams.set("order_id", identity.remoteOrderId);
+    url.searchParams.set("per_page", "50");
+    const payload = await authorizedSallaGet<Record<string, unknown>>(session, url);
+    const body = asRecord(payload);
+    const rows = Array.isArray(body.data)
+      ? body.data
+      : Array.isArray(payload)
+        ? payload
+        : Array.isArray(body.shipments)
+          ? body.shipments
+          : [];
+    const remote = rows
+      .map((shipment, index) => normalizedShipmentDocument(asRecord(shipment), `shipment-${index + 1}`))
+      .filter((shipment) => shipment.id || shipment.label_urls.length || shipment.tracking_number);
+    return {
+      data: remote.length ? remote : local,
+      available: true,
+      reason: null,
+      order_id: orderDocId,
+      remote_order_id: identity.remoteOrderId,
+    };
+  } catch (error) {
+    if (error instanceof SallaRequestError && error.status === 403) {
+      return {
+        data: local,
+        available: false,
+        reason: describeSallaDependencyError(error),
+        order_id: orderDocId,
+        remote_order_id: identity.remoteOrderId,
+      };
+    }
+    throw error;
+  }
 }
 
 export async function updateSallaOrderStatusForUser(

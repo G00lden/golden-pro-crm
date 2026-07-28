@@ -26,6 +26,7 @@ const {
   __sallaTestables,
   deduplicateProductsForUser,
   getSallaOrderStatusesForUser,
+  getSallaOrderShipmentsForUser,
   handleSallaAppWebhook,
   importSallaProductsSnapshotForUser,
   syncSallaProductsForUser,
@@ -285,8 +286,18 @@ test("signed order.created payload imports immediately when Salla detail API ret
   }];
   order.shipping = {
     mobile: "0500000000",
-    address: { street: "شارع الاختبار", district: "حي الاختبار", city: "الرياض" },
+    address: {
+      street: "شارع الاختبار",
+      district: "حي الاختبار",
+      city: "الرياض",
+      geo_coordinates: { lat: 24.7136, lng: 46.6753 },
+    },
   };
+  order.shipments = [{
+    id: "shipment-40301",
+    tracking_number: "TRACK-40301",
+    pdf_label: "https://cdn.example.test/labels/40301.pdf",
+  }];
   const body = {
     event: "order.created",
     event_id: "evt-order-40301",
@@ -306,9 +317,41 @@ test("signed order.created payload imports immediately when Salla detail API ret
   assert.equal(stored.event_type, "order.created");
   assert.equal(stored.journey_status, "awaiting_schedule");
   assert.match(String(stored.customer_address), /شارع الاختبار/);
+  assert.equal(stored.customer_latitude, 24.7136);
+  assert.equal(stored.customer_longitude, 46.6753);
+  assert.match(String(stored.location_url), /google\.com\/maps/);
+  assert.deepEqual(stored.shipment_labels, ["https://cdn.example.test/labels/40301.pdf"]);
+  assert.equal(stored.tracking_number, "TRACK-40301");
   assert.equal(stored.items[0].quantity, 2);
   const bookings = await adminDb.collection("bookings").where("createdBy", "==", uid).get();
   assert.equal(bookings.docs.some((doc) => doc.data().store_order_id === orderId), false, "an unscheduled order must not invent a technician appointment");
+});
+
+test("shipment documents normalize labels and tracking for a CRM-owned Salla order", async () => {
+  const uid = "owner-shipment-documents";
+  await linkOwner(uid, "offline_access orders.read_write shipping.read");
+  const localId = await seedLocalOrder(uid, "shipment-order-1");
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/shipments") && url.searchParams.get("order_id") === "shipment-order-1") {
+      return jsonResponse({
+        data: [{
+          id: "shipment-1",
+          status: "shipped",
+          courier: { name: "شركة الشحن" },
+          tracking: { number: "TRACK-1", url: "https://tracking.example.test/TRACK-1" },
+          label: { url: "https://cdn.example.test/labels/TRACK-1.pdf" },
+        }],
+      });
+    }
+    throw new Error(`Unexpected request ${url.pathname}`);
+  }) as typeof fetch;
+
+  const result = await getSallaOrderShipmentsForUser(uid, localId);
+  assert.equal(result.available, true);
+  assert.equal(result.data.length, 1);
+  assert.equal(result.data[0].tracking_number, "TRACK-1");
+  assert.equal(result.data[0].label_url, "https://cdn.example.test/labels/TRACK-1.pdf");
 });
 
 test("signed abandoned-cart webhooks queue one consent-gated outreach and purchase cancels it", async () => {

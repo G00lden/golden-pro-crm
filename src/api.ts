@@ -538,6 +538,10 @@ export type StoreOrder = {
   customer_name: string;
   customer_phone: string;
   customer_city?: string | null;
+  customer_address?: string | null;
+  customer_latitude?: number | null;
+  customer_longitude?: number | null;
+  location_url?: string | null;
   product_ids?: string[];
   installation_ids?: string[];
   booking_ids?: string[];
@@ -553,6 +557,12 @@ export type StoreOrder = {
   shipping_company?: string | null;
   shipping_company_name?: string | null;
   shipment_status?: string | null;
+  shipment_id?: string | null;
+  shipment_labels?: string[];
+  tracking_number?: string | null;
+  tracking_link?: string | null;
+  salla_admin_url?: string | null;
+  salla_customer_url?: string | null;
   customer_country?: string | null;
   sales_channel?: string | null;
   assigned_employee?: string | null;
@@ -639,7 +649,26 @@ export type SallaOrderStatusesResult = {
   configured: boolean;
   linked: boolean;
   status: SallaIntegrationStatus["status"];
+  trusted_ips?: string[];
   reason: string | null;
+};
+
+export type SallaShipmentDocument = {
+  id: string;
+  status: string | null;
+  courier_name: string | null;
+  tracking_number: string | null;
+  tracking_link: string | null;
+  label_urls: string[];
+  label_url: string | null;
+};
+
+export type SallaShipmentDocumentsResult = {
+  data: SallaShipmentDocument[];
+  available: boolean;
+  reason: string | null;
+  order_id: string;
+  remote_order_id: string;
 };
 
 export type SallaOrderStatusUpdateResult = {
@@ -4057,6 +4086,7 @@ const loadSallaOrderStatuses = singleFlightByKey(async (_ownerUid: string): Prom
     configured: hasAvailabilityContract ? response.configured === true : data.length > 0,
     linked: hasAvailabilityContract ? response.linked === true : data.length > 0,
     status: response.status || (data.length ? "connected" : "error"),
+    trusted_ips: Array.isArray(response.trusted_ips) ? response.trusted_ips.map(String) : [],
     reason: response.reason || null,
   };
 });
@@ -4524,6 +4554,11 @@ export const uploadCommunicationCampaignMedia = (file: File) =>
     headers: { "Content-Type": file.type },
     body: file,
   });
+
+export const getSallaOrderShipments = (id: string) =>
+  apiFetch<SallaShipmentDocumentsResult>(
+    `/api/integrations/salla/orders/${encodeURIComponent(id)}/shipments`,
+  );
 
 export const previewCommunicationCampaign = (id: string) =>
   apiFetch<CampaignPreview>(`/api/whatsapp/campaigns/${encodeURIComponent(id)}/preview`);

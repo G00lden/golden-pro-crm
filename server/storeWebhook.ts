@@ -68,6 +68,9 @@ export type StoreWebhookOrder = {
   customerPhone: string;
   customerCity: string;
   customerAddress?: string;
+  customerLatitude?: number;
+  customerLongitude?: number;
+  locationUrl?: string;
   orderDate: string;
   scheduledDate?: string;
   scheduledTime?: string;
@@ -576,6 +579,50 @@ function formattedCustomerAddress(...records: Record<string, any>[]) {
   return truncate(values.join("، "), 300);
 }
 
+function firstCoordinate(minimum: number, maximum: number, ...values: unknown[]) {
+  for (const value of values) {
+    const coordinate = numericValue(value);
+    if (coordinate !== undefined && coordinate >= minimum && coordinate <= maximum) return coordinate;
+  }
+  return undefined;
+}
+
+function safeHttpsUrl(...values: unknown[]) {
+  const raw = firstText(...values);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return null;
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function shipmentDocumentUrls(...values: unknown[]) {
+  const urls: string[] = [];
+  const visit = (value: unknown, depth = 0) => {
+    if (depth > 3 || value === null || value === undefined) return;
+    if (typeof value === "string") {
+      const url = safeHttpsUrl(value);
+      if (url && !urls.includes(url)) urls.push(url);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.slice(0, 20).forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    const record = asRecord(value);
+    for (const key of ["url", "href", "label", "labels", "pdf_label", "file", "download_url"]) {
+      if (record[key] !== undefined) visit(record[key], depth + 1);
+    }
+  };
+  values.forEach((value) => visit(value));
+  return urls.slice(0, 20);
+}
+
 export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebhookOrder {
   const body = asRecord(req.body);
   const data = asRecord(body.data);
@@ -590,6 +637,60 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
   const payment = asRecord(order.payment);
   const metadata = asRecord(order.metadata);
   const features = asRecord(order.features);
+  const shipTo = asRecord(order.ship_to || shipping.ship_to || shipment.ship_to);
+  const geoCoordinates = asRecord(
+    shipTo.geo_coordinates ||
+    shippingAddress.geo_coordinates ||
+    shipping.geo_coordinates ||
+    order.geo_coordinates ||
+    metadata.geo_coordinates,
+  );
+  const customerLatitude = firstCoordinate(
+    -90,
+    90,
+    shipTo.latitude,
+    shipTo.lat,
+    geoCoordinates.latitude,
+    geoCoordinates.lat,
+    shippingAddress.latitude,
+    shippingAddress.lat,
+    shipping.latitude,
+    shipping.lat,
+    order.latitude,
+    order.lat,
+  );
+  const customerLongitude = firstCoordinate(
+    -180,
+    180,
+    shipTo.longitude,
+    shipTo.lng,
+    shipTo.lon,
+    geoCoordinates.longitude,
+    geoCoordinates.lng,
+    geoCoordinates.lon,
+    shippingAddress.longitude,
+    shippingAddress.lng,
+    shippingAddress.lon,
+    shipping.longitude,
+    shipping.lng,
+    shipping.lon,
+    order.longitude,
+    order.lng,
+    order.lon,
+  );
+  const generatedLocationUrl = customerLatitude !== undefined && customerLongitude !== undefined
+    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${customerLatitude},${customerLongitude}`)}`
+    : null;
+  const orderUrls = asRecord(order.urls);
+  const tracking = asRecord(shipment.tracking);
+  const shipmentLabels = shipmentDocumentUrls(
+    shipment.pdf_label,
+    shipment.label,
+    shipment.labels,
+    shipmentList.map((item) => asRecord(item).pdf_label),
+    shipmentList.map((item) => asRecord(item).label),
+    shipmentList.map((item) => asRecord(item).labels),
+  );
 
   const provider = truncate(
     firstText(req.get("x-store-provider"), body.provider, body.source, order.provider) || "salla",
@@ -702,6 +803,25 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
       shipping.status,
       shipping.shipment_status,
     ) || null,
+    shipment_id: firstText(shipment.id, shipment.shipment_id) || null,
+    shipment_labels: shipmentLabels,
+    tracking_number: firstText(
+      shipment.tracking_number,
+      shipment.tracking_id,
+      tracking.number,
+      tracking.id,
+    ) || null,
+    tracking_link: safeHttpsUrl(
+      shipment.tracking_link,
+      shipment.tracking_url,
+      tracking.url,
+      tracking.link,
+    ),
+    customer_latitude: customerLatitude ?? null,
+    customer_longitude: customerLongitude ?? null,
+    location_url: generatedLocationUrl,
+    salla_admin_url: safeHttpsUrl(orderUrls.admin, order.admin_url),
+    salla_customer_url: safeHttpsUrl(orderUrls.customer, orderUrls.store, order.url),
     country: firstDisplayValue(
       order.country,
       shipping.country,
@@ -753,6 +873,9 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
     customerPhone,
     customerCity: truncate(firstText(customer.city, shipping.city, shippingAddress.city, billing.city, billingAddress.city), 80),
     customerAddress: formattedCustomerAddress(shippingAddress, shipping, billingAddress, billing, customer),
+    customerLatitude,
+    customerLongitude,
+    locationUrl: generatedLocationUrl || undefined,
     orderDate: created?.orderDate || "",
     scheduledDate: scheduled?.orderDate,
     scheduledTime,
@@ -1120,6 +1243,9 @@ async function createStoreBooking(params: {
     customer_name: order.customerName,
     customer_phone: order.customerPhone,
     customer_address: order.customerAddress || order.customerCity || "",
+    customer_latitude: order.customerLatitude ?? null,
+    customer_longitude: order.customerLongitude ?? null,
+    location_url: order.locationUrl || null,
     product_id: productId,
     product_name: item.name,
     technician_id: defaultTechId(),
@@ -1358,6 +1484,9 @@ async function importStoreOrder(
         customer_name: order.customerName,
         customer_phone: order.customerPhone,
         customer_address: order.customerAddress || order.customerCity || "",
+        customer_latitude: order.customerLatitude ?? null,
+        customer_longitude: order.customerLongitude ?? null,
+        location_url: order.locationUrl || null,
         product_id: productId,
         product_name: item.name,
         product_sku: item.sku,
@@ -1464,6 +1593,9 @@ async function importStoreOrder(
       customer_name: order.customerName,
       customer_phone: order.customerPhone,
       customer_address: order.customerAddress || order.customerCity || "",
+      customer_latitude: order.customerLatitude ?? null,
+      customer_longitude: order.customerLongitude ?? null,
+      location_url: order.locationUrl || null,
       product_id: productId,
       product_name: item.name,
       product_sku: item.sku,
@@ -1548,6 +1680,9 @@ async function importStoreOrder(
     customer_phone: order.customerPhone,
     customer_city: order.customerCity || null,
     customer_address: order.customerAddress || order.customerCity || null,
+    customer_latitude: order.customerLatitude ?? null,
+    customer_longitude: order.customerLongitude ?? null,
+    location_url: order.locationUrl || null,
     product_ids: finalProductIds,
     installation_ids: finalInstallationIds,
     booking_ids: finalBookingIds,
@@ -1709,6 +1844,9 @@ async function projectStoreOrder(
     customer_phone: order.customerPhone,
     customer_city: order.customerCity || null,
     customer_address: order.customerAddress || order.customerCity || null,
+    customer_latitude: order.customerLatitude ?? null,
+    customer_longitude: order.customerLongitude ?? null,
+    location_url: order.locationUrl || null,
     product_ids: finalProductIds,
     installation_ids: finalInstallationIds,
     booking_ids: finalBookingIds,
@@ -1956,6 +2094,9 @@ function localCreateBooking(params: {
     customer_name: order.customerName,
     customer_phone: order.customerPhone,
     customer_address: order.customerAddress || order.customerCity || "",
+    customer_latitude: order.customerLatitude ?? null,
+    customer_longitude: order.customerLongitude ?? null,
+    location_url: order.locationUrl || null,
     product_id: productId,
     product_name: item.name,
     technician_id: defaultTechId(),
@@ -2060,6 +2201,9 @@ function localImportStoreOrder(data: LocalStoreDb, uid: string, order: StoreWebh
       customer_name: order.customerName,
       customer_phone: order.customerPhone,
       customer_address: order.customerAddress || order.customerCity || "",
+      customer_latitude: order.customerLatitude ?? null,
+      customer_longitude: order.customerLongitude ?? null,
+      location_url: order.locationUrl || null,
       product_id: productId,
       product_name: item.name,
       product_sku: item.sku,
@@ -2142,6 +2286,9 @@ function localImportStoreOrder(data: LocalStoreDb, uid: string, order: StoreWebh
     customer_phone: order.customerPhone,
     customer_city: order.customerCity || null,
     customer_address: order.customerAddress || order.customerCity || null,
+    customer_latitude: order.customerLatitude ?? null,
+    customer_longitude: order.customerLongitude ?? null,
+    location_url: order.locationUrl || null,
     product_ids: finalProductIds,
     installation_ids: finalInstallationIds,
     booking_ids: finalBookingIds,
@@ -2276,6 +2423,9 @@ async function ensureManualInstallationForOrderItem(params: {
     customer_name: String(order.customer_name || ""),
     customer_phone: String(order.customer_phone || ""),
     customer_address: String(order.customer_address || order.customer_city || ""),
+    customer_latitude: optionalNumberValue(order.customer_latitude) ?? null,
+    customer_longitude: optionalNumberValue(order.customer_longitude) ?? null,
+    location_url: safeHttpsUrl(order.location_url),
     product_id: productId,
     product_name: item.name,
     product_sku: item.sku,
@@ -2332,6 +2482,9 @@ async function createOrUpdateManualStoreBooking(params: {
     customer_name: String(order.customer_name || ""),
     customer_phone: String(order.customer_phone || ""),
     customer_address: String(order.customer_address || order.customer_city || ""),
+    customer_latitude: optionalNumberValue(order.customer_latitude) ?? null,
+    customer_longitude: optionalNumberValue(order.customer_longitude) ?? null,
+    location_url: safeHttpsUrl(order.location_url),
     product_id: String(item.product_id || ""),
     product_name: item.name,
     technician_id: technician.id,
@@ -2695,6 +2848,9 @@ export async function linkStoreOrderInstallation(currentUid: string, orderDocId:
       customerPhone: String(order.customer_phone || installation.customer_phone || ""),
       customerCity: String(order.customer_city || ""),
       customerAddress: String(order.customer_address || installation.customer_address || order.customer_city || ""),
+      customerLatitude: optionalNumberValue(order.customer_latitude, installation.customer_latitude),
+      customerLongitude: optionalNumberValue(order.customer_longitude, installation.customer_longitude),
+      locationUrl: safeHttpsUrl(order.location_url, installation.location_url) || undefined,
       orderDate: String(order.order_date || now.slice(0, 10)),
       scheduledDate: order.scheduled_date || undefined,
       scheduledTime: order.scheduled_time || undefined,

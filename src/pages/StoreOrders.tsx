@@ -1,4 +1,4 @@
-import { RefreshCcw, Search, UserRoundCog, Wrench, Save, Send, Filter, PencilLine } from "lucide-react";
+import { RefreshCcw, Search, UserRoundCog, Wrench, Save, Send, Filter, PencilLine, Printer, MapPin, ExternalLink, PackageCheck, Copy } from "lucide-react";
 import { useState, useCallback, useEffect, useMemo, useRef, type FormEvent } from "react";
 import * as api from "../api";
 import {
@@ -26,6 +26,16 @@ import {
 } from "../shared";
 import { usePrefixedUrlState, type UrlFilterSchema } from "../filterUrlState";
 import { sallaRemoteActionsAreAvailable } from "../sallaAvailability";
+import { printStoreOrder } from "../storeOrderPrint";
+
+function safeExternalUrl(value?: string | null) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 const STORE_ORDER_TABS = [
   ["all", "الكل"],
@@ -621,6 +631,20 @@ export default function StoreOrdersPage({
     });
   };
 
+  const openOrderDocuments = (order: api.StoreOrder) => {
+    setModal({
+      title: `مستندات الطلب ${order.order_number || order.order_id}`,
+      wide: true,
+      content: (
+        <StoreOrderDocumentsForm
+          order={order}
+          onCancel={() => setModal(null)}
+          onError={(message) => notify(message, false)}
+        />
+      ),
+    });
+  };
+
   const toggleOrderSelection = (orderId: string, checked: boolean) => {
     setSelectedOrderIds((current) => {
       const next = new Set(current);
@@ -713,12 +737,34 @@ export default function StoreOrdersPage({
           role={sallaStatuses.error ? "alert" : "status"}
           aria-live={sallaStatuses.error ? undefined : "polite"}
         >
-          <strong>عمليات سلة البعيدة متوقفة:</strong> {sallaConnectionReason}
-          {sallaStatuses.error && (
-            <div className="form-actions">
-              <Button tone="muted" onClick={() => sallaStatuses.refresh()}>إعادة التحقق من اتصال سلة</Button>
-            </div>
-          )}
+          <strong>التحكم البعيد في سلة متوقف:</strong> {sallaConnectionReason}
+          <p>استقبال الطلبات الجديدة وتحويلها للفنيين مستمران؛ المتوقف فقط تغيير سلة المباشر وجلب البوليصة من API.</p>
+          <p>من بوابة الشركاء افتح App setup ثم أضف عناوين الخادم الظاهرة أدناه داخل App Trusted IPs.</p>
+          <div className="form-actions">
+            <Button tone="muted" onClick={() => sallaStatuses.refresh()}>إعادة التحقق من اتصال سلة</Button>
+            <a
+              className="btn muted"
+              href="https://portal.salla.partners/"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              <ExternalLink size={16} aria-hidden="true" /> فتح إعدادات تطبيق سلة
+            </a>
+            {(sallaStatuses.data?.trusted_ips || []).map((ip) => (
+              <Button
+                key={ip}
+                tone="muted"
+                title={`نسخ عنوان الخادم ${ip}`}
+                onClick={() => {
+                  void navigator.clipboard.writeText(ip)
+                    .then(() => notify(`تم نسخ عنوان الخادم ${ip}`))
+                    .catch(() => notify(`انسخ عنوان الخادم يدويًا: ${ip}`, false));
+                }}
+              >
+                <Copy size={16} aria-hidden="true" /> <span translate="no">{ip}</span>
+              </Button>
+            ))}
+          </div>
         </div>
       ) : (
         <span id="salla-remote-actions-status" className="sr-only">اتصال متجر سلة متاح والعمليات البعيدة مفعّلة.</span>
@@ -1046,7 +1092,20 @@ export default function StoreOrdersPage({
                           <span>{phoneLabel(order.customer_phone)}</span>
                         </div>
                       </td>
-                      <td>{order.customer_city || <span className="muted">-</span>}</td>
+                      <td>
+                        {order.customer_city || <span className="muted">-</span>}
+                        {safeExternalUrl(order.location_url) && (
+                          <a
+                            className="inline-link"
+                            href={safeExternalUrl(order.location_url) || undefined}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            aria-label={`فتح موقع العميل للطلب ${order.order_number || order.order_id}`}
+                          >
+                            <MapPin size={15} aria-hidden="true" /> الموقع
+                          </a>
+                        )}
+                      </td>
                       <td>
                         <div className="order-products-cell">
                           <span>{productsLabelDetailed(order)}</span>
@@ -1073,6 +1132,9 @@ export default function StoreOrdersPage({
                           </Button>
                           <Button tone="muted" aria-describedby="salla-remote-actions-status" disabled={!sallaRemoteActionsAvailable} onClick={() => openSallaEditForm(order)}>
                             <PencilLine size={16} /> تعديل بيانات سلة
+                          </Button>
+                          <Button tone="muted" onClick={() => openOrderDocuments(order)}>
+                            <Printer size={16} /> المستندات
                           </Button>
                           <Button tone="muted" onClick={() => openWorkflowForm(order)}><UserRoundCog size={16} /> إدارة</Button>
                           {needsReview && <Button tone="success" onClick={() => openLinkForm(order)}><Wrench size={16} /> ربط</Button>}
@@ -1114,6 +1176,121 @@ export default function StoreOrdersPage({
         )}
       </section>
     </>
+  );
+}
+
+function StoreOrderDocumentsForm({
+  order,
+  onError,
+  onCancel,
+}: {
+  order: api.StoreOrder;
+  onError: (message: string) => void;
+  onCancel: () => void;
+}) {
+  const shipments = useData(
+    () => api.getSallaOrderShipments(order.id),
+    [order.id],
+  );
+  const localLabels = (order.shipment_labels || [])
+    .map(safeExternalUrl)
+    .filter((url): url is string => Boolean(url));
+  const remoteDocuments = shipments.data?.data || [];
+  const labelUrls = Array.from(new Set([
+    ...localLabels,
+    ...remoteDocuments.flatMap((shipment) => shipment.label_urls || []),
+  ].map(safeExternalUrl).filter((url): url is string => Boolean(url))));
+  const trackingLink = safeExternalUrl(
+    remoteDocuments.find((shipment) => shipment.tracking_link)?.tracking_link ||
+    order.tracking_link,
+  );
+  const trackingNumber =
+    remoteDocuments.find((shipment) => shipment.tracking_number)?.tracking_number ||
+    order.tracking_number ||
+    "";
+
+  const handlePrintPackingList = () => {
+    try {
+      printStoreOrder(order);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "تعذر فتح قائمة الطلب للطباعة.");
+    }
+  };
+
+  return (
+    <div className="form">
+      <section className="cards-grid" aria-label="خيارات مستندات الطلب">
+        <article className="mini-card">
+          <PackageCheck size={22} aria-hidden="true" />
+          <strong>قائمة تجهيز الطلب</strong>
+          <p>تُطبع من البيانات المحفوظة في CRM وتعمل حتى عند توقف اتصال سلة البعيد.</p>
+          <Button onClick={handlePrintPackingList}>
+            <Printer size={16} aria-hidden="true" /> طباعة قائمة الطلب
+          </Button>
+        </article>
+        <article className="mini-card">
+          <Printer size={22} aria-hidden="true" />
+          <strong>بوليصة الشحن</strong>
+          <p>
+            {labelUrls.length
+              ? `تم العثور على ${labelUrls.length.toLocaleString("ar-SA")} بوليصة قابلة للفتح والطباعة.`
+              : "لم تُحفظ بوليصة مع الطلب حتى الآن. سيحاول النظام جلبها مباشرة من شحنات سلة."}
+          </p>
+          {trackingNumber && <span>التتبع: <bdi>{trackingNumber}</bdi></span>}
+        </article>
+      </section>
+
+      {shipments.loading && <p className="note" role="status">جارٍ التحقق من شحنات سلة والبوالص المتاحة…</p>}
+      {shipments.error && <ErrorBlock message={shipments.error} />}
+      {shipments.data && !shipments.data.available && (
+        <div className="note warn" role="status">
+          {shipments.data.reason}
+          <p>البوالص المحفوظة محليًا تبقى قابلة للطباعة، وقائمة الطلب لا تتأثر بهذا التوقف.</p>
+        </div>
+      )}
+
+      {labelUrls.length > 0 ? (
+        <div className="form-actions" aria-label="بوالص الشحن">
+          {labelUrls.map((url, index) => (
+            <a
+              key={url}
+              className="btn muted"
+              href={url}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              <ExternalLink size={16} aria-hidden="true" /> فتح وطباعة البوليصة {index + 1}
+            </a>
+          ))}
+        </div>
+      ) : !shipments.loading && (
+        <p className="note warn">
+          لا توجد بوليصة في الطلب أو الشحنات الحالية. أنشئ الشحنة/البوليصة في سلة أولًا، ثم أعد التحقق.
+        </p>
+      )}
+
+      {(trackingLink || safeExternalUrl(order.salla_admin_url)) && (
+        <div className="form-actions">
+          {trackingLink && (
+            <a className="btn muted" href={trackingLink} target="_blank" rel="noreferrer noopener">
+              <ExternalLink size={16} aria-hidden="true" /> تتبع الشحنة
+            </a>
+          )}
+          {safeExternalUrl(order.salla_admin_url) && (
+            <a className="btn muted" href={safeExternalUrl(order.salla_admin_url) || undefined} target="_blank" rel="noreferrer noopener">
+              <ExternalLink size={16} aria-hidden="true" /> فتح الطلب في سلة
+            </a>
+          )}
+        </div>
+      )}
+
+      <div className="form-actions">
+        <Button tone="muted" onClick={() => shipments.refresh()} loading={shipments.loading}>
+          <RefreshCcw size={16} aria-hidden="true" /> إعادة التحقق
+        </Button>
+        <Button tone="muted" onClick={onCancel}>إغلاق</Button>
+      </div>
+    </div>
   );
 }
 
@@ -2231,6 +2408,22 @@ function StoreOrderWorkflowForm({
           <p>{selectedItem.reason || "البند جاهز للتنفيذ اليدوي."}</p>
         </article>
       </div>
+      {(order.customer_address || safeExternalUrl(order.location_url)) && (
+        <div className="note" role="status">
+          <strong>موقع المهمة:</strong> {order.customer_address || order.customer_city || "إحداثيات العميل محفوظة"}
+          {safeExternalUrl(order.location_url) && (
+            <a
+              className="inline-link"
+              href={safeExternalUrl(order.location_url) || undefined}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              <MapPin size={16} aria-hidden="true" /> فتح الموقع قبل التحويل
+            </a>
+          )}
+          <p>عند تحويل الطلب، يصل هذا الموقع إلى تطبيق الفني ويُضاف رابطه إلى رسالة واتساب.</p>
+        </div>
+      )}
       <Field label="بند الطلب">
         <SelectInput value={itemSku} onChange={(e) => setItemSku(e.target.value)}>
           {items.map((item) => (
