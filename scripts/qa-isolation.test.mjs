@@ -64,6 +64,7 @@ test("QA launcher uses an external temporary root and strips provider credential
     'WHATSAPP_PROVIDER = "cloud_api"',
     '"SALLA_CLIENT_SECRET"',
     '"WHATSAPP_CLOUD_API_TOKEN"',
+    '"DEEPSEEK_API_KEY"',
     '"SUPABASE_SERVICE_ROLE_KEY"',
     '"GOOGLE_APPLICATION_CREDENTIALS"',
     '"NODE_OPTIONS"',
@@ -129,6 +130,8 @@ test("smoke and integration harnesses isolate every persistent provider surface"
       "ENABLE_DAILY_CRON",
       "SALLA_SYNC_CRON_ENABLED",
       "COMMUNICATION_WORKER_ENABLED",
+      "DEEPSEEK_API_KEY",
+      "WHATSAPP_AI_ENABLED",
       "WHATSAPP_PROVIDER",
       "sensitiveInheritedKeys",
     ]) {

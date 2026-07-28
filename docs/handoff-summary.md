@@ -627,3 +627,17 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Local verification passed: TypeScript lint, production build, `428/428` unit tests, `9/9` schema tests, targeted campaign tests, and isolated desktop/mobile browser QA. Browser QA confirmed 2 valid, 1 duplicate, and 1 invalid sample record, a 2-recipient preview, no mobile horizontal overflow, and an intentionally disabled launch button.
 - Production code may be deployed safely, but real bulk sending must remain locked until WhatsApp Cloud API is live, all three Meta templates are approved and mapped, `OUTBOUND_MODE=production`, and `OFFICIAL_LAUNCH_APPROVED=true`.
 - Arabic setup and operating guide: `docs/whatsapp-media-campaigns-ar.md`.
+
+## 2026-07-29 - DeepSeek WhatsApp commerce assistant 1.9.5 [Codex]
+
+- Added a constrained DeepSeek intent classifier for free-form Arabic WhatsApp messages. The model can select only payment, booking, order status, human handoff, menu, or unknown; it cannot execute tools or generate customer-facing URLs.
+- Reused the existing deterministic Tap payment and CRM booking flows. Active booking data-entry sessions bypass AI classification entirely.
+- Added ownership- and phone-isolated Salla order-status lookup with optional exact order number, safe tracking-link rendering, and a clear last-sync disclosure.
+- Added idempotent high-priority CRM handoff tasks with optional active IVR department-agent assignment and a 30-minute duplicate window.
+- Added hashed, non-message AI audit records, a 30-day retention cleanup, confidence validation, response validation, timeout handling, and a per-phone hourly cap.
+- Added a no-secret DeepSeek readiness card to the WhatsApp console and environment preservation in the production-env generator.
+- Advanced SQLite schema to `10905` with `whatsapp_ai_intents` and bumped the release to `1.9.5`.
+- Verification passed: `439/439` unit tests, `9/9` schema tests, TypeScript lint, production build, plus isolated desktop and 390px browser QA. The browser confirmed one semantic `main`, no horizontal overflow, a visible readiness card, and no key-shaped secret in the DOM or authenticated status response.
+- Adversarial coverage includes malformed/empty model output, timeouts, HTTP errors, rate limits, untrusted fields, low confidence, cross-customer/cross-owner order access, exact-order extraction, duplicate handoffs, department assignment, and active-session AI bypass.
+- Live DeepSeek activation is intentionally blocked until the key exposed in the user-provided image is revoked and a replacement is stored directly in the production environment. No exposed credential was used or saved.
+- Arabic architecture, activation, canary, and rollback guide: `docs/whatsapp-deepseek-assistant-ar.md`.

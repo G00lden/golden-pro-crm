@@ -12,6 +12,7 @@ param(
   [string]$SshKey = "",
   [switch]$SkipBootstrap,
   [switch]$SkipDns,
+  [switch]$UseExistingEnvironment,
   [switch]$AllowFirstDeployWithoutBackup
 )
 
@@ -186,6 +187,7 @@ $remoteBundle = ""
 $remoteBundleCreated = $false
 $transactionStarted = $false
 $allowFirst = if ($AllowFirstDeployWithoutBackup) { "true" } else { "false" }
+$useExistingEnv = if ($UseExistingEnvironment) { "true" } else { "false" }
 $transactionResolved = $false
 
 try {
@@ -207,8 +209,10 @@ try {
   $remoteBootstrap = if ($SkipBootstrap) { "" } else { $remoteBootstrapFile }
   scp @sshOptions $archiveRelative "${sshTarget}:$remoteArchive"
   Assert-NativeSuccess "Project archive upload"
-  scp @sshOptions ".env.production" "${sshTarget}:$remoteEnv"
-  Assert-NativeSuccess "Production environment bundle upload"
+  if (-not $UseExistingEnvironment) {
+    scp @sshOptions ".env.production" "${sshTarget}:$remoteEnv"
+    Assert-NativeSuccess "Production environment bundle upload"
+  }
   scp @sshOptions "scripts/vps-deploy-transaction.sh" "${sshTarget}:$remoteTransaction"
   Assert-NativeSuccess "Deployment transaction helper upload"
   scp @sshOptions "scripts/vps-backup.sh" "${sshTarget}:$remoteBackup"
@@ -222,7 +226,7 @@ try {
 
   Write-Host "Running one locked backup, source swap, build, health, and rollback transaction..."
   $transactionStarted = $true
-  ssh @sshOptions $sshTarget "sed -i 's/\r$//' '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; chmod 700 '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; APP_DIR='$AppDir' DEPLOY_APPROVED_APP_BASE='$ApprovedAppBase' CRM_DOMAIN='$Domain' ERP_DOMAIN='$ErpDomain' FIRST_DEPLOY_CADDY_DATA_VOLUME='$CaddyDataVolume' FIRST_DEPLOY_CADDY_CONFIG_VOLUME='$CaddyConfigVolume' DEPLOY_ARCHIVE='$remoteArchive' DEPLOY_ENV_FILE='$remoteEnv' DEPLOY_BACKUP_HELPER='$remoteBackup' DEPLOY_PRESERVE_HELPER='$remotePreserve' DEPLOY_ROLLBACK_HELPER='$remoteRollback' USE_EXISTING_ENV=false ALLOW_FIRST_DEPLOY='$allowFirst' DEPLOY_BOOTSTRAP='$remoteBootstrap' EXPECTED_VERSION='$releaseVersion' EXPECTED_BUILD='$buildCommit' bash '$remoteTransaction'"
+  ssh @sshOptions $sshTarget "sed -i 's/\r$//' '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; chmod 700 '$remoteTransaction' '$remoteBackup' '$remotePreserve' '$remoteRollback' '$remoteBootstrapFile'; APP_DIR='$AppDir' DEPLOY_APPROVED_APP_BASE='$ApprovedAppBase' CRM_DOMAIN='$Domain' ERP_DOMAIN='$ErpDomain' FIRST_DEPLOY_CADDY_DATA_VOLUME='$CaddyDataVolume' FIRST_DEPLOY_CADDY_CONFIG_VOLUME='$CaddyConfigVolume' DEPLOY_ARCHIVE='$remoteArchive' DEPLOY_ENV_FILE='$remoteEnv' DEPLOY_BACKUP_HELPER='$remoteBackup' DEPLOY_PRESERVE_HELPER='$remotePreserve' DEPLOY_ROLLBACK_HELPER='$remoteRollback' USE_EXISTING_ENV='$useExistingEnv' ALLOW_FIRST_DEPLOY='$allowFirst' DEPLOY_BOOTSTRAP='$remoteBootstrap' EXPECTED_VERSION='$releaseVersion' EXPECTED_BUILD='$buildCommit' bash '$remoteTransaction'"
   $transactionExit = $LASTEXITCODE
   if ($transactionExit -eq 0) {
     $transactionResolved = $true

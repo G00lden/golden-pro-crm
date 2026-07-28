@@ -46,6 +46,7 @@ import {
   saveWhatsAppCampaignMedia,
   whatsappCampaignMediaFile,
 } from "./whatsappCampaignMedia";
+import { whatsappAiReadiness } from "./whatsappAi";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -275,7 +276,10 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
       const user = (req as AuthedRequest).user;
       const canManageWhatsApp = hasAppCapability(user?.role, "whatsapp.manage")
         || Boolean(user?.uid && adminUids().includes(user.uid));
-      res.json(visibleWhatsAppStatus(status, canManageWhatsApp));
+      res.json({
+        ...visibleWhatsAppStatus(status, canManageWhatsApp),
+        ai: whatsappAiReadiness(user?.uid),
+      });
     }),
   );
 

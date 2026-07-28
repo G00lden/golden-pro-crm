@@ -13,6 +13,25 @@ export const WHATSAPP_COMMERCE_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_whatsapp_commerce_sessions_expires
     ON whatsapp_commerce_sessions(expires_at);
+
+  CREATE TABLE IF NOT EXISTS whatsapp_ai_intents (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    phone_hash TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'deepseek',
+    model TEXT NOT NULL DEFAULT '',
+    configuration_hash TEXT NOT NULL DEFAULT '',
+    intent TEXT NOT NULL DEFAULT 'unknown',
+    confidence REAL,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_whatsapp_ai_intents_rate_limit
+    ON whatsapp_ai_intents(owner_uid, phone_hash, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_whatsapp_ai_intents_created
+    ON whatsapp_ai_intents(created_at);
 `;
 
 export type WhatsAppCommerceStep =

@@ -234,7 +234,7 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10904) throw new Error(`Expected schema 10904, got ${userVersion}`);
+if (userVersion !== 10905) throw new Error(`Expected schema 10905, got ${userVersion}`);
 for (const required of ["media_type", "media_url", "order_url"]) {
   if (!columns("communication_campaigns").has(required)) {
     throw new Error(`communication_campaigns.${required} is missing`);
@@ -243,6 +243,23 @@ for (const required of ["media_type", "media_url", "order_url"]) {
 for (const required of ["owner_uid", "phone", "step", "context_json", "expires_at"]) {
   if (!columns("whatsapp_commerce_sessions").has(required)) {
     throw new Error(`whatsapp_commerce_sessions.${required} is missing`);
+  }
+}
+for (const required of [
+  "owner_uid",
+  "phone_hash",
+  "input_hash",
+  "provider",
+  "model",
+  "configuration_hash",
+  "intent",
+  "confidence",
+  "status",
+  "error_code",
+  "created_at",
+]) {
+  if (!columns("whatsapp_ai_intents").has(required)) {
+    throw new Error(`whatsapp_ai_intents.${required} is missing`);
   }
 }
 for (const required of [
@@ -599,7 +616,9 @@ if (deliveryReviewMigration?.release !== "1.9.0-salla-delivery-rating-whatsapp")
 const mediaCampaignMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10901").get() as { release?: string };
 if (mediaCampaignMigration?.release !== "1.9.1-whatsapp-media-campaigns") throw new Error("WhatsApp media campaign migration was not updated.");
 const bulkReminderMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10904").get() as { release?: string };
+const deepSeekAssistantMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10905").get() as { release?: string };
 if (bulkReminderMigration?.release !== "1.9.4-whatsapp-bulk-reminders") throw new Error("WhatsApp bulk reminder migration was not updated.");
+if (deepSeekAssistantMigration?.release !== "1.9.5-whatsapp-deepseek-assistant") throw new Error("WhatsApp DeepSeek assistant migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

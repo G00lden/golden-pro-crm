@@ -88,6 +88,7 @@ $sensitiveKeys = @(
   "WHATSAPP_APP_SECRET",
   "TAP_SECRET_KEY",
   "TAP_WEBHOOK_SECRET",
+  "DEEPSEEK_API_KEY",
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
   "SUPABASE_ANON_KEY",
@@ -148,6 +149,7 @@ $safeEnvironment = [ordered]@{
   ENABLE_DAILY_CRON = "false"
   SALLA_SYNC_CRON_ENABLED = "false"
   COMMUNICATION_WORKER_ENABLED = "false"
+  WHATSAPP_AI_ENABLED = "false"
   WHATSAPP_PROVIDER = "cloud_api"
   WHATSAPP_WEBHOOK_VERIFY_TOKEN = ("qa-wa-verify-" + (New-QaSecret 18))
   WHATSAPP_WEBHOOK_SECRET = ("qa-wa-webhook-" + (New-QaSecret 24))

@@ -505,13 +505,18 @@ export default function CallCenterPage(props: Props) {
         {props.canManageWhatsApp && <button type="button" className={tab === "whatsapp" ? "active" : ""} aria-current={tab === "whatsapp" ? "page" : undefined} onClick={() => selectTab("whatsapp")}><MessageCircle size={17} aria-hidden="true" /> واتساب</button>}
         {props.canManageCallSystem && <button type="button" className={tab === "settings" ? "active" : ""} aria-current={tab === "settings" ? "page" : undefined} onClick={() => selectTab("settings")}><Settings2 size={17} aria-hidden="true" /> إعدادات الاتصال</button>}
       </nav>
-      <main id={`call-center-${tab}`} className="call-center-panel" tabIndex={-1}>
+      <section
+        id={`call-center-${tab}`}
+        className="call-center-panel"
+        aria-label="محتوى قسم مركز الاتصالات"
+        tabIndex={-1}
+      >
         {tab === "calls" && props.canViewCalls && <CallsWorkspace {...props} />}
         {tab === "contacts" && <><GoogleContactsPanel notify={props.notify} canSync={props.canSyncContacts} /><section className="card contact-workflow"><UserRoundPlus size={24} aria-hidden="true" /><div><h2>الأرقام التي تحتاج اسمًا</h2><p>ارجع إلى تبويب المكالمات واختر فلتر «يحتاج اسمًا»، ثم استخدم «حفظ الاسم». لن تُرسل الأسماء المؤقتة القديمة إلى Google.</p></div><Button tone="muted" onClick={() => { selectTab("calls"); const next = { ...filtersFromLocation(), contactState: "needs_name" as const, page: 1 }; updateUrl(next, "calls"); window.dispatchEvent(new PopStateEvent("popstate")); }}><Filter size={15} aria-hidden="true" /> عرض الأرقام</Button></section></>}
         {tab === "devices" && <MobileOperationsPage embedded notify={props.notify} canPairDevices={props.canPairDevices} canManageDevices={props.canManageDevices} canManageSims={props.canManageSims} canExecuteCalls={props.canExecuteCalls} canManagePolicy={props.canManagePolicy} canSendTests={props.canSendTests} onOpenWhatsApp={() => selectTab("whatsapp")} />}
         {tab === "whatsapp" && props.canManageWhatsApp && <WhatsAppConsole notify={props.notify} />}
         {tab === "settings" && props.canManageCallSystem && <CallSystemPage notify={props.notify} />}
-      </main>
+      </section>
     </div>
   );
 }

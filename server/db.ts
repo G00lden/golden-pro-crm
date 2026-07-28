@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10904;
+const TARGET_SCHEMA_VERSION = 10905;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -2054,6 +2054,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10901, '1.9.1-whatsapp-media-campaigns');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10903, '1.9.3-salla-order-dispatch');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10904, '1.9.4-whatsapp-bulk-reminders');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10905, '1.9.5-whatsapp-deepseek-assistant');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

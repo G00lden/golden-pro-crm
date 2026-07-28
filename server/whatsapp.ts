@@ -37,6 +37,18 @@ export type WhatsAppStatus = {
   user?: string;
   connectedAt?: string;
   outbound?: ReturnType<typeof outboundSafetyStatus>;
+  ai?: {
+    provider: "deepseek";
+    enabled: boolean;
+    configured: boolean;
+    commerceEnabled: boolean;
+    storeSupported: boolean;
+    prerequisitesReady: boolean;
+    verified: boolean;
+    verifiedAt?: string;
+    ready: boolean;
+    model: string;
+  };
   updatedAt: string;
 };
 
