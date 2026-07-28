@@ -1,6 +1,7 @@
 import {
-  CAMPAIGN_OFFER_BUTTONS,
+  campaignOfferButtonsForTemplate,
   campaignOrderUrlPrefix,
+  isCampaignOfferTemplate,
   type WhatsAppCloudTemplateOptions,
 } from "./whatsappCampaignOffer";
 import { templateVariableNames, type TemplateName } from "./whatsappTemplates";
@@ -71,6 +72,10 @@ export function validateMetaTemplateApproval(input: {
 
   const expectedButtons = input.templateOptions?.buttons || [];
   if (expectedButtons.length) {
+    if (!isCampaignOfferTemplate(input.logicalTemplate)) {
+      return { ready: false, reason: "Buttons are only supported by campaign offer templates." };
+    }
+    const buttonDefinitions = campaignOfferButtonsForTemplate(input.logicalTemplate);
     const component = components.find((item) => String(item.type || "").toUpperCase() === "BUTTONS");
     const buttons = records(component?.buttons);
     if (buttons.length !== expectedButtons.length) {
@@ -82,7 +87,7 @@ export function validateMetaTemplateApproval(input: {
       if (String(actual?.type || "").toUpperCase() !== expectedType) {
         return { ready: false, reason: `Meta button ${expected.index} has the wrong type.` };
       }
-      const expectedTitle = CAMPAIGN_OFFER_BUTTONS[expected.index]?.title;
+      const expectedTitle = buttonDefinitions[expected.index]?.title;
       if (expectedTitle && String(actual?.text || "").trim() !== expectedTitle) {
         return { ready: false, reason: `Meta button ${expected.index} has the wrong title.` };
       }

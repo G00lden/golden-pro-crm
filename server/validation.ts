@@ -83,6 +83,9 @@ const campaignTemplateSchema = z.enum([
   'general_reminder',
   'campaign_offer_image',
   'campaign_offer_video',
+  'campaign_offer_text_reminder',
+  'campaign_offer_image_reminder',
+  'campaign_offer_video_reminder',
 ]);
 
 const campaignHttpsUrlSchema = z.string().trim().url().max(2048).refine((value) => {
@@ -111,10 +114,26 @@ export const communicationCampaignSchema = z.object({
     city: z.string().trim().min(1).max(160).optional(),
     source: z.string().trim().min(1).max(80).optional(),
     customerIds: z.array(z.string().min(1).max(160)).max(1000).optional(),
+    importedAudience: z.boolean().optional(),
   }).refine(
-    (value) => Boolean(value.allCustomers || value.city || value.source || value.customerIds?.length),
+    (value) => Boolean(
+      value.allCustomers
+      || value.city
+      || value.source
+      || value.customerIds?.length
+      || value.importedAudience
+    ),
     'At least one audience criterion is required',
   ),
+  audience_members: z.array(z.object({
+    phone: z.string().trim().min(1).max(32),
+    name: z.string().trim().max(160).optional(),
+  })).max(10_000).optional(),
+  audience_consent: z.object({
+    granted: z.literal(true),
+    evidence: z.string().trim().min(3, 'Consent evidence is required').max(1000),
+    source: z.string().trim().min(1).max(100).optional().default('campaign_import'),
+  }).optional(),
   template_vars: z.record(z.string().max(80), z.union([z.string().max(2000), z.number()])).optional(),
   media: z.object({
     type: z.enum(['image', 'video']),
@@ -124,6 +143,28 @@ export const communicationCampaignSchema = z.object({
   rate_limit_per_minute: z.coerce.number().int().min(1).max(120).optional(),
   frequency_cap_days: z.coerce.number().int().min(1).max(90).optional(),
 }).superRefine((value, context) => {
+  if (value.audience_filter.importedAudience) {
+    if (!value.audience_members?.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['audience_members'],
+        message: 'Imported audience requires at least one phone number',
+      });
+    }
+    if (!value.audience_consent) {
+      context.addIssue({
+        code: 'custom',
+        path: ['audience_consent'],
+        message: 'Documented marketing consent is required for an imported audience',
+      });
+    }
+  } else if (value.audience_members?.length || value.audience_consent) {
+    context.addIssue({
+      code: 'custom',
+      path: ['audience_filter', 'importedAudience'],
+      message: 'Imported audience data requires importedAudience=true',
+    });
+  }
   if (value.template_name === 'general_reminder') {
     if (value.media || value.order_url) {
       context.addIssue({
@@ -134,14 +175,25 @@ export const communicationCampaignSchema = z.object({
     }
     return;
   }
-  const expectedType = value.template_name === 'campaign_offer_video' ? 'video' : 'image';
-  if (!value.media) {
+  const expectedType = value.template_name.includes('_video')
+    ? 'video'
+    : value.template_name.includes('_image')
+      ? 'image'
+      : 'text';
+  if (expectedType !== 'text' && !value.media) {
     context.addIssue({ code: 'custom', path: ['media'], message: 'Campaign media is required' });
-  } else if (value.media.type !== expectedType) {
+  } else if (value.media && value.media.type !== expectedType) {
     context.addIssue({
       code: 'custom',
       path: ['media', 'type'],
       message: 'Media type must match the approved Meta template',
+    });
+  }
+  if (expectedType === 'text' && value.media) {
+    context.addIssue({
+      code: 'custom',
+      path: ['media'],
+      message: 'Text campaign templates cannot include media',
     });
   }
   if (!value.order_url) {

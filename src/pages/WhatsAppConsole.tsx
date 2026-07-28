@@ -67,6 +67,9 @@ const TEMPLATE_VARIABLE_FIELDS: Record<string, TemplateVariableField[]> = {
   delivery_review_request: fieldsFor("customer_name", "order_number"),
   campaign_offer_image: fieldsFor("customer_name", "offer_text"),
   campaign_offer_video: fieldsFor("customer_name", "offer_text"),
+  campaign_offer_text_reminder: fieldsFor("customer_name", "offer_text"),
+  campaign_offer_image_reminder: fieldsFor("customer_name", "offer_text"),
+  campaign_offer_video_reminder: fieldsFor("customer_name", "offer_text"),
   general_reminder: fieldsFor("message"),
 };
 
@@ -553,7 +556,13 @@ export function WhatsAppConsole({ notify }: { notify: Notifier }) {
               onChange={(event) => changeSendTemplate(event.target.value)}
             >
               <option value="">— رسالة يدوية —</option>
-              {templates.filter((t) => !["campaign_offer_image", "campaign_offer_video"].includes(t.name)).map((t) => (
+              {templates.filter((t) => ![
+                "campaign_offer_image",
+                "campaign_offer_video",
+                "campaign_offer_text_reminder",
+                "campaign_offer_image_reminder",
+                "campaign_offer_video_reminder",
+              ].includes(t.name)).map((t) => (
                 <option key={t.name} value={t.name}>{t.name}</option>
               ))}
             </select>

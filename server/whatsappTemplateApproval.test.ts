@@ -64,3 +64,48 @@ test("Meta campaign template approval requires exact status, shape, language, an
     assert.match(result.reason || "", expected);
   }
 });
+
+test("Meta reminder campaign template requires the remind and opt-out titles", () => {
+  const reminderOptions = buildCampaignCloudTemplateOptions({
+    campaignId: "camp_reminder",
+    orderUrl: "https://goldenksa.store/offers/filter",
+    templateName: "campaign_offer_text_reminder",
+  });
+  const record = {
+    name: "campaign_offer_text_reminder_ar",
+    status: "APPROVED",
+    language: "ar",
+    components: [
+      { type: "BODY", text: "مرحبًا {{1}}\n{{2}}" },
+      {
+        type: "BUTTONS",
+        buttons: [
+          { type: "URL", text: "اطلب الآن", url: "https://goldenksa.store/{{1}}" },
+          { type: "QUICK_REPLY", text: "ذكّرني بعد أسبوع" },
+          { type: "QUICK_REPLY", text: "إيقاف الرسائل" },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(
+    validateMetaTemplateApproval({
+      record,
+      mappedName: "campaign_offer_text_reminder_ar",
+      language: "ar",
+      logicalTemplate: "campaign_offer_text_reminder",
+      templateOptions: reminderOptions,
+    }),
+    { ready: true },
+  );
+  record.components[1].buttons[1].text = "ذكرني لاحقًا";
+  assert.match(
+    validateMetaTemplateApproval({
+      record,
+      mappedName: "campaign_offer_text_reminder_ar",
+      language: "ar",
+      logicalTemplate: "campaign_offer_text_reminder",
+      templateOptions: reminderOptions,
+    }).reason || "",
+    /wrong title/,
+  );
+});

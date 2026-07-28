@@ -563,7 +563,15 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
       const body = req.body as {
         name: string;
         template_name: TemplateName;
-        audience_filter: { allCustomers?: boolean; city?: string; source?: string; customerIds?: string[] };
+        audience_filter: {
+          allCustomers?: boolean;
+          city?: string;
+          source?: string;
+          customerIds?: string[];
+          importedAudience?: boolean;
+        };
+        audience_members?: Array<{ phone: string; name?: string }>;
+        audience_consent?: { granted: true; evidence: string; source?: string };
         template_vars?: Record<string, string | number>;
         media?: CampaignMedia;
         order_url?: string;
@@ -578,6 +586,8 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
         templateVars: body.template_vars,
         media: body.media,
         orderUrl: body.order_url,
+        audienceMembers: body.audience_members,
+        audienceConsent: body.audience_consent,
         rateLimitPerMinute: body.rate_limit_per_minute,
         frequencyCapDays: body.frequency_cap_days,
         createdBy: user.uid,
@@ -622,8 +632,9 @@ export function registerWhatsAppRoutes(app: Express, options: WhatsAppRouteOptio
         try {
           const templateOptions = buildCampaignCloudTemplateOptions({
             campaignId: campaign.id,
-            media: campaign.media!,
+            media: campaign.media,
             orderUrl: campaign.order_url!,
+            templateName: campaign.template_name,
           });
           const approval = await whatsappService.verifyCampaignTemplate(
             campaign.template_name,

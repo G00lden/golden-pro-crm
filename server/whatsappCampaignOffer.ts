@@ -1,10 +1,15 @@
 export const CAMPAIGN_OFFER_TEMPLATES = [
   "campaign_offer_image",
   "campaign_offer_video",
+  "campaign_offer_text_reminder",
+  "campaign_offer_image_reminder",
+  "campaign_offer_video_reminder",
 ] as const;
 
 export type CampaignOfferTemplateName = typeof CAMPAIGN_OFFER_TEMPLATES[number];
 export type CampaignMediaType = "image" | "video";
+export type CampaignContentType = "text" | CampaignMediaType;
+export type CampaignButtonPreset = "filters_booking" | "order_reminder";
 export type CampaignMedia = {
   type: CampaignMediaType;
   url: string;
@@ -28,6 +33,12 @@ export const CAMPAIGN_OFFER_BUTTONS = [
   { id: "book_appointment", title: "احجز موعد", kind: "quick_reply" },
 ] as const;
 
+export const CAMPAIGN_REMINDER_BUTTONS = [
+  { id: "order_now", title: "اطلب الآن", kind: "url" },
+  { id: "remind_week", title: "ذكّرني بعد أسبوع", kind: "quick_reply" },
+  { id: "stop_marketing", title: "إيقاف الرسائل", kind: "quick_reply" },
+] as const;
+
 function httpsUrl(value: unknown, label: string) {
   const raw = String(value || "").trim();
   if (!raw || raw.length > 2_048) throw new Error(`${label} is required.`);
@@ -47,8 +58,32 @@ export function campaignOfferTemplateForMedia(type: CampaignMediaType): Campaign
   return type === "video" ? "campaign_offer_video" : "campaign_offer_image";
 }
 
+export function campaignReminderTemplateForContent(type: CampaignContentType): CampaignOfferTemplateName {
+  if (type === "video") return "campaign_offer_video_reminder";
+  if (type === "image") return "campaign_offer_image_reminder";
+  return "campaign_offer_text_reminder";
+}
+
 export function isCampaignOfferTemplate(value: unknown): value is CampaignOfferTemplateName {
   return CAMPAIGN_OFFER_TEMPLATES.includes(value as CampaignOfferTemplateName);
+}
+
+export function campaignContentTypeForTemplate(value: CampaignOfferTemplateName): CampaignContentType {
+  if (value.includes("_video")) return "video";
+  if (value.includes("_image")) return "image";
+  return "text";
+}
+
+export function campaignButtonPresetForTemplate(
+  value: CampaignOfferTemplateName,
+): CampaignButtonPreset {
+  return value.endsWith("_reminder") ? "order_reminder" : "filters_booking";
+}
+
+export function campaignOfferButtonsForTemplate(value: CampaignOfferTemplateName) {
+  return campaignButtonPresetForTemplate(value) === "order_reminder"
+    ? CAMPAIGN_REMINDER_BUTTONS
+    : CAMPAIGN_OFFER_BUTTONS;
 }
 
 export function campaignOrderUrlPrefix() {
@@ -81,16 +116,23 @@ export function campaignOrderButtonSuffix(orderUrl: string, campaignId: string) 
 
 export function buildCampaignCloudTemplateOptions(input: {
   campaignId: string;
-  media: CampaignMedia;
+  media?: CampaignMedia | null;
   orderUrl: string;
+  templateName?: CampaignOfferTemplateName;
+  buttonPreset?: CampaignButtonPreset;
 }): WhatsAppCloudTemplateOptions {
-  const mediaUrl = httpsUrl(input.media.url, "Campaign media URL");
+  const preset = input.templateName
+    ? campaignButtonPresetForTemplate(input.templateName)
+    : input.buttonPreset || "filters_booking";
+  const mediaUrl = input.media ? httpsUrl(input.media.url, "Campaign media URL") : null;
   const actionPrefix = `campaign:`;
   return {
-    header: {
-      type: input.media.type,
-      link: mediaUrl.href,
-    },
+    ...(input.media && mediaUrl ? {
+      header: {
+        type: input.media.type,
+        link: mediaUrl.href,
+      },
+    } : {}),
     buttons: [
       {
         type: "url",
@@ -100,12 +142,12 @@ export function buildCampaignCloudTemplateOptions(input: {
       {
         type: "quick_reply",
         index: 1,
-        payload: `${actionPrefix}change_filters:${input.campaignId}`,
+        payload: `${actionPrefix}${preset === "order_reminder" ? "remind_week" : "change_filters"}:${input.campaignId}`,
       },
       {
         type: "quick_reply",
         index: 2,
-        payload: `${actionPrefix}book_appointment:${input.campaignId}`,
+        payload: `${actionPrefix}${preset === "order_reminder" ? "stop_marketing" : "book_appointment"}:${input.campaignId}`,
       },
     ],
   };

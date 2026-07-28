@@ -37,6 +37,10 @@ function system() {
       phone TEXT, status TEXT, skip_reason TEXT, job_id TEXT, provider_message_id TEXT,
       sent_at TEXT, created_at TEXT, updated_at TEXT, UNIQUE(campaign_id, phone)
     );
+    CREATE TABLE communication_campaign_audience (
+      id TEXT PRIMARY KEY, campaign_id TEXT, owner_uid TEXT, phone TEXT, name TEXT,
+      created_at TEXT, UNIQUE(campaign_id, phone)
+    );
     CREATE TABLE communication_jobs (
       id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, event_key TEXT NOT NULL,
       kind TEXT NOT NULL, channel TEXT NOT NULL, recipient_phone TEXT NOT NULL,
@@ -211,5 +215,110 @@ test("media campaigns queue a Meta header plus fixed order, filter, and booking 
     { type: "quick_reply", index: 1, payload: `campaign:change_filters:${campaign.id}` },
     { type: "quick_reply", index: 2, payload: `campaign:book_appointment:${campaign.id}` },
   ]);
+  database.close();
+});
+
+test("an imported audience records one consent source and queues up to the campaign limit", () => {
+  const { database, campaigns } = system();
+  const campaign = campaigns.create({
+    ownerUid: "o1",
+    name: "Imported summer offer",
+    templateName: "campaign_offer_text_reminder",
+    audienceFilter: { importedAudience: true },
+    audienceMembers: [
+      { phone: "0501234567", name: "يعقوب" },
+      { phone: "966501234568", name: "أحمد" },
+      { phone: "0501234567", name: "مكرر" },
+    ],
+    audienceConsent: {
+      granted: true,
+      evidence: "Documented website opt-in 2026-07-28",
+      source: "campaign_import",
+    },
+    templateVars: { offer_text: "خصم خاص هذا الأسبوع" },
+    orderUrl: "https://goldenksa.store/offers/summer",
+  });
+  const preview = campaigns.preview("o1", campaign.id)!;
+  assert.equal(preview.audience, 2);
+  assert.equal(preview.eligible, 2);
+  const audienceCount = database.prepare(
+    "SELECT COUNT(*) AS count FROM communication_campaign_audience WHERE campaign_id=?",
+  ).get(campaign.id) as { count: number };
+  assert.equal(audienceCount.count, 2);
+  const preferenceCount = database.prepare(
+    "SELECT COUNT(*) AS count FROM communication_preferences WHERE source='campaign_import'",
+  ).get() as { count: number };
+  assert.equal(preferenceCount.count, 2);
+  const launched = campaigns.launch("o1", campaign.id)!;
+  assert.equal(launched.stats.queued, 2);
+  database.close();
+});
+
+test("remind-after-week is durable, idempotent, and rechecks opt-out before sending", () => {
+  const { database, preferences, jobs, campaigns } = system();
+  const campaign = campaigns.create({
+    ownerUid: "o1",
+    name: "Reminder offer",
+    templateName: "campaign_offer_image_reminder",
+    audienceFilter: { importedAudience: true },
+    audienceMembers: [{ phone: "0501234567", name: "يعقوب" }],
+    audienceConsent: {
+      granted: true,
+      evidence: "WhatsApp opt-in",
+    },
+    templateVars: { offer_text: "عرض خاص" },
+    media: { type: "image", url: "https://cdn.example.test/offer.jpg" },
+    orderUrl: "https://goldenksa.store/offers/filter",
+  });
+  database.prepare("UPDATE communication_campaigns SET status='completed' WHERE id=?").run(campaign.id);
+  const now = new Date("2026-07-28T12:00:00.000Z");
+  const first = campaigns.scheduleWeekFollowup("o1", campaign.id, "0501234567", now);
+  const second = campaigns.scheduleWeekFollowup("o1", campaign.id, "0501234567", now);
+  assert.equal(first.scheduled, true);
+  assert.equal(first.created, true);
+  assert.equal(first.dueAt, "2026-08-04T12:00:00.000Z");
+  assert.equal(second.scheduled, true);
+  assert.equal(second.created, false);
+  const followupCount = database.prepare(
+    "SELECT COUNT(*) AS count FROM communication_jobs WHERE kind='whatsapp_campaign_followup'",
+  ).get() as { count: number };
+  assert.equal(followupCount.count, 1);
+  database.prepare(
+    "UPDATE communication_jobs SET available_at=?, expires_at=? WHERE id=?",
+  ).run(
+    new Date(Date.now() - 1_000).toISOString(),
+    new Date(Date.now() + 60_000).toISOString(),
+    first.jobId,
+  );
+  const job = jobs.claimNext()!;
+  assert.equal(job.kind, "whatsapp_campaign_followup");
+  assert.deepEqual(campaigns.guardJob(job), { action: "send" });
+  database.prepare(
+    "UPDATE communication_jobs SET status='sent', lease_until=NULL WHERE id=?",
+  ).run(first.jobId);
+  const repeat = campaigns.scheduleWeekFollowup(
+    "o1",
+    campaign.id,
+    "0501234567",
+    new Date("2026-08-04T12:00:00.000Z"),
+  );
+  assert.equal(repeat.scheduled, true);
+  assert.equal(repeat.created, true);
+  assert.equal(repeat.dueAt, "2026-08-11T12:00:00.000Z");
+  const repeatedFollowupCount = database.prepare(
+    "SELECT COUNT(*) AS count FROM communication_jobs WHERE kind='whatsapp_campaign_followup'",
+  ).get() as { count: number };
+  assert.equal(repeatedFollowupCount.count, 2);
+  database.prepare(
+    "UPDATE communication_jobs SET available_at=?, expires_at=? WHERE id=?",
+  ).run(
+    new Date(Date.now() - 1_000).toISOString(),
+    new Date(Date.now() + 60_000).toISOString(),
+    repeat.jobId,
+  );
+  const repeatedJob = jobs.claimNext()!;
+  assert.equal(repeatedJob.id, repeat.jobId);
+  preferences.suppress({ ownerUid: "o1", phone: "0501234567", evidence: "campaign opt-out" });
+  assert.deepEqual(campaigns.guardJob(repeatedJob), { action: "block", reason: "suppressed" });
   database.close();
 });

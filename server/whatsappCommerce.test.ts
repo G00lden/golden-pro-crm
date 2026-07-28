@@ -10,6 +10,7 @@ process.env.WHATSAPP_BOOKING_SLOT_TIMES = "09:00,11:00,14:00,16:00";
 process.env.WHATSAPP_BOOKING_LOOKAHEAD_DAYS = "3";
 process.env.WHATSAPP_BOOKING_MIN_LEAD_HOURS = "4";
 process.env.WHATSAPP_BOOKING_CLOSED_WEEKDAYS = "5";
+process.env.WHATSAPP_CAMPAIGN_ORDER_URL_PREFIX = "https://goldenksa.store/";
 process.env.ENABLE_DAILY_CRON = "false";
 
 const ownerUid = "whatsapp-commerce-owner";
@@ -34,8 +35,11 @@ function clearCommerceFixtures() {
     "crm_tasks",
     "salla_abandoned_carts",
     "communication_jobs",
+    "communication_campaign_audience",
     "communication_campaign_recipients",
     "communication_campaigns",
+    "communication_preferences",
+    "communication_suppressions",
     "technician_notifications",
   ]) {
     db.prepare(`DELETE FROM ${table}`).run();
@@ -96,6 +100,24 @@ function seedCampaign(id = "camp_action_test") {
   return id;
 }
 
+function seedReminderCampaign(id = "camp_reminder_test") {
+  db.prepare(
+    `INSERT INTO communication_campaigns (
+       id, owner_uid, name, template_name, status, audience_filter, template_vars,
+       media_type, media_url, order_url
+     ) VALUES (?, ?, 'عرض مع تذكير', 'campaign_offer_image_reminder', 'completed',
+               '{}', '{"offer_text":"عرض خاص"}', 'image',
+               'https://cdn.example.test/offer.jpg',
+               'https://goldenksa.store/offers/filter')`,
+  ).run(id, ownerUid);
+  db.prepare(
+    `INSERT INTO communication_preferences (
+       owner_uid, phone, channel, purpose, status, source, evidence, captured_at
+     ) VALUES (?, ?, 'whatsapp', 'marketing', 'granted', 'test', 'documented opt-in', ?)`,
+  ).run(ownerUid, existingPhone, now.toISOString());
+  return id;
+}
+
 test.beforeEach(() => {
   delete process.env.WHATSAPP_COMMERCE_ENABLED;
   clearCommerceFixtures();
@@ -111,6 +133,48 @@ test("the isolated commerce kill switch leaves the generic conversation router a
     text: "حجز",
   });
   assert.deepEqual(result, { handled: false, reason: "commerce_disabled" });
+});
+
+test("campaign remind-week and opt-out buttons work even when payment commerce is disabled", async () => {
+  process.env.WHATSAPP_COMMERCE_ENABLED = "false";
+  const campaignId = seedReminderCampaign();
+  const reminder = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: `campaign:remind_week:${campaignId}`,
+    },
+    { now: () => now },
+  );
+  assert.equal(reminder.kind, "campaign_week_reminder_scheduled");
+  const job = db.prepare(
+    `SELECT kind, status, available_at, campaign_id
+       FROM communication_jobs
+      WHERE owner_uid = ? AND event_key = ?`,
+  ).get(
+    ownerUid,
+    `campaign-followup:${campaignId}:${existingPhone}:2026-07-27`,
+  ) as Record<string, unknown>;
+  assert.equal(job.kind, "whatsapp_campaign_followup");
+  assert.equal(job.status, "pending");
+  assert.equal(job.available_at, "2026-08-03T06:00:00.000Z");
+  assert.equal(job.campaign_id, campaignId);
+
+  const stopped = await handleWhatsAppCommerceConversation(
+    {
+      ownerUid,
+      fromPhone: existingPhone,
+      text: `campaign:stop_marketing:${campaignId}`,
+    },
+    { now: () => now },
+  );
+  assert.equal(stopped.kind, "campaign_marketing_stopped");
+  const suppression = db.prepare(
+    `SELECT reason, active FROM communication_suppressions
+      WHERE owner_uid = ? AND phone = ?`,
+  ).get(ownerUid, existingPhone) as Record<string, unknown>;
+  assert.equal(suppression.reason, "campaign_button_opt_out");
+  assert.equal(suppression.active, 1);
 });
 
 test("commerce replies never fall back to an SMS queue when WhatsApp is unavailable", async () => {

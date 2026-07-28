@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10903;
+const TARGET_SCHEMA_VERSION = 10904;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -972,6 +972,18 @@ db.exec(`
     ON communication_campaigns(owner_uid, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_communication_campaigns_due
     ON communication_campaigns(status, scheduled_at);
+
+  CREATE TABLE IF NOT EXISTS communication_campaign_audience (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL,
+    owner_uid TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    name TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(campaign_id, phone)
+  );
+  CREATE INDEX IF NOT EXISTS idx_campaign_audience_campaign
+    ON communication_campaign_audience(owner_uid, campaign_id, created_at);
 
   CREATE TABLE IF NOT EXISTS communication_campaign_recipients (
     id TEXT PRIMARY KEY,
@@ -2041,6 +2053,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10900, '1.9.0-salla-delivery-rating-whatsapp');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10901, '1.9.1-whatsapp-media-campaigns');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10903, '1.9.3-salla-order-dispatch');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10904, '1.9.4-whatsapp-bulk-reminders');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
