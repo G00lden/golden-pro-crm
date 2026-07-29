@@ -39,6 +39,7 @@ import {
   registerGoogleContactsRoutes,
 } from "./server/routes-google-contacts";
 import { registerPaymentRoutes, registerPaymentWebhookRoute } from "./server/routes-payment";
+import { registerInvoicePaymentRoutes } from "./server/invoicePaymentLedger";
 import {
   publicLeadRateLimitOptions,
   registerPublicLeadRoutes,
@@ -414,6 +415,7 @@ async function startServer() {
   registerSallaRoutes(app);
 
   registerPaymentRoutes(app);
+  registerInvoicePaymentRoutes(app);
 
   registerFieldTechAdminRoutes(app);
 

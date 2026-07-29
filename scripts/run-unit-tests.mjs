@@ -40,6 +40,7 @@ const files = [
   "server/crmApi.invoiceLegacy.test.ts",
   "server/invoiceSequence.test.ts",
   "server/invoiceDocumentWriter.test.ts",
+  "server/invoicePaymentLedger.test.ts",
   "server/routes-payment.test.ts",
   "server/bookingAssignmentNotification.test.ts",
   "server/whatsappAi.test.ts",
@@ -79,6 +80,7 @@ const files = [
   "src/pages/OutboundActions.test.ts",
   "src/pages/AdminUsers.role-policy.test.ts",
   "src/pages/InterfaceAccessibility.test.ts",
+  "src/pages/Invoices.payment-ledger.test.ts",
   "src/pages/Settings.store-link.test.ts",
   "src/pages/StoreOrders.salla-availability.test.ts",
 ];
@@ -86,5 +88,11 @@ const files = [
 const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...files], {
   stdio: "inherit",
   shell: false,
+  env: {
+    ...process.env,
+    // Test files run in isolated child processes. An in-memory default prevents
+    // parallel imports from racing on a shared development database migration.
+    DB_PATH: process.env.DB_PATH || ":memory:",
+  },
 });
 process.exit(result.status ?? 1);

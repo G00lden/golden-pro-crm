@@ -213,6 +213,41 @@ for (const required of [
   if (!invoiceIndexes.get(required)) throw new Error(`${required} must be a unique index`);
 }
 if (!invoiceIndexes.has("idx_invoices_owner_source")) throw new Error("idx_invoices_owner_source is missing");
+for (const required of [
+  "id",
+  "owner_uid",
+  "invoice_id",
+  "entry_type",
+  "method",
+  "amount_minor",
+  "currency",
+  "reference",
+  "note",
+  "source_payment_id",
+  "reverses_entry_id",
+  "idempotency_key",
+  "recorded_by",
+  "occurred_at",
+  "created_at",
+]) {
+  if (!columns("invoice_payment_entries").has(required)) {
+    throw new Error(`invoice_payment_entries.${required} is missing`);
+  }
+}
+const invoicePaymentIndexes = indexes("invoice_payment_entries");
+for (const required of [
+  "idx_invoice_payment_entries_idempotency",
+  "idx_invoice_payment_entries_source_payment",
+  "idx_invoice_payment_entries_one_reversal",
+]) {
+  if (!invoicePaymentIndexes.get(required)) throw new Error(`${required} must be a unique index`);
+}
+for (const required of [
+  "idx_invoice_payment_entries_owner_time",
+  "idx_invoice_payment_entries_invoice",
+]) {
+  if (!invoicePaymentIndexes.has(required)) throw new Error(`${required} is missing`);
+}
 for (const required of ["seller_name", "seller_vat_number", "seller_address"]) {
   if (!columns("settings").has(required)) throw new Error(`settings.${required} is missing`);
 }
@@ -234,7 +269,7 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10905) throw new Error(`Expected schema 10905, got ${userVersion}`);
+if (userVersion !== 10906) throw new Error(`Expected schema 10906, got ${userVersion}`);
 for (const required of ["media_type", "media_url", "order_url"]) {
   if (!columns("communication_campaigns").has(required)) {
     throw new Error(`communication_campaigns.${required} is missing`);
@@ -617,8 +652,10 @@ const mediaCampaignMigration = db.prepare("SELECT release FROM schema_migrations
 if (mediaCampaignMigration?.release !== "1.9.1-whatsapp-media-campaigns") throw new Error("WhatsApp media campaign migration was not updated.");
 const bulkReminderMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10904").get() as { release?: string };
 const deepSeekAssistantMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10905").get() as { release?: string };
+const invoicePaymentLedgerMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10906").get() as { release?: string };
 if (bulkReminderMigration?.release !== "1.9.4-whatsapp-bulk-reminders") throw new Error("WhatsApp bulk reminder migration was not updated.");
 if (deepSeekAssistantMigration?.release !== "1.9.5-whatsapp-deepseek-assistant") throw new Error("WhatsApp DeepSeek assistant migration was not updated.");
+if (invoicePaymentLedgerMigration?.release !== "1.9.6-invoice-payment-ledger") throw new Error("Invoice payment ledger migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

@@ -153,6 +153,33 @@ test("invoice create/update routes keep header totals and QR fields on one canon
   assert.equal(updatedFields.get(5), "13.50");
 });
 
+test("draft invoices stay editable without inflating the posted invoice value", async () => {
+  const before = await api("/api/invoices");
+  assert.equal(before.response.status, 200, JSON.stringify(before.body));
+  const initialValue = Number(before.body.stats.total_value || 0);
+
+  const draft = await api("/api/invoices", {
+    method: "POST",
+    body: JSON.stringify(invoiceBody("Editable correction draft", "draft")),
+  });
+  assert.equal(draft.response.status, 201, JSON.stringify(draft.body));
+
+  const afterDraft = await api("/api/invoices");
+  assert.equal(afterDraft.response.status, 200, JSON.stringify(afterDraft.body));
+  assert.equal(afterDraft.body.stats.total_value, initialValue);
+  assert.equal(afterDraft.body.stats.draft >= 1, true);
+
+  const issued = await api("/api/invoices", {
+    method: "POST",
+    body: JSON.stringify(invoiceBody("Posted invoice", "issued")),
+  });
+  assert.equal(issued.response.status, 201, JSON.stringify(issued.body));
+
+  const afterIssued = await api("/api/invoices");
+  assert.equal(afterIssued.response.status, 200, JSON.stringify(afterIssued.body));
+  assert.equal(afterIssued.body.stats.total_value, initialValue + 115);
+});
+
 test("legacy percent discount_value=0 stays zero instead of reusing a stale monetary discount", async () => {
   const id = "invoice-percent-zero";
   await adminDb.collection("invoices").doc(id).set({

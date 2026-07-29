@@ -1,4 +1,5 @@
 import {
+  Banknote,
   CalendarDays,
   CheckCircle2,
   Clock3,
@@ -8,13 +9,17 @@ import {
   Edit3,
   Eye,
   FileText,
+  Landmark,
   MessageCircle,
   Plus,
   Printer,
   RefreshCcw,
+  ReceiptText,
   Search,
   Send,
   Trash2,
+  Undo2,
+  WalletCards,
   X,
 } from "lucide-react";
 import html2canvas from "html2canvas";
@@ -89,6 +94,26 @@ const statusTone: Record<api.InvoiceStatus, "muted" | "success" | "danger" | "wa
   paid: "success",
   cancelled: "danger",
   refunded: "danger",
+};
+
+const paymentMethodLabels: Record<api.InvoicePaymentMethod, string> = {
+  cash: "كاش",
+  card: "بطاقة",
+  bank_transfer: "تحويل بنكي",
+  tap: "Tap",
+  other: "أخرى",
+};
+
+const paymentDateTime = new Intl.DateTimeFormat("ar-SA", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+const paymentOccurredAt = (date: string) => new Date(`${date}T12:00:00`).toISOString();
+
+const readablePaymentDate = (value: string) => {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? paymentDateTime.format(date) : value;
 };
 
 const defaultTerms = "";
@@ -450,7 +475,17 @@ function InvoiceBadge({ status }: { status: api.InvoiceStatus }) {
 
 /* ── Modal ─────────────────────────────────────────────── */
 
-function InvoiceModal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+function InvoiceModal({
+  title,
+  children,
+  onClose,
+  className = "",
+}: {
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+  className?: string;
+}) {
   const dialogRef = useRef<HTMLElement>(null);
   const titleId = useId();
   useDialogAccessibility(dialogRef, onClose);
@@ -459,7 +494,7 @@ function InvoiceModal({ title, children, onClose }: { title: string; children: R
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         ref={dialogRef}
-        className="modal wide invoice-modal"
+        className={`modal wide invoice-modal ${className}`.trim()}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -476,6 +511,179 @@ function InvoiceModal({ title, children, onClose }: { title: string; children: R
       </section>
     </div>,
     document.body,
+  );
+}
+
+function InvoicePaymentModal({
+  invoice,
+  totals,
+  onClose,
+  onRecord,
+}: {
+  invoice: api.Invoice;
+  totals: api.InvoicePaymentOverview["invoice_totals"][string];
+  onClose: () => void;
+  onRecord: (
+    input: {
+      amount: number;
+      method: Exclude<api.InvoicePaymentMethod, "tap">;
+      reference?: string;
+      note?: string;
+      occurred_at?: string;
+    },
+    idempotencyKey: string,
+  ) => Promise<void>;
+}) {
+  const [amount, setAmount] = useState(totals.outstanding.toFixed(2));
+  const [method, setMethod] = useState<Exclude<api.InvoicePaymentMethod, "tap">>("cash");
+  const [reference, setReference] = useState("");
+  const [note, setNote] = useState("");
+  const [occurredDate, setOccurredDate] = useState(today());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const idempotencyKey = useRef(`invoice-payment:${invoice.id}:${crypto.randomUUID()}`);
+  const summaryId = useId();
+  const errorId = useId();
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      setError("أدخل مبلغاً صحيحاً أكبر من صفر.");
+      return;
+    }
+    if (numericAmount > totals.outstanding + 0.000_001) {
+      setError(`المبلغ أكبر من المتبقي على الفاتورة: ${money(totals.outstanding, totals.currency)}.`);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onRecord({
+        amount: numericAmount,
+        method,
+        reference: reference.trim() || undefined,
+        note: note.trim() || undefined,
+        occurred_at: paymentOccurredAt(occurredDate),
+      }, idempotencyKey.current);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "تعذر تسجيل عملية التحصيل.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <InvoiceModal
+      title={`تسجيل تحصيل ${invoice.invoice_number}`}
+      className="invoice-payment-modal"
+      onClose={saving ? () => undefined : onClose}
+    >
+      <form className="invoice-payment-form" onSubmit={submit}>
+        <div className="invoice-payment-invoice" id={summaryId}>
+          <div>
+            <span>العميل</span>
+            <strong>{invoice.customer_name}</strong>
+          </div>
+          <div>
+            <span>إجمالي الفاتورة</span>
+            <strong>{money(totals.total, totals.currency)}</strong>
+          </div>
+          <div>
+            <span>المحصل سابقاً</span>
+            <strong>{money(totals.collected, totals.currency)}</strong>
+          </div>
+          <div className="outstanding">
+            <span>المتبقي الآن</span>
+            <strong>{money(totals.outstanding, totals.currency)}</strong>
+          </div>
+        </div>
+
+        <div className="form-grid">
+          <label className="field">
+            <span>مبلغ الدفعة</span>
+            <input
+              className="input"
+              name="invoice_payment_amount"
+              autoComplete="off"
+              inputMode="decimal"
+              type="number"
+              min="0.01"
+              max={totals.outstanding}
+              step="0.01"
+              value={amount}
+              aria-describedby={`${summaryId}${error ? ` ${errorId}` : ""}`}
+              onChange={(event) => setAmount(event.target.value)}
+              required
+            />
+          </label>
+          <label className="field">
+            <span>طريقة الدفع</span>
+            <select
+              className="input"
+              name="invoice_payment_method"
+              autoComplete="off"
+              value={method}
+              onChange={(event) => setMethod(event.target.value as Exclude<api.InvoicePaymentMethod, "tap">)}
+            >
+              <option value="cash">كاش</option>
+              <option value="card">بطاقة</option>
+              <option value="bank_transfer">تحويل بنكي</option>
+              <option value="other">أخرى</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="form-grid">
+          <label className="field">
+            <span>تاريخ التحصيل</span>
+            <input
+              className="input"
+              name="invoice_payment_date"
+              autoComplete="off"
+              type="date"
+              value={occurredDate}
+              onChange={(event) => setOccurredDate(event.target.value)}
+              required
+            />
+          </label>
+          <label className="field">
+            <span>رقم المرجع (اختياري)</span>
+            <input
+              className="input"
+              name="invoice_payment_reference"
+              autoComplete="off"
+              maxLength={160}
+              placeholder="مثال: رقم إيصال أو تحويل…"
+              value={reference}
+              onChange={(event) => setReference(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <label className="field">
+          <span>ملاحظة (اختياري)</span>
+          <textarea
+            className="input textarea compact"
+            name="invoice_payment_note"
+            autoComplete="off"
+            maxLength={1000}
+            placeholder="تفصيل مختصر عن عملية التحصيل…"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+          />
+        </label>
+
+        {error && <div className="error-box invoice-payment-error" id={errorId} role="alert">{error}</div>}
+
+        <div className="form-actions">
+          <button className="btn primary" type="submit" disabled={saving} aria-busy={saving}>
+            <WalletCards size={16} aria-hidden="true" />
+            {saving ? "جاري تسجيل التحصيل…" : "تسجيل عملية التحصيل"}
+          </button>
+          <button className="btn muted" type="button" disabled={saving} onClick={onClose}>إلغاء</button>
+        </div>
+      </form>
+    </InvoiceModal>
   );
 }
 
@@ -525,12 +733,16 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   const [preview, setPreview] = useState<api.Invoice | null>(null);
   const [creating, setCreating] = useState(false);
   const [invoiceFormDirty, setInvoiceFormDirty] = useState(false);
+  const [collectingInvoice, setCollectingInvoice] = useState<api.Invoice | null>(null);
+  const [reversingPaymentId, setReversingPaymentId] = useState("");
   const [sendingInvoiceId, setSendingInvoiceId] = useState("");
   const [payingInvoiceId, setPayingInvoiceId] = useState("");
   const payingInvoiceIdsRef = useRef(new Set<string>());
   const paymentIdempotencyKeysRef = useRef(new Map<string, string>());
+  const reversalIdempotencyKeysRef = useRef(new Map<string, string>());
   const paymentReconciliationStartedRef = useRef(false);
   const invoices = useAsyncData(() => api.getInvoices({ search, status }), [search, status]);
+  const invoicePayments = useAsyncData(() => api.getInvoicePaymentOverview(50), []);
   const paymentCapabilities = useAsyncData(api.getPaymentCapabilities, []);
   const paymentUnavailableMessage = "بوابة الدفع غير مهيأة حاليًا. تواصل مع مسؤول النظام لتفعيلها.";
   const stats = invoices.data?.stats || {
@@ -546,7 +758,7 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   };
 
   const refreshAll = async () => {
-    await Promise.all([invoices.refresh(), refreshStats()]);
+    await Promise.all([invoices.refresh(), invoicePayments.refresh(), refreshStats()]);
   };
 
   useEffect(() => {
@@ -616,6 +828,49 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     setEditing(invoice);
   };
 
+  const createCorrectionDraft = async (invoice: api.Invoice) => {
+    const confirmed = window.confirm(
+      `الفاتورة ${invoice.invoice_number} سجل مالي ثابت ولا يمكن تغيير مبالغها مباشرة.\n\n`
+      + "سيُنشئ النظام مسودة تصحيح جديدة قابلة للتعديل، بينما تبقى الفاتورة الأصلية محفوظة. هل تريد المتابعة؟",
+    );
+    if (!confirmed) return;
+    try {
+      const draftId = await api.createInvoice({
+        quote_id: invoice.quote_id,
+        customer_id: invoice.customer_id,
+        customer_name: invoice.customer_name,
+        customer_phone: invoice.customer_phone,
+        customer_city: invoice.customer_city,
+        customer_vat: invoice.customer_vat,
+        title: `تصحيح - ${invoice.title || invoice.invoice_number}`,
+        invoice_type: invoice.invoice_type || "auto",
+        status: "draft",
+        issue_date: today(),
+        due_date: invoice.due_date || addDays(today(), 30),
+        payment_method: invoice.payment_method,
+        discount_mode: invoice.discount_mode,
+        discount_value: invoice.discount_value ?? invoice.discount,
+        vat_percent: invoice.vat_percent,
+        additional_fee: invoice.additional_fee,
+        currency: invoice.currency,
+        items: invoice.items.map((item) => ({ ...item })),
+        notes: invoice.notes,
+        terms: invoice.terms,
+        seller_name: invoice.seller_name,
+        seller_vat_number: invoice.seller_vat_number,
+        seller_address: invoice.seller_address,
+      });
+      const draft = await api.getInvoice(draftId);
+      setInvoiceFormDirty(false);
+      setCreating(false);
+      setEditing(draft);
+      notify("تم إنشاء مسودة تصحيح قابلة للتعديل مع حفظ الفاتورة الأصلية");
+      await refreshAll();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "تعذر إنشاء مسودة التصحيح.", false);
+    }
+  };
+
   const closeInvoiceEditor = useCallback(() => {
     if (invoiceFormDirty && !window.confirm("إغلاق نموذج الفاتورة؟ ستفقد التغييرات غير المحفوظة.")) return;
     setInvoiceFormDirty(false);
@@ -641,11 +896,9 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     }
     try {
       await api.setInvoiceStatus(invoice.id, nextStatus, reason);
-      notify(nextStatus === "paid"
-        ? "تم تأكيد الدفع"
-        : nextStatus === "cancelled" || nextStatus === "refunded"
-          ? "تم إنشاء إشعار دائن مرتبط مع إبقاء الفاتورة الأصلية محفوظة"
-          : "تم تحديث حالة الفاتورة");
+      notify(nextStatus === "cancelled" || nextStatus === "refunded"
+        ? "تم إنشاء إشعار دائن مرتبط مع إبقاء الفاتورة الأصلية محفوظة"
+        : "تم تحديث حالة الفاتورة");
       await refreshAll();
     } catch (err) {
       notify(err instanceof Error ? err.message : "تعذر تحديث الفاتورة", false);
@@ -669,6 +922,54 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       notify("تم نسخ نص الفاتورة");
     } catch {
       notify("تعذر نسخ الفاتورة", false);
+    }
+  };
+
+  const recordInvoicePayment = async (
+    input: {
+      amount: number;
+      method: Exclude<api.InvoicePaymentMethod, "tap">;
+      reference?: string;
+      note?: string;
+      occurred_at?: string;
+    },
+    idempotencyKey: string,
+  ) => {
+    if (!collectingInvoice) throw new Error("الفاتورة المطلوبة غير محددة.");
+    const result = await api.recordInvoicePayment(collectingInvoice.id, input, idempotencyKey);
+    setCollectingInvoice(null);
+    notify(
+      result.invoice.outstanding <= 0
+        ? `تم تحصيل ${money(input.amount, result.invoice.currency)} وسداد الفاتورة بالكامل`
+        : `تم تحصيل ${money(input.amount, result.invoice.currency)}؛ المتبقي ${money(result.invoice.outstanding, result.invoice.currency)}`,
+    );
+    await refreshAll();
+  };
+
+  const reversePayment = async (entry: api.InvoicePaymentEntry) => {
+    const entered = window.prompt(
+      `اكتب سبب عكس تحصيل ${money(entry.amount, entry.currency)} من الفاتورة ${entry.invoice_number}:`,
+      "تصحيح عملية تحصيل مسجلة بالخطأ",
+    );
+    if (entered === null) return;
+    const reason = entered.trim();
+    if (reason.length < 3) {
+      notify("سبب عكس عملية التحصيل مطلوب.", false);
+      return;
+    }
+    const existingKey = reversalIdempotencyKeysRef.current.get(entry.id);
+    const idempotencyKey = existingKey || `invoice-payment-reversal:${entry.id}:${crypto.randomUUID()}`;
+    reversalIdempotencyKeysRef.current.set(entry.id, idempotencyKey);
+    setReversingPaymentId(entry.id);
+    try {
+      await api.reverseInvoicePayment(entry.id, reason, idempotencyKey);
+      notify("تم عكس عملية التحصيل وإضافتها كسطر سالب في السجل");
+      await refreshAll();
+    } catch (error) {
+      reversalIdempotencyKeysRef.current.delete(entry.id);
+      notify(error instanceof Error ? error.message : "تعذر عكس عملية التحصيل.", false);
+    } finally {
+      setReversingPaymentId("");
     }
   };
 
@@ -767,6 +1068,24 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
     }
   };
 
+  const paymentSummary = invoicePayments.data?.summary || {
+    currency: "SAR",
+    balance: 0,
+    collected: 0,
+    reversed: 0,
+    transaction_count: 0,
+    by_method: { cash: 0, card: 0, bank_transfer: 0, tap: 0, other: 0 },
+  };
+  const collectingTotals = collectingInvoice
+    ? invoicePayments.data?.invoice_totals[collectingInvoice.id] || {
+      total: Number(collectingInvoice.total_with_vat || 0),
+      collected: 0,
+      outstanding: Number(collectingInvoice.total_with_vat || 0),
+      currency: collectingInvoice.currency || "SAR",
+    }
+    : null;
+  const totalsForInvoice = (invoice: api.Invoice) => invoicePayments.data?.invoice_totals[invoice.id];
+
   return (
     <div className="quotes-workspace cloud-design">
       <section className="cloud-hero quotes-hero">
@@ -778,8 +1097,8 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
             <button className="btn primary" type="button" onClick={openNewInvoice}>
               <Plus size={16} /> إصدار فاتورة
             </button>
-            <button className="btn muted" type="button" onClick={invoices.refresh}>
-              <RefreshCcw size={16} /> تحديث
+            <button className="btn muted" type="button" onClick={() => void refreshAll()}>
+              <RefreshCcw size={16} aria-hidden="true" /> تحديث الكل
             </button>
           </div>
         </div>
@@ -810,6 +1129,156 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
           </article>
         ))}
       </div>
+
+      <section className="invoice-payment-workspace" aria-labelledby="invoice-cashbox-title">
+        <header className="invoice-payment-head">
+          <div>
+            <span className="eyebrow">تحصيل الفواتير</span>
+            <h2 id="invoice-cashbox-title">صندوق التحصيل وسجل العمليات</h2>
+            <p>الرصيد يجمع عمليات التحصيل المؤكدة فقط، وأي تصحيح يظهر كسطر عكسي مستقل.</p>
+          </div>
+          <button
+            className="btn muted"
+            type="button"
+            disabled={invoicePayments.loading}
+            aria-busy={invoicePayments.loading || undefined}
+            onClick={invoicePayments.refresh}
+          >
+            <RefreshCcw size={16} className={invoicePayments.loading ? "spin" : undefined} aria-hidden="true" />
+            {invoicePayments.loading ? "جاري تحديث الصندوق…" : "تحديث الصندوق"}
+          </button>
+        </header>
+
+        {invoicePayments.error ? (
+          <div className="error-box">
+            <span>{invoicePayments.error}</span>
+            <button className="btn muted" type="button" onClick={invoicePayments.refresh}>إعادة المحاولة</button>
+          </div>
+        ) : (
+          <>
+            <div className="invoice-payment-summary-grid" aria-live="polite">
+              <article className="invoice-payment-summary-card total">
+                <span><WalletCards size={17} aria-hidden="true" /> الرصيد الحالي</span>
+                <strong>{money(paymentSummary.balance, paymentSummary.currency)}</strong>
+                <small>{paymentSummary.transaction_count} عملية في السجل</small>
+              </article>
+              <article className="invoice-payment-summary-card">
+                <span><Banknote size={17} aria-hidden="true" /> كاش</span>
+                <strong>{money(paymentSummary.by_method.cash, paymentSummary.currency)}</strong>
+              </article>
+              <article className="invoice-payment-summary-card">
+                <span><CreditCard size={17} aria-hidden="true" /> بطاقات</span>
+                <strong>{money(paymentSummary.by_method.card, paymentSummary.currency)}</strong>
+              </article>
+              <article className="invoice-payment-summary-card">
+                <span><Landmark size={17} aria-hidden="true" /> تحويل بنكي</span>
+                <strong>{money(paymentSummary.by_method.bank_transfer, paymentSummary.currency)}</strong>
+              </article>
+              <article className="invoice-payment-summary-card">
+                <span><ReceiptText size={17} aria-hidden="true" /> Tap وأخرى</span>
+                <strong>{money(paymentSummary.by_method.tap + paymentSummary.by_method.other, paymentSummary.currency)}</strong>
+              </article>
+            </div>
+
+            {invoicePayments.data?.currencies && invoicePayments.data.currencies.length > 1 && (
+              <div className="invoice-payment-currencies" role="note">
+                <strong>أرصدة العملات منفصلة:</strong>
+                {invoicePayments.data.currencies.map((currency) => (
+                  <span className="badge muted" key={currency.currency}>
+                    {money(currency.balance, currency.currency)}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="invoice-payment-ledger-head">
+              <div>
+                <h3>آخر العمليات</h3>
+                <p>لا تُحذف العمليات المالية؛ عكس الخطأ يحفظ الأثر المحاسبي كاملاً.</p>
+              </div>
+              {paymentSummary.reversed > 0 && (
+                <span className="badge warn">إجمالي المعكوس {money(paymentSummary.reversed, paymentSummary.currency)}</span>
+              )}
+            </div>
+
+            {invoicePayments.loading && !invoicePayments.data ? (
+              <div className="empty">
+                <RefreshCcw size={24} className="spin" aria-hidden="true" />
+                <p>جاري تحميل سجل التحصيل…</p>
+              </div>
+            ) : invoicePayments.data?.data.length ? (
+              <div
+                className="invoice-payment-table-wrap"
+                role="region"
+                aria-label="سجل عمليات تحصيل الفواتير"
+                tabIndex={0}
+              >
+                <table className="invoice-payment-table">
+                  <caption className="sr-only">آخر عمليات تحصيل الفواتير وعكسها</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">التاريخ</th>
+                      <th scope="col">الفاتورة والعميل</th>
+                      <th scope="col">طريقة الدفع</th>
+                      <th scope="col">المرجع</th>
+                      <th scope="col">المبلغ</th>
+                      <th scope="col">الإجراء</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {invoicePayments.data.data.map((entry) => (
+                      <tr key={entry.id}>
+                        <td><time dateTime={entry.occurred_at}>{readablePaymentDate(entry.occurred_at)}</time></td>
+                        <td>
+                          <strong>{entry.invoice_number}</strong>
+                          <small>{entry.customer_name}</small>
+                        </td>
+                        <td>
+                          <span className={`badge ${entry.entry_type === "reversal" ? "warn" : "muted"}`}>
+                            {entry.entry_type === "reversal" ? "عكس" : "تحصيل"} · {paymentMethodLabels[entry.method]}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="invoice-payment-reference">{entry.reference || "—"}</span>
+                          {entry.note && <small title={entry.note}>{entry.note}</small>}
+                        </td>
+                        <td className={entry.signed_amount < 0 ? "negative" : "positive"}>
+                          {entry.signed_amount > 0 ? "+" : "−"}
+                          {money(Math.abs(entry.signed_amount), entry.currency)}
+                        </td>
+                        <td>
+                          {entry.reversible ? (
+                            <button
+                              className="btn danger compact"
+                              type="button"
+                              disabled={reversingPaymentId === entry.id}
+                              aria-busy={reversingPaymentId === entry.id || undefined}
+                              onClick={() => reversePayment(entry)}
+                            >
+                              <Undo2 size={14} aria-hidden="true" />
+                              {reversingPaymentId === entry.id ? "جاري العكس…" : "عكس العملية"}
+                            </button>
+                          ) : (
+                            <span className="invoice-payment-locked">
+                              {entry.source === "tap" ? "يعكس من Tap" : "محفوظ"}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="empty invoice-payment-empty">
+                <ReceiptText size={28} aria-hidden="true" />
+                <p>لا توجد عمليات تحصيل مسجلة بعد.</p>
+                <small>عند تسجيل أول دفعة كاش أو بطاقة أو تحويل ستظهر هنا ويتحدث الرصيد فوراً.</small>
+              </div>
+            )}
+          </>
+        )}
+      </section>
 
       <div className="toolbar quotes-toolbar">
         <Search size={16} />
@@ -866,6 +1335,23 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                   <span className="badge muted"><CalendarDays size={12} /> {invoice.issue_date}</span>
                   {invoice.due_date && <span className="badge warn">مستحق {invoice.due_date}</span>}
                   {invoice.paid_at && <span className="badge success">تم الدفع</span>}
+                  {!invoiceIsCreditNote(invoice) && Number(totalsForInvoice(invoice)?.collected || 0) > 0 && (
+                    <span className="badge success">
+                      محصل {money(totalsForInvoice(invoice)?.collected, totalsForInvoice(invoice)?.currency)}
+                    </span>
+                  )}
+                  {!invoiceIsCreditNote(invoice)
+                    && Number(totalsForInvoice(invoice)?.collected || 0) > 0
+                    && Number(totalsForInvoice(invoice)?.outstanding || 0) > 0 && (
+                    <span className="badge warn">
+                      متبقي {money(totalsForInvoice(invoice)?.outstanding, totalsForInvoice(invoice)?.currency)}
+                    </span>
+                  )}
+                  {!invoiceIsCreditNote(invoice)
+                    && invoice.status === "paid"
+                    && Number(totalsForInvoice(invoice)?.collected || 0) === 0 && (
+                    <span className="badge warn">مدفوعة تاريخياً بلا قيد تحصيل</span>
+                  )}
                   {invoiceIsCreditNote(invoice) && invoice.source_invoice_number && (
                     <span className="badge muted">مرتبط بـ {invoice.source_invoice_number}</span>
                   )}
@@ -879,8 +1365,13 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
               </div>
               <div className="row-actions">
                 {!invoiceIsCreditNote(invoice) && (invoice.status === "issued" || invoice.status === "sent") && (
-                  <button className="icon-btn success" type="button" title="تأكيد الدفع" aria-label="تأكيد الدفع" onClick={() => setInvoiceStatus(invoice, "paid")}>
-                    <CheckCircle2 size={15} />
+                  <button
+                    className="btn success compact invoice-collect-action"
+                    type="button"
+                    onClick={() => setCollectingInvoice(invoice)}
+                  >
+                    <WalletCards size={15} aria-hidden="true" />
+                    تسجيل تحصيل
                   </button>
                 )}
                 {!invoiceIsCreditNote(invoice) && invoice.status === "issued" && (
@@ -901,9 +1392,15 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                     <Copy size={15} />
                   </button>
                 )}
-                {invoiceIsMutableDraft(invoice) && (
-                  <button className="icon-btn" type="button" title="تعديل المسودة" aria-label="تعديل مسودة الفاتورة" onClick={() => openInvoiceEditor(invoice)}>
-                    <Edit3 size={15} />
+                {invoiceIsMutableDraft(invoice) ? (
+                  <button className="btn muted compact" type="button" onClick={() => openInvoiceEditor(invoice)}>
+                    <Edit3 size={15} aria-hidden="true" />
+                    تعديل المسودة
+                  </button>
+                ) : !invoiceIsCreditNote(invoice) && (
+                  <button className="btn muted compact" type="button" onClick={() => createCorrectionDraft(invoice)}>
+                    <Edit3 size={15} aria-hidden="true" />
+                    نسخ للتصحيح
                   </button>
                 )}
                 {invoice.customer_phone && invoice.status !== "draft" && (
@@ -983,6 +1480,14 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
             onSave={saveInvoice}
           />
         </InvoiceModal>
+      )}
+      {collectingInvoice && collectingTotals && (
+        <InvoicePaymentModal
+          invoice={collectingInvoice}
+          totals={collectingTotals}
+          onClose={() => setCollectingInvoice(null)}
+          onRecord={recordInvoicePayment}
+        />
       )}
       {preview && (
         <InvoiceModal title={`معاينة ${preview.invoice_number}`} onClose={() => setPreview(null)}>

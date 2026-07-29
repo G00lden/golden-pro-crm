@@ -641,3 +641,13 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Adversarial coverage includes malformed/empty model output, timeouts, HTTP errors, rate limits, untrusted fields, low confidence, cross-customer/cross-owner order access, exact-order extraction, duplicate handoffs, department assignment, and active-session AI bypass.
 - Live DeepSeek activation is intentionally blocked until the key exposed in the user-provided image is revoked and a replacement is stored directly in the production environment. No exposed credential was used or saved.
 - Arabic architecture, activation, canary, and rollback guide: `docs/whatsapp-deepseek-assistant-ar.md`.
+## 2026-07-29 - Invoice collection cashbox and payment ledger 1.9.6 [Codex]
+
+- Replaced the invoices UI's status-only payment confirmation with a tenant-scoped, immutable collection ledger using exact minor units.
+- Added cash, card, bank transfer, other, and automatic Tap collection balances; `85 SAR + 100 SAR` now produces a `185 SAR` cash balance with two auditable entries.
+- Added partial collections, outstanding amounts, overpayment rejection, idempotency, append-only reversals, and automatic paid/reopened invoice transitions.
+- Added automatic exactly-once Tap collection and provider-refund reversal synchronization.
+- Added a responsive Arabic cashbox and transaction table, with explicit collection and reversal actions.
+- Kept drafts directly editable and added an issued-invoice correction-copy workflow that preserves the original tax document.
+- Advanced SQLite schema to `10906`, added a restricted Supabase mirror, and bumped the release to `1.9.6`.
+- Added backend, schema, UI contract, tenant isolation, duplicate-request, partial-payment, reversal, Tap refund, and credit-note guard tests.

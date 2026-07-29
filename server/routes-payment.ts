@@ -5,6 +5,11 @@ import db from "./db";
 import type { AuthedRequest } from "./auth";
 import { logError, logEvent } from "./logger";
 import { captureCrmStageAttribution } from "./tiktokAttribution";
+import {
+  invoiceOutstandingAmount,
+  syncCancelledTapPayment,
+  syncCompletedTapPayment,
+} from "./invoicePaymentLedger";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -296,6 +301,10 @@ function reservePayment(invoiceId: string, ownerUid: string, requestedKey: strin
   const reserve = db.transaction(() => {
     const invoice = getInvoiceById(invoiceId, ownerUid);
     assertInvoicePayable(invoice);
+    const outstandingAmount = invoiceOutstandingAmount(ownerUid, invoiceId);
+    if (!(outstandingAmount > 0)) {
+      throw paymentError(409, "الفاتورة مسددة بالكامل بالفعل.");
+    }
     let payment = getPaymentByIdempotency(ownerUid, requestedKey);
     if (payment && payment.invoice_id !== invoiceId) {
       throw paymentError(409, "مفتاح منع التكرار مستخدم لعملية دفع أخرى.");
@@ -337,7 +346,7 @@ function reservePayment(invoiceId: string, ownerUid: string, requestedKey: strin
         requestedKey,
         leaseToken,
         expiresAt,
-        Math.round(Number(invoice!.total_with_vat) * 100) / 100,
+        outstandingAmount,
         invoice!.currency || "SAR",
         now,
         now,
@@ -550,10 +559,13 @@ function finalizeReservedPayment(
     if (!payment) throw new Error("Payment disappeared while finalizing the Tap charge.");
     if (updated.changes !== 1) throw paymentError(409, "انتهى حجز الدفع قبل تثبيت نتيجة Tap.");
     if (payment.status === "completed") {
+      syncCompletedTapPayment(payment);
       const invoice = getInvoiceById(payment.invoice_id, payment.owner_uid);
       if (invoice?.status !== "paid" && !markInvoicePaid(payment.invoice_id)) {
         logError("payment.invoice_paid_transition_failed", null, { paymentId, invoiceId: payment.invoice_id });
       }
+    } else if (payment.status === "cancelled") {
+      syncCancelledTapPayment(payment);
     }
     return payment;
   })();
@@ -722,6 +734,7 @@ function applyTapChargePayload(
     const updated = getPaymentById(payment.id);
     if (!updated) throw new Error("Payment disappeared while applying the Tap charge.");
     if (updated.status === "completed") {
+      syncCompletedTapPayment(updated);
       const invoice = getInvoiceById(updated.invoice_id, updated.owner_uid);
       if (invoice?.status !== "paid" && !markInvoicePaid(updated.invoice_id)) {
         logError("payment.invoice_paid_transition_failed", null, {
@@ -729,6 +742,8 @@ function applyTapChargePayload(
           invoiceId: updated.invoice_id,
         });
       }
+    } else if (updated.status === "cancelled") {
+      syncCancelledTapPayment(updated);
     }
     return getPaymentById(updated.id) || updated;
   })();
