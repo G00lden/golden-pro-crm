@@ -30,7 +30,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10905/);
+    assert.match(result.stdout, /"userVersion":10906/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -52,7 +52,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10905/);
+    assert.match(backups[0], /pre-schema-10906/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -62,10 +62,10 @@ test("a previous 10307 deployment upgrades through a new backup and ledger marke
   const { directory, result } = runCase("previous-10307", true);
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10905/);
+    assert.match(result.stdout, /"userVersion":10906/);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10905/);
+    assert.match(backups[0], /pre-schema-10906/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -157,6 +157,29 @@ test("the Supabase migration preserves invoice additional fees", () => {
   ]) {
     assert.match(migration, new RegExp(required));
   }
+});
+
+test("the Supabase invoice payment ledger is tenant-scoped and immutable", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260729220000_invoice_payment_ledger.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "create table if not exists public.invoice_payment_entries",
+    "amount_minor bigint not null",
+    "entry_type in ('collection', 'reversal')",
+    "method in ('cash', 'card', 'bank_transfer', 'tap', 'other')",
+    "foreign key (owner_uid, invoice_id)",
+    "idx_invoice_payment_entries_idempotency",
+    "idx_invoice_payment_entries_one_reversal",
+    "INVOICE_PAYMENT_ENTRY_IMMUTABLE",
+    "enable row level security",
+    "invoice_payment_entries_owner_select",
+    "grant select, insert on table public.invoice_payment_entries to service_role",
+  ]) {
+    assert.match(migration, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  }
+  assert.doesNotMatch(migration, /grant\s+(?:all|update|delete)[\s\S]*?invoice_payment_entries\s+to\s+authenticated/i);
 });
 
 test("the Supabase invoice migration declares conservative line guards and no timestamp assignments", () => {

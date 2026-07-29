@@ -1095,6 +1095,64 @@ export type InvoiceListResponse = {
   stats: InvoiceStats;
 };
 
+export type InvoicePaymentMethod = "cash" | "card" | "bank_transfer" | "tap" | "other";
+
+export type InvoicePaymentEntry = {
+  id: string;
+  invoice_id: string;
+  invoice_number: string;
+  customer_name: string;
+  entry_type: "collection" | "reversal";
+  method: InvoicePaymentMethod;
+  amount: number;
+  signed_amount: number;
+  currency: string;
+  reference: string;
+  note: string;
+  source: "manual" | "tap";
+  reverses_entry_id?: string | null;
+  reversible: boolean;
+  recorded_by: string;
+  occurred_at: string;
+  created_at: string;
+  idempotency_key?: string;
+};
+
+export type InvoicePaymentSummary = {
+  currency: string;
+  balance: number;
+  collected: number;
+  reversed: number;
+  transaction_count: number;
+  by_method: Record<InvoicePaymentMethod, number>;
+};
+
+export type InvoicePaymentOverview = {
+  data: InvoicePaymentEntry[];
+  summary: InvoicePaymentSummary;
+  currencies: InvoicePaymentSummary[];
+  invoice_totals: Record<string, {
+    total: number;
+    collected: number;
+    outstanding: number;
+    currency: string;
+  }>;
+};
+
+export type InvoicePaymentResult = {
+  entry: InvoicePaymentEntry | null;
+  invoice: {
+    id: string;
+    status: InvoiceStatus;
+    paid_at?: string | null;
+    total: number;
+    collected: number;
+    outstanding: number;
+    currency: string;
+  };
+  idempotent_replay: boolean;
+};
+
 const nowIso = () => new Date().toISOString();
 const today = () => new Date().toLocaleDateString("en-CA");
 const tomorrow = () => {
@@ -1129,6 +1187,7 @@ type LocalDb = {
   reminders: Reminder[];
   quotes: Quote[];
   invoices: Invoice[];
+  invoicePayments: InvoicePaymentEntry[];
   sequences: { tax_documents: number };
   settings: Settings;
 };
@@ -1166,6 +1225,7 @@ function emptyLocalDb(): LocalDb {
     reminders: [],
     quotes: [],
     invoices: [],
+    invoicePayments: [],
     sequences: { tax_documents: 0 },
     settings: defaultSettings(),
   };
@@ -1185,16 +1245,21 @@ function loadLocalDb(uid: string): LocalDb {
 
   if (raw.invoices !== undefined && !Array.isArray(raw.invoices)) legacyCorrupt = true;
   let invoices = Array.isArray(raw.invoices) ? raw.invoices : [];
+  let invoicePayments = Array.isArray(raw.invoicePayments) ? raw.invoicePayments : [];
   let storedSequence = Number(raw.sequences?.tax_documents || 0);
   const ledgerText = window.localStorage.getItem(localInvoiceLedgerKey(uid));
   if (ledgerText !== null) {
     try {
-      const ledger = JSON.parse(ledgerText) as Pick<LocalDb, "invoices" | "sequences">;
+      const ledger = JSON.parse(ledgerText) as Pick<LocalDb, "invoices" | "invoicePayments" | "sequences">;
       if (!Array.isArray(ledger.invoices)) throw new Error("missing invoices");
+      if (ledger.invoicePayments !== undefined && !Array.isArray(ledger.invoicePayments)) {
+        throw new Error("invalid invoice payments");
+      }
       if (!Number.isSafeInteger(Number(ledger.sequences?.tax_documents)) || Number(ledger.sequences.tax_documents) < 0) {
         throw new Error("invalid sequence");
       }
       invoices = ledger.invoices;
+      invoicePayments = ledger.invoicePayments || [];
       storedSequence = Number(ledger.sequences.tax_documents);
     } catch {
       throw new Error("تعذر قراءة سجل الفواتير المحلي المحمي؛ أُوقفت الكتابة حتى لا يعاد استخدام رقم ضريبي.");
@@ -1224,6 +1289,7 @@ function loadLocalDb(uid: string): LocalDb {
     reminders: raw.reminders || [],
     quotes: raw.quotes || [],
     invoices,
+    invoicePayments,
     sequences: { tax_documents: taxDocumentSequence },
     settings: { ...defaultSettings(), ...(raw.settings || {}) },
   };
@@ -1254,6 +1320,7 @@ function saveLocalDb(uid: string, data: LocalDb) {
 function saveLocalInvoiceLedger(uid: string, data: LocalDb) {
   window.localStorage.setItem(localInvoiceLedgerKey(uid), JSON.stringify({
     invoices: data.invoices,
+    invoicePayments: data.invoicePayments,
     sequences: data.sequences,
   }));
 }
@@ -2596,6 +2663,7 @@ function filterInvoices(invoices: Invoice[], filter: { search?: string; status?:
 
 function invoiceStats(invoices: Invoice[]): InvoiceStats {
   const sourceInvoices = invoices.filter((item) => !invoiceIsCreditNote(item));
+  const postedDocuments = invoices.filter((item) => item.status !== "draft");
   return {
     total: invoices.length,
     credit_notes: invoices.length - sourceInvoices.length,
@@ -2605,7 +2673,7 @@ function invoiceStats(invoices: Invoice[]): InvoiceStats {
     paid: sourceInvoices.filter((item) => item.status === "paid").length,
     cancelled: sourceInvoices.filter((item) => item.status === "cancelled").length,
     refunded: sourceInvoices.filter((item) => item.status === "refunded").length,
-    total_value: invoices.reduce((sum, item) => sum + invoiceLedgerSign(item) * Number(item.total_with_vat || 0), 0),
+    total_value: postedDocuments.reduce((sum, item) => sum + invoiceLedgerSign(item) * Number(item.total_with_vat || 0), 0),
     paid_value: sourceInvoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
   };
 }
@@ -2684,6 +2752,16 @@ export const getInvoices = async (filter: { search?: string; status?: string } =
   if (filter.status && filter.status !== "all") params.set("status", filter.status);
   const response = await apiFetch<InvoiceListResponse>(`/api/invoices${params.toString() ? `?${params}` : ""}`);
   return { ...response, data: response.data.map(normalizeInvoiceRecord) };
+};
+
+export const getInvoice = async (id: string): Promise<Invoice> => {
+  const user = getUserOrThrow();
+  if (user.local) {
+    const invoice = loadLocalDb(user.uid).invoices.find((item) => item.id === id);
+    if (!invoice) throw new Error("الفاتورة غير موجودة.");
+    return normalizeInvoiceRecord(invoice);
+  }
+  return apiFetch<Invoice>(`/api/invoices/${encodeURIComponent(id)}`).then(normalizeInvoiceRecord);
 };
 
 export const createInvoice = async (data: InvoiceInput) => {
@@ -5367,6 +5445,267 @@ export const createPayment = async (
       "Content-Type": "application/json",
       "Idempotency-Key": idempotencyKey,
     },
+  });
+};
+
+function localInvoicePaymentOverview(data: LocalDb, limit = 50): InvoicePaymentOverview {
+  const reversedIds = new Set(
+    data.invoicePayments
+      .filter((entry) => entry.entry_type === "reversal" && entry.reverses_entry_id)
+      .map((entry) => String(entry.reverses_entry_id)),
+  );
+  const invoicesById = new Map(data.invoices.map((invoice) => [invoice.id, invoice]));
+  const entries = data.invoicePayments
+    .map((entry) => {
+      const invoice = invoicesById.get(entry.invoice_id);
+      return {
+        ...entry,
+        invoice_number: invoice?.invoice_number || entry.invoice_number || "",
+        customer_name: invoice?.customer_name || entry.customer_name || "",
+        reversible: entry.entry_type === "collection"
+          && entry.source !== "tap"
+          && !reversedIds.has(entry.id),
+      };
+    })
+    .sort((left, right) =>
+      String(right.occurred_at || right.created_at).localeCompare(String(left.occurred_at || left.created_at))
+    );
+  const currencyMap = new Map<string, InvoicePaymentSummary>();
+  for (const entry of entries) {
+    const currency = String(entry.currency || "SAR").toUpperCase();
+    const summary = currencyMap.get(currency) || {
+      currency,
+      balance: 0,
+      collected: 0,
+      reversed: 0,
+      transaction_count: 0,
+      by_method: { cash: 0, card: 0, bank_transfer: 0, tap: 0, other: 0 },
+    };
+    summary.balance += Number(entry.signed_amount || 0);
+    summary.collected += entry.entry_type === "collection" ? Number(entry.amount || 0) : 0;
+    summary.reversed += entry.entry_type === "reversal" ? Number(entry.amount || 0) : 0;
+    summary.transaction_count += 1;
+    summary.by_method[entry.method] += Number(entry.signed_amount || 0);
+    currencyMap.set(currency, summary);
+  }
+  const invoice_totals = Object.fromEntries(
+    data.invoices
+      .filter((invoice) => !invoiceIsCreditNote(invoice))
+      .map((invoice) => {
+        const collected = entries
+          .filter((entry) => entry.invoice_id === invoice.id)
+          .reduce((sum, entry) => sum + Number(entry.signed_amount || 0), 0);
+        const total = Number(invoice.total_with_vat || 0);
+        return [invoice.id, {
+          total,
+          collected: Math.max(0, collected),
+          outstanding: Math.max(0, total - collected),
+          currency: invoice.currency || "SAR",
+        }];
+      }),
+  );
+  const currencies = [...currencyMap.values()].sort((left, right) =>
+    left.currency === "SAR" ? -1 : right.currency === "SAR" ? 1 : left.currency.localeCompare(right.currency)
+  );
+  return {
+    data: entries.slice(0, Math.min(200, Math.max(1, limit))),
+    summary: currencies.find((item) => item.currency === "SAR") || {
+      currency: "SAR",
+      balance: 0,
+      collected: 0,
+      reversed: 0,
+      transaction_count: 0,
+      by_method: { cash: 0, card: 0, bank_transfer: 0, tap: 0, other: 0 },
+    },
+    currencies,
+    invoice_totals,
+  };
+}
+
+export const getInvoicePaymentOverview = async (limit = 50): Promise<InvoicePaymentOverview> => {
+  const user = getUserOrThrow();
+  if (user.local) return localInvoicePaymentOverview(loadLocalDb(user.uid), limit);
+  return apiFetch<InvoicePaymentOverview>(`/api/invoice-payments?limit=${Math.min(200, Math.max(1, limit))}`);
+};
+
+export const recordInvoicePayment = async (
+  invoiceId: string,
+  input: {
+    amount: number;
+    method: Exclude<InvoicePaymentMethod, "tap">;
+    reference?: string;
+    note?: string;
+    occurred_at?: string;
+  },
+  idempotencyKey = `invoice-payment:${invoiceId}:${crypto.randomUUID()}`,
+): Promise<InvoicePaymentResult> => {
+  const user = getUserOrThrow();
+  if (user.local) {
+    return withLocalInvoiceLedgerLock(user.uid, (localDb) => {
+      const amountMinor = Math.round(Number(input.amount) * 100);
+      if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0 || Math.abs(Number(input.amount) * 100 - amountMinor) > 0.000_001) {
+        throw new Error("مبلغ الدفعة يجب أن يكون أكبر من صفر وبمنزلتين عشريتين كحد أقصى.");
+      }
+      const existingEntry = localDb.invoicePayments.find((entry) => entry.idempotency_key === idempotencyKey);
+      if (existingEntry) {
+        if (
+          existingEntry.invoice_id !== invoiceId
+          || Math.round(existingEntry.amount * 100) !== amountMinor
+          || existingEntry.method !== input.method
+        ) {
+          throw new Error("مفتاح منع التكرار مستخدم لعملية مختلفة.");
+        }
+        const overview = localInvoicePaymentOverview(localDb);
+        const invoiceTotal = overview.invoice_totals[invoiceId];
+        const invoice = localDb.invoices.find((item) => item.id === invoiceId)!;
+        return {
+          entry: overview.data.find((entry) => entry.id === existingEntry.id) || existingEntry,
+          invoice: {
+            id: invoice.id,
+            status: invoice.status,
+            paid_at: invoice.paid_at,
+            ...invoiceTotal,
+          },
+          idempotent_replay: true,
+        };
+      }
+      const invoice = localDb.invoices.find((item) => item.id === invoiceId);
+      if (!invoice) throw new Error("الفاتورة غير موجودة.");
+      if (invoiceIsCreditNote(invoice) || invoiceIsMutableDraft(invoice)) {
+        throw new Error("لا يمكن تسجيل دفعة لمسودة أو إشعار دائن.");
+      }
+      if (invoice.status === "cancelled" || invoice.status === "refunded") {
+        throw new Error("لا يمكن تسجيل دفعة لفاتورة ملغية أو مستردة.");
+      }
+      const overviewBefore = localInvoicePaymentOverview(localDb);
+      const totalsBefore = overviewBefore.invoice_totals[invoiceId] || {
+        total: Number(invoice.total_with_vat || 0),
+        collected: 0,
+        outstanding: Number(invoice.total_with_vat || 0),
+        currency: invoice.currency || "SAR",
+      };
+      if (input.amount > totalsBefore.outstanding + 0.000_001) {
+        const formattedOutstanding = new Intl.NumberFormat("ar-SA", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }).format(totalsBefore.outstanding);
+        throw new Error(`المبلغ أكبر من المتبقي على الفاتورة (${formattedOutstanding} ${totalsBefore.currency}).`);
+      }
+      const now = nowIso();
+      const entry: InvoicePaymentEntry = {
+        id: localId("ip"),
+        invoice_id: invoice.id,
+        invoice_number: invoice.invoice_number,
+        customer_name: invoice.customer_name,
+        entry_type: "collection",
+        method: input.method,
+        amount: amountMinor / 100,
+        signed_amount: amountMinor / 100,
+        currency: invoice.currency || "SAR",
+        reference: String(input.reference || "").trim(),
+        note: String(input.note || "").trim(),
+        source: "manual",
+        reverses_entry_id: null,
+        reversible: true,
+        recorded_by: user.uid,
+        occurred_at: input.occurred_at || now,
+        created_at: now,
+        idempotency_key: idempotencyKey,
+      };
+      localDb.invoicePayments.unshift(entry);
+      const collected = totalsBefore.collected + entry.amount;
+      if (collected + 0.000_001 >= totalsBefore.total && (invoice.status === "issued" || invoice.status === "sent")) {
+        invoice.status = "paid";
+        invoice.paid_at = invoice.paid_at || now;
+        invoice.updatedAt = now;
+      }
+      return {
+        entry,
+        invoice: {
+          id: invoice.id,
+          status: invoice.status,
+          paid_at: invoice.paid_at,
+          total: totalsBefore.total,
+          collected,
+          outstanding: Math.max(0, totalsBefore.total - collected),
+          currency: totalsBefore.currency,
+        },
+        idempotent_replay: false,
+      };
+    });
+  }
+  return apiFetch<InvoicePaymentResult>(`/api/invoices/${encodeURIComponent(invoiceId)}/payments`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(input),
+  });
+};
+
+export const reverseInvoicePayment = async (
+  entryId: string,
+  reason: string,
+  idempotencyKey = `invoice-payment-reversal:${entryId}:${crypto.randomUUID()}`,
+): Promise<InvoicePaymentResult> => {
+  const user = getUserOrThrow();
+  if (user.local) {
+    return withLocalInvoiceLedgerLock(user.uid, (localDb) => {
+      const replay = localDb.invoicePayments.find((entry) => entry.idempotency_key === idempotencyKey);
+      if (replay) {
+        if (replay.entry_type !== "reversal" || replay.reverses_entry_id !== entryId) {
+          throw new Error("مفتاح منع التكرار مستخدم لعملية مختلفة.");
+        }
+        const invoice = localDb.invoices.find((item) => item.id === replay.invoice_id)!;
+        const totals = localInvoicePaymentOverview(localDb).invoice_totals[invoice.id];
+        return {
+          entry: replay,
+          invoice: { id: invoice.id, status: invoice.status, paid_at: invoice.paid_at, ...totals },
+          idempotent_replay: true,
+        };
+      }
+      const original = localDb.invoicePayments.find((entry) => entry.id === entryId);
+      if (!original) throw new Error("عملية التحصيل غير موجودة.");
+      if (!original.reversible || original.source === "tap" || original.entry_type !== "collection") {
+        throw new Error("لا يمكن عكس هذه العملية يدوياً.");
+      }
+      if (localDb.invoicePayments.some((entry) => entry.reverses_entry_id === original.id)) {
+        throw new Error("تم عكس عملية التحصيل مسبقاً.");
+      }
+      const reasonText = reason.trim();
+      if (reasonText.length < 3) throw new Error("سبب عكس العملية مطلوب.");
+      const now = nowIso();
+      const reversal: InvoicePaymentEntry = {
+        ...original,
+        id: localId("ipr"),
+        entry_type: "reversal",
+        signed_amount: -original.amount,
+        note: reasonText,
+        reverses_entry_id: original.id,
+        reversible: false,
+        recorded_by: user.uid,
+        occurred_at: now,
+        created_at: now,
+        idempotency_key: idempotencyKey,
+      };
+      localDb.invoicePayments.unshift(reversal);
+      const invoice = localDb.invoices.find((item) => item.id === original.invoice_id);
+      if (!invoice) throw new Error("الفاتورة المرتبطة بالعملية غير موجودة.");
+      const totals = localInvoicePaymentOverview(localDb).invoice_totals[invoice.id];
+      if (invoice.status === "paid" && totals.collected + 0.000_001 < totals.total) {
+        invoice.status = "issued";
+        invoice.paid_at = null;
+        invoice.updatedAt = now;
+      }
+      return {
+        entry: reversal,
+        invoice: { id: invoice.id, status: invoice.status, paid_at: invoice.paid_at, ...totals },
+        idempotent_replay: false,
+      };
+    });
+  }
+  return apiFetch<InvoicePaymentResult>(`/api/invoice-payments/${encodeURIComponent(entryId)}/reverse`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ reason }),
   });
 };
 

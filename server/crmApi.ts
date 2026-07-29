@@ -69,6 +69,12 @@ import { compareAndSetDocument } from "./atomicDocumentUpdate";
 import { captureCrmStageAttribution } from "./tiktokAttribution";
 import { logError } from "./logger";
 import {
+  invoicePaymentStoreSupported,
+  recordRemainingInvoiceCollection,
+  reverseManualCollectionsForInvoiceCorrection,
+  type InvoicePaymentMethod,
+} from "./invoicePaymentLedger";
+import {
   canApplyCorrection,
   canApplyOperationalInvoiceStatus,
   correctionKindForStatus,
@@ -1728,6 +1734,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       if (!search) return true;
       return `${item.invoice_number || ""} ${item.source_invoice_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""}`.includes(search);
     });
+    const postedDocuments = all.filter((item) => item.status !== "draft");
     const stats = {
       total: all.length,
       credit_notes: all.length - sourceInvoices.length,
@@ -1737,7 +1744,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       paid: sourceInvoices.filter((item) => item.status === "paid").length,
       cancelled: sourceInvoices.filter((item) => item.status === "cancelled").length,
       refunded: sourceInvoices.filter((item) => item.status === "refunded").length,
-      total_value: all.reduce((sum, item) => sum + invoiceLedgerSign(item) * Number(item.total_with_vat || 0), 0),
+      total_value: postedDocuments.reduce((sum, item) => sum + invoiceLedgerSign(item) * Number(item.total_with_vat || 0), 0),
       paid_value: sourceInvoices.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.total_with_vat || 0), 0),
     };
     res.json({ data, total: data.length, stats });
@@ -1956,6 +1963,15 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
         res.status(400).json({ error: "سبب الإلغاء أو الاسترداد مطلوب لإنشاء الإشعار الدائن." });
         return;
       }
+      if (invoicePaymentStoreSupported() && canApplyCorrection(currentInvoice, correctionKind)) {
+        reverseManualCollectionsForInvoiceCorrection({
+          ownerUid: uid,
+          invoiceId: req.params.id,
+          reason,
+          correctionKind,
+          recordedBy: uid,
+        });
+      }
       const creditNote = await createFullInvoiceCreditNote(uid, currentInvoice, correctionKind, reason);
       const invoice = await getInvoiceLedgerRecord(uid, req.params.id);
       res.json({ invoice, credit_note: creditNote });
@@ -1965,6 +1981,31 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
     const effectiveInvoice = await getInvoiceLedgerRecord(uid, req.params.id);
     if (effectiveInvoice && (effectiveInvoice.status === "cancelled" || effectiveInvoice.status === "refunded")) {
       res.status(409).json({ error: "الفاتورة مرتبطة بإشعار دائن كامل ولا يمكن تغيير حالتها التشغيلية." });
+      return;
+    }
+
+    if (status === "paid" && invoicePaymentStoreSupported()) {
+      const requestedMethod = String(req.body?.payment_method || "").trim();
+      const paymentMethod: Exclude<InvoicePaymentMethod, "tap"> = (
+        ["cash", "card", "bank_transfer", "other"].includes(requestedMethod)
+          ? requestedMethod
+          : "other"
+      ) as Exclude<InvoicePaymentMethod, "tap">;
+      const suppliedIdempotencyKey = String(req.get("Idempotency-Key") || "").trim();
+      const payment = recordRemainingInvoiceCollection({
+        ownerUid: uid,
+        invoiceId: req.params.id,
+        method: paymentMethod,
+        reference: String(req.body?.payment_reference || "").trim(),
+        note: String(req.body?.payment_note || "").trim(),
+        idempotencyKey: suppliedIdempotencyKey || `invoice-paid:${req.params.id}:${crypto.randomUUID()}`,
+        recordedBy: uid,
+      });
+      res.json({
+        invoice: await getInvoiceLedgerRecord(uid, req.params.id),
+        payment_entry: payment.entry,
+        payment,
+      });
       return;
     }
 

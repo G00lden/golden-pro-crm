@@ -7,6 +7,7 @@ import { TIKTOK_ATTRIBUTION_SCHEMA_SQL } from "./tiktokAttributionStorage";
 import { WHATSAPP_COMMERCE_SCHEMA_SQL } from "./whatsappCommerceStorage";
 import { SALLA_CART_CONCIERGE_SCHEMA_SQL } from "./sallaCartConciergeStorage";
 import { DELIVERY_REVIEW_SCHEMA_SQL } from "./deliveryReviewStorage";
+import { INVOICE_PAYMENT_LEDGER_SCHEMA_SQL } from "./invoicePaymentStorage";
 import { calculateDocumentTotals, normalizeVatPercent, type DiscountMode } from "../shared/financial";
 import { verifiableInvoiceItems } from "../shared/invoiceItems";
 
@@ -14,7 +15,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10905;
+const TARGET_SCHEMA_VERSION = 10906;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -1330,6 +1331,7 @@ db.exec(TIKTOK_ATTRIBUTION_SCHEMA_SQL);
 db.exec(WHATSAPP_COMMERCE_SCHEMA_SQL);
 db.exec(SALLA_CART_CONCIERGE_SCHEMA_SQL);
 db.exec(DELIVERY_REVIEW_SCHEMA_SQL);
+db.exec(INVOICE_PAYMENT_LEDGER_SCHEMA_SQL);
 
 for (const [table, columns] of [
   ["customers", [["address", "TEXT DEFAULT ''"], ["customer_address", "TEXT DEFAULT ''"]]],
@@ -1950,12 +1952,25 @@ db.transaction(() => {
   DROP TRIGGER IF EXISTS invoices_prevent_credit_during_payment;
   CREATE TRIGGER invoices_prevent_credit_during_payment
   BEFORE INSERT ON invoices
-  WHEN NEW.document_kind = 'credit_note' AND EXISTS (
-    SELECT 1
-    FROM payments payment
-    WHERE payment.owner_uid = NEW.owner_uid
-      AND payment.invoice_id = NEW.source_invoice_id
-      AND payment.status IN ('creating', 'pending', 'completed')
+  WHEN NEW.document_kind = 'credit_note' AND (
+    EXISTS (
+      SELECT 1
+      FROM payments payment
+      WHERE payment.owner_uid = NEW.owner_uid
+        AND payment.invoice_id = NEW.source_invoice_id
+        AND payment.status IN ('creating', 'pending', 'completed')
+    )
+    OR COALESCE((
+      SELECT SUM(
+        CASE
+          WHEN entry.entry_type = 'collection' THEN entry.amount_minor
+          ELSE -entry.amount_minor
+        END
+      )
+      FROM invoice_payment_entries entry
+      WHERE entry.owner_uid = NEW.owner_uid
+        AND entry.invoice_id = NEW.source_invoice_id
+    ), 0) > 0
   )
   BEGIN
     SELECT RAISE(ABORT, 'INVOICE_PAYMENT_REQUIRES_PROVIDER_RESOLUTION');
@@ -2055,6 +2070,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10903, '1.9.3-salla-order-dispatch');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10904, '1.9.4-whatsapp-bulk-reminders');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10905, '1.9.5-whatsapp-deepseek-assistant');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10906, '1.9.6-invoice-payment-ledger');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
