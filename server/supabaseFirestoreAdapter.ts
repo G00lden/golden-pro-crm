@@ -1,3 +1,8 @@
+import type {
+  MaintenanceAtomicMutation,
+  MaintenanceMutationResult,
+} from "./maintenanceRequestAtomic";
+
 type FilterOp = "==" | "<=" | ">=" | "<" | ">";
 
 type Filter = {
@@ -28,6 +33,8 @@ const collectionPrefixes: Record<string, string> = {
   fieldtech_events: "ftev",
   fieldtech_job_states: "ftjs",
   fieldtech_technician_locations: "ftloc",
+  maintenance_requests: "mreq",
+  maintenance_request_events: "mrev",
 };
 
 const primaryKeyByTable: Record<string, string> = {
@@ -255,6 +262,38 @@ async function allocateCounter(ownerUid: string, namespace: string, minimumNext 
     throw new Error("Supabase returned an invalid counter allocation.");
   }
   return value;
+}
+
+async function applyMaintenanceMutation(input: MaintenanceAtomicMutation): Promise<MaintenanceMutationResult> {
+  const raw = await request<unknown>("rpc/apply_maintenance_request_mutation", new URLSearchParams(), {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      p_request_id: input.requestId,
+      p_owner_uid: input.ownerUid,
+      p_expected_status: input.expectedStatus,
+      p_request_patch: toDbRecord(input.requestPatch, "maintenance_requests"),
+      p_event_id: input.eventId,
+      p_event: toDbRecord(input.event, "maintenance_request_events"),
+      p_booking_id: input.booking?.id || null,
+      p_booking: input.booking ? toDbRecord(input.booking.data, "bookings") : null,
+      p_capacity: input.capacity ? {
+        technician_id: input.capacity.technicianId,
+        date: input.capacity.date,
+        scheduled_time: input.capacity.scheduledTime,
+        max_daily: input.capacity.maxDaily,
+        exclude_booking_id: input.capacity.excludeBookingId,
+      } : null,
+    }),
+  });
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const status = typeof value === "string"
+    ? value
+    : String((value as { status?: unknown } | null)?.status || "");
+  if (["applied", "request_not_found", "request_conflict", "booking_owner_conflict", "booking_time_conflict", "booking_capacity_exceeded"].includes(status)) {
+    return status as MaintenanceMutationResult;
+  }
+  throw new Error("Supabase returned an invalid maintenance mutation result.");
 }
 
 class SupabaseDocSnapshot {
@@ -492,6 +531,7 @@ class SupabaseWriteBatch {
 
 export function createSupabaseFirestoreAdapter() {
   return {
+    applyMaintenanceMutation,
     configured,
     allocateCounter,
     collection(table: string) {

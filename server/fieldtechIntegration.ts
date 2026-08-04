@@ -4,6 +4,11 @@ import type { AuthedRequest } from "./auth";
 import { completeBooking } from "./bookingLifecycle";
 import { adminDb } from "./firebaseAdmin";
 import { logError, logEvent } from "./logger";
+import { syncMaintenanceRequestFromBooking } from "./maintenanceRequestService";
+import {
+  completionEvidencePatch,
+  validateFieldTechCompletionEvidence,
+} from "./fieldtechEvidence";
 
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
 const MAX_SNAPSHOT_ROWS = 1_000;
@@ -295,20 +300,34 @@ async function processJobStatusEvent(event: Record<string, any>, ownerUid: strin
     throw Object.assign(new Error("Booking technician does not match the event."), { status: 409 });
   }
 
-  if (status === "complete" && booking.status !== "completed") {
-    await completeBooking(bookingId, ownerUid);
-  }
-
   const now = new Date().toISOString();
+  const evidence = status === "complete"
+    ? validateFieldTechCompletionEvidence(booking, event.evidence)
+    : null;
   await adminDb.collection("fieldtech_job_states").doc(bookingId).set({
     createdBy: ownerUid,
     booking_id: bookingId,
     technician_id: technicianId,
     app_status: status,
     completion_note: String(event.completionNote || "").slice(0, 2_000),
+    ...(evidence ? completionEvidencePatch(evidence) : {}),
     occurred_at: String(event.occurredAt || now),
     updatedAt: now,
   }, { merge: true });
+  const syncedRequest = await syncMaintenanceRequestFromBooking(
+    bookingId,
+    ownerUid,
+    status as "scheduled" | "progress" | "complete" | "cancelled",
+    String(event.completionNote || "").slice(0, 2_000) || undefined,
+  );
+  if (status === "complete" && booking.status !== "completed") {
+    await completeBooking(bookingId, ownerUid, {
+      syncMaintenance: false,
+      skipBookingWrite: Boolean(syncedRequest),
+    });
+  }
+  // Mark the signed event processed only after every canonical write succeeds.
+  // A crash before this point remains safely replayable with the same event id.
   await eventRef.set({
     createdBy: ownerUid,
     event_type: "job_status",

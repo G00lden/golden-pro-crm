@@ -59,9 +59,16 @@ import { requireNonProductionDemoData } from "./server/demoDataGuard";
 import { requireCapability } from "./server/capabilityGuard";
 import { requestClientIp } from "./server/clientIp";
 import {
+  queueFieldTechSync,
   registerFieldTechAdminRoutes,
   registerFieldTechPublicRoutes,
 } from "./server/fieldtechIntegration";
+import {
+  maintenanceRequestRateLimitOptions,
+  registerMaintenanceRequestAdminRoutes,
+  registerMaintenanceRequestPublicRoutes,
+  resolveMaintenanceRequestOwnerUid,
+} from "./server/routes-maintenance-requests";
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
@@ -211,6 +218,7 @@ async function startServer() {
   });
   const publicLeadRateLimit = createRateLimiter(publicLeadRateLimitOptions());
   const trackingEventRateLimit = createRateLimiter(trackingEventRateLimitOptions());
+  const maintenanceRequestRateLimit = createRateLimiter(maintenanceRequestRateLimitOptions());
   const gatewayPairingRateLimit = createRateLimiter({
     windowMs: Number(process.env.GATEWAY_PAIRING_RATE_LIMIT_WINDOW_MS || 60_000),
     max: Number(process.env.GATEWAY_PAIRING_RATE_LIMIT_MAX || 10),
@@ -292,6 +300,11 @@ async function startServer() {
   // dedicated limiter. Register this before the global /api Firebase guard;
   // storage still assigns the configured CRM owner partition server-side.
   registerPublicLeadRoutes(app, { database: db, rateLimit: publicLeadRateLimit });
+  registerMaintenanceRequestPublicRoutes(app, {
+    rateLimit: maintenanceRequestRateLimit,
+    ownerUid: () => resolveMaintenanceRequestOwnerUid(),
+    queueFieldTechSync,
+  });
 
   // Public landing analytics plus the explicit-consent, same-origin WhatsApp
   // attribution redirect. The latter stores only allowlisted campaign fields.
@@ -416,6 +429,8 @@ async function startServer() {
   registerPaymentRoutes(app);
 
   registerFieldTechAdminRoutes(app);
+
+  registerMaintenanceRequestAdminRoutes(app, { queueFieldTechSync });
 
   registerMaintenanceRoutes(app);
 

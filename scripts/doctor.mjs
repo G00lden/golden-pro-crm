@@ -153,6 +153,54 @@ async function main() {
       ok("STORE_WEBHOOK_OWNER_UID مضبوط");
     }
 
+    const maintenanceOwner = env.MAINTENANCE_REQUEST_OWNER_UID || env.PUBLIC_LEADS_OWNER_UID || env.STORE_WEBHOOK_OWNER_UID;
+    if (!maintenanceOwner) fail("MAINTENANCE_REQUEST_OWNER_UID مطلوب لربط طلبات الصيانة بمساحة CRM");
+    else ok("مالك مساحة طلبات الصيانة مضبوط");
+
+    if (String(env.MAINTENANCE_PORTAL_SECRET || "").length < 32) {
+      fail("MAINTENANCE_PORTAL_SECRET يجب أن يكون سراً فريداً بطول 32 حرفاً على الأقل");
+    } else {
+      ok(`سر بوابة العميل مضبوط (${masked(env.MAINTENANCE_PORTAL_SECRET)})`);
+    }
+    const portalTtlDays = Number(env.MAINTENANCE_PORTAL_TOKEN_TTL_DAYS || 30);
+    if (!Number.isFinite(portalTtlDays) || portalTtlDays <= 0 || portalTtlDays > 365) {
+      fail("MAINTENANCE_PORTAL_TOKEN_TTL_DAYS يجب أن يكون بين 0 و365 يوماً");
+    } else {
+      ok(`صلاحية رابط العميل محددة (${portalTtlDays} يوم)`);
+    }
+    const leadHours = Number(env.MAINTENANCE_MIN_LEAD_HOURS || 2);
+    if (!Number.isFinite(leadHours) || leadHours < 0 || leadHours > 168) {
+      fail("MAINTENANCE_MIN_LEAD_HOURS يجب أن يكون بين 0 و168 ساعة");
+    } else {
+      ok(`الحد الأدنى لمهلة الموعد مضبوط (${leadHours} ساعة)`);
+    }
+
+    if (!env.FIELDTECH_SERVER_URL || !/^https:\/\//i.test(env.FIELDTECH_SERVER_URL)) {
+      fail("FIELDTECH_SERVER_URL مطلوب ويجب أن يستخدم HTTPS في الإنتاج");
+    } else {
+      ok("رابط FieldTech الآمن مضبوط");
+    }
+    if (String(env.FIELDTECH_INTEGRATION_SECRET || "").length < 32) {
+      fail("FIELDTECH_INTEGRATION_SECRET مطلوب بطول 32 حرفاً على الأقل");
+    } else {
+      ok(`سر تكامل FieldTech مضبوط (${masked(env.FIELDTECH_INTEGRATION_SECRET)})`);
+    }
+    if (!env.FIELDTECH_OWNER_UID || env.FIELDTECH_OWNER_UID !== maintenanceOwner) {
+      fail("FIELDTECH_OWNER_UID يجب أن يطابق مالك مساحة طلبات الصيانة");
+    } else {
+      ok("مالك FieldTech يطابق مالك مساحة طلبات الصيانة");
+    }
+    const canaryEvidence = String(env.MAINTENANCE_FIELDTECH_CANARY_EVIDENCE || "").trim();
+    const canaryAt = Date.parse(String(env.MAINTENANCE_FIELDTECH_CANARY_AT || ""));
+    const canaryAgeMs = Date.now() - canaryAt;
+    if (canaryEvidence.length < 8 || !Number.isFinite(canaryAt)) {
+      fail("يلزم توثيق تجربة FieldTech داخلية ناجحة في MAINTENANCE_FIELDTECH_CANARY_EVIDENCE وMAINTENANCE_FIELDTECH_CANARY_AT");
+    } else if (canaryAgeMs < 0 || canaryAgeMs > 30 * 24 * 60 * 60_000) {
+      fail("دليل تجربة FieldTech أقدم من 30 يوماً أو مؤرخ في المستقبل؛ أعد التجربة قبل النشر");
+    } else {
+      ok("دليل تجربة FieldTech حديث وموجود");
+    }
+
     if (env.SALLA_CLIENT_ID && env.SALLA_CLIENT_SECRET) {
       ok("Salla OAuth app credentials are configured");
     } else {

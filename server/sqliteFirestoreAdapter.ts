@@ -1,5 +1,9 @@
 import db from "./db";
 import crypto from "crypto";
+import type {
+  MaintenanceAtomicMutation,
+  MaintenanceMutationResult,
+} from "./maintenanceRequestAtomic";
 
 type FilterOp = "==" | "<=" | ">=" | "<" | ">";
 
@@ -35,6 +39,8 @@ const collectionPrefixes: Record<string, string> = {
   fieldtech_events: "ftev",
   fieldtech_job_states: "ftjs",
   fieldtech_technician_locations: "ftloc",
+  maintenance_requests: "mreq",
+  maintenance_request_events: "mrev",
 };
 
 const primaryKeyByTable: Record<string, string> = {
@@ -350,6 +356,8 @@ const jsonColumns = new Set([
   "order_types",
   "order_tags",
   "shipment_labels",
+  "fulfillment_history",
+  "shipment_draft",
   "customer_groups",
   "permissions",
   "product_ids",
@@ -643,11 +651,81 @@ class SqliteWriteBatch {
   }
 }
 
+function sqliteUpsert(table: string, id: string, data: Record<string, unknown>, merge: boolean) {
+  const primaryKey = primaryKeyByTable[table] || "id";
+  const existing = merge
+    ? db.prepare(`SELECT * FROM "${table}" WHERE "${primaryKey}" = ? LIMIT 1`).get(id) as Record<string, unknown> | undefined
+    : undefined;
+  const mapped = mapRecord(existing ? { ...existing, ...data } : data, table);
+  const record = { [primaryKey]: id, ...mapped };
+  const keys = Object.keys(record);
+  const updateKeys = keys.filter((key) => key !== primaryKey);
+  const quotedKeys = keys.map((key) => `"${key}"`).join(", ");
+  const placeholders = keys.map(() => "?").join(", ");
+  const updateClause = updateKeys.map((key) => `"${key}" = EXCLUDED."${key}"`).join(", ");
+  db.prepare(
+    `INSERT INTO "${table}" (${quotedKeys}) VALUES (${placeholders})`
+      + (updateClause ? ` ON CONFLICT("${primaryKey}") DO UPDATE SET ${updateClause}` : ""),
+  ).run(...keys.map((key) => record[key]));
+}
+
+async function applyMaintenanceMutation(input: MaintenanceAtomicMutation): Promise<MaintenanceMutationResult> {
+  const transaction = db.transaction((): MaintenanceMutationResult => {
+    const request = db.prepare(
+      "SELECT owner_uid, status FROM maintenance_requests WHERE id = ? LIMIT 1",
+    ).get(input.requestId) as { owner_uid?: unknown; status?: unknown } | undefined;
+    if (!request || String(request.owner_uid || "") !== input.ownerUid) return "request_not_found";
+    if (String(request.status || "") !== input.expectedStatus) return "request_conflict";
+
+    if (input.booking) {
+      const booking = db.prepare("SELECT owner_uid FROM bookings WHERE id = ? LIMIT 1")
+        .get(input.booking.id) as { owner_uid?: unknown } | undefined;
+      if (booking && String(booking.owner_uid || "") !== input.ownerUid) return "booking_owner_conflict";
+      if (input.capacity) {
+        const active = db.prepare(
+          `SELECT id, scheduled_time FROM bookings
+            WHERE owner_uid = ? AND technician_id = ? AND date = ?
+              AND id <> ? AND COALESCE(status, 'confirmed') <> 'cancelled'`,
+        ).all(
+          input.ownerUid,
+          input.capacity.technicianId,
+          input.capacity.date,
+          input.capacity.excludeBookingId,
+        ) as Array<{ scheduled_time?: unknown }>;
+        if (active.some((item) => String(item.scheduled_time || "") === input.capacity!.scheduledTime)) {
+          return "booking_time_conflict";
+        }
+        if (active.length >= input.capacity.maxDaily) return "booking_capacity_exceeded";
+      }
+      sqliteUpsert("bookings", input.booking.id, input.booking.data, Boolean(booking));
+    }
+
+    const mappedPatch = mapRecord(input.requestPatch, "maintenance_requests");
+    const patchKeys = Object.keys(mappedPatch).filter((key) => key !== "id" && isValidColumn("maintenance_requests", key));
+    if (!patchKeys.length) throw new Error("Atomic maintenance mutation has no request patch.");
+    const result = db.prepare(
+      `UPDATE maintenance_requests SET ${patchKeys.map((key) => `"${key}" = ?`).join(", ")}`
+        + " WHERE id = ? AND owner_uid = ? AND status = ?",
+    ).run(...patchKeys.map((key) => mappedPatch[key]), input.requestId, input.ownerUid, input.expectedStatus);
+    if (result.changes !== 1) return "request_conflict";
+
+    const eventRecord = { id: input.eventId, ...mapRecord(input.event, "maintenance_request_events") };
+    const eventKeys = Object.keys(eventRecord);
+    db.prepare(
+      `INSERT INTO maintenance_request_events (${eventKeys.map((key) => `"${key}"`).join(", ")})`
+        + ` VALUES (${eventKeys.map(() => "?").join(", ")})`,
+    ).run(...eventKeys.map((key) => eventRecord[key]));
+    return "applied";
+  });
+  return transaction.immediate();
+}
+
 // ==========================================
 // Factory
 // ==========================================
 export function createSqliteFirestoreAdapter() {
   return {
+    applyMaintenanceMutation,
     async allocateCounter(ownerUid: string, namespace: string, minimumNext = 1) {
       return allocateSqliteCounter(db, ownerUid, namespace, minimumNext);
     },
