@@ -641,3 +641,14 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Adversarial coverage includes malformed/empty model output, timeouts, HTTP errors, rate limits, untrusted fields, low confidence, cross-customer/cross-owner order access, exact-order extraction, duplicate handoffs, department assignment, and active-session AI bypass.
 - Live DeepSeek activation is intentionally blocked until the key exposed in the user-provided image is revoked and a replacement is stored directly in the production environment. No exposed credential was used or saved.
 - Arabic architecture, activation, canary, and rollback guide: `docs/whatsapp-deepseek-assistant-ar.md`.
+
+## 2026-08-04 - Customer maintenance portal and verified FieldTech completion 1.9.6 [Codex]
+
+- Added the public Arabic customer request/status portal and the capability-gated CRM maintenance queue for approval, technician assignment, scheduling, progress, rejection, cancellation, and closure.
+- Linked portal requests atomically to CRM customers, bookings, technicians, a customer-visible timeline, and revocable/rotatable signed portal links without persisting bearer tokens.
+- Maintenance bookings now fail closed on completion unless FieldTech supplies real before-photo, after-photo, and customer-signature references with SHA-256 hashes and capture timestamps. Only an administrator can record an explicit closure override reason.
+- Advanced SQLite to schema `11001`, mirrored the workflow in Supabase migration `20260802120000_maintenance_request_portal.sql`, and added production doctor gates for a unique 32+ character portal secret and fresh FieldTech canary evidence.
+- Deployed FieldTech image `breexe-fieldtech:1.1.0-rc2` from commit `7f8720c`. The recoverable pre-deploy source backup is `/opt/breexe-fieldtech-source-backups/20260804T131403Z-pre-7f8720c`.
+- A real internal canary traversed the live CRM and FieldTech services with synthetic data only: `fieldtech-mseoqvi0`, completed at `2026-08-04T13:20:10.908Z`. It paired a temporary device, uploaded three actual evidence files, completed and reported location, returned the signed event to CRM, drained the outbox to zero, and unlinked the device. The evidence report is `/opt/breexe-fieldtech-canary/fieldtech-live-20260804T132005Z.json`.
+- Local release verification passed: `445/445` unit tests, `16/16` smoke checks, `11/11` golden-path steps, `6/6` targeted maintenance/FieldTech tests, TypeScript lint, production build, source security audit, production doctor, and `npm audit` with zero vulnerabilities.
+- No real customer record, phone number, credential, portal token, or secret was used, retained in source, or written into this handoff.

@@ -34,6 +34,7 @@ export type Page =
   | "odooCrm"
   | "products"
   | "installations"
+  | "maintenanceRequests"
   | "bookings"
   | "storeOrders"
   | "care"
@@ -279,10 +280,10 @@ export function useData<T>(fetcher: () => Promise<T>, deps: unknown[] = [], enab
   const [error, setError] = useState("");
   const requestGeneration = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const load = useCallback(async (silent: boolean) => {
     if (!enabled) return;
     const generation = ++requestGeneration.current;
-    setLoading(true);
+    if (!silent) setLoading(true);
     setError("");
     try {
       const next = await fetcher();
@@ -296,6 +297,9 @@ export function useData<T>(fetcher: () => Promise<T>, deps: unknown[] = [], enab
     }
   }, [enabled, ...deps]);
 
+  const refresh = useCallback(() => load(false), [load]);
+  const refreshSilent = useCallback(() => load(true), [load]);
+
   useEffect(() => {
     refresh();
     return () => {
@@ -303,7 +307,7 @@ export function useData<T>(fetcher: () => Promise<T>, deps: unknown[] = [], enab
     };
   }, [refresh]);
 
-  return { data, loading, error, refresh, setData };
+  return { data, loading, error, refresh, refreshSilent, setData };
 }
 
 /* ── Shared Components ──────────────────────────────────── */

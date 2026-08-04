@@ -234,7 +234,41 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10905) throw new Error(`Expected schema 10905, got ${userVersion}`);
+if (userVersion !== 11001) throw new Error(`Expected schema 11001, got ${userVersion}`);
+for (const required of [
+  "request_number",
+  "client_request_id",
+  "status",
+  "booking_id",
+  "portal_token_version",
+  "portal_access_revoked_at",
+  "completion_override_reason",
+]) {
+  if (!columns("maintenance_requests").has(required)) {
+    throw new Error(`maintenance_requests.${required} is missing`);
+  }
+}
+for (const required of ["request_id", "action", "actor_type", "customer_visible", "metadata"]) {
+  if (!columns("maintenance_request_events").has(required)) {
+    throw new Error(`maintenance_request_events.${required} is missing`);
+  }
+}
+for (const required of [
+  "before_photo_ref",
+  "before_photo_sha256",
+  "before_photo_captured_at",
+  "after_photo_ref",
+  "after_photo_sha256",
+  "after_photo_captured_at",
+  "signature_ref",
+  "signature_sha256",
+  "signature_captured_at",
+  "evidence_complete",
+]) {
+  if (!columns("fieldtech_job_states").has(required)) {
+    throw new Error(`fieldtech_job_states.${required} is missing`);
+  }
+}
 for (const required of ["media_type", "media_url", "order_url"]) {
   if (!columns("communication_campaigns").has(required)) {
     throw new Error(`communication_campaigns.${required} is missing`);
@@ -617,8 +651,12 @@ const mediaCampaignMigration = db.prepare("SELECT release FROM schema_migrations
 if (mediaCampaignMigration?.release !== "1.9.1-whatsapp-media-campaigns") throw new Error("WhatsApp media campaign migration was not updated.");
 const bulkReminderMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10904").get() as { release?: string };
 const deepSeekAssistantMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10905").get() as { release?: string };
+const maintenancePortalMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 11000").get() as { release?: string };
+const maintenanceAcceptanceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 11001").get() as { release?: string };
 if (bulkReminderMigration?.release !== "1.9.4-whatsapp-bulk-reminders") throw new Error("WhatsApp bulk reminder migration was not updated.");
 if (deepSeekAssistantMigration?.release !== "1.9.5-whatsapp-deepseek-assistant") throw new Error("WhatsApp DeepSeek assistant migration was not updated.");
+if (maintenancePortalMigration?.release !== "1.9.6-maintenance-request-portal") throw new Error("Maintenance portal migration was not updated.");
+if (maintenanceAcceptanceMigration?.release !== "1.9.6-maintenance-request-acceptance-gates") throw new Error("Maintenance acceptance migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

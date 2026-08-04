@@ -1,7 +1,7 @@
 {
   "name": "golden-pro-crm",
   "private": true,
-  "version": "1.9.5",
+  "version": "1.9.6",
   "engines": {
     "node": ">=22"
   },
@@ -105,7 +105,9 @@
     "vite": "^6.2.0"
   },
   "overrides": {
-    "protobufjs": "7.6.4",
+    "protobufjs": "7.6.5",
+    "brace-expansion": "2.1.4",
+    "postcss": "8.5.25",
     "tsx": {
       "esbuild": "0.28.1"
     },

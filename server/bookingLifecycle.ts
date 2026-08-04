@@ -1,5 +1,7 @@
 import { adminDb } from "./firebaseAdmin";
 import { addCalendarMonthsOr } from "../shared/date";
+import { syncMaintenanceRequestFromBooking } from "./maintenanceRequestService";
+import { assertStoredBookingCompletionEvidence } from "./fieldtechEvidence";
 
 function httpError(status: number, message: string) {
   const err = new Error(message) as Error & { status?: number };
@@ -24,13 +26,20 @@ async function productIntervalMonths(productId: string | undefined, uid: string)
   return Number.isFinite(months) && months > 0 ? months : 3;
 }
 
-export async function completeBooking(bookingId: string, uid: string) {
+export async function completeBooking(
+  bookingId: string,
+  uid: string,
+  options: { evidenceOverride?: boolean; syncMaintenance?: boolean; skipBookingWrite?: boolean } = {},
+) {
   const bookingRef = adminDb.collection("bookings").doc(bookingId);
   const bookingDoc = await bookingRef.get();
   if (!bookingDoc.exists) throw httpError(404, "Booking was not found.");
 
   const booking = bookingDoc.data() || {};
   if (booking.createdBy !== uid) throw httpError(403, "You do not own this booking.");
+  if (booking.source === "maintenance_portal" && !options.evidenceOverride) {
+    await assertStoredBookingCompletionEvidence(bookingId, uid);
+  }
 
   const now = new Date().toISOString();
   const bookingDate = booking.date || now.slice(0, 10);
@@ -72,7 +81,9 @@ export async function completeBooking(bookingId: string, uid: string) {
     }, { merge: true });
   }
 
-  await bookingRef.set(updates, { merge: true });
+  if (!options.skipBookingWrite) {
+    await bookingRef.set(updates, { merge: true });
+  }
 
   if (booking.store_order_id) {
     const orderRef = adminDb.collection("store_orders").doc(String(booking.store_order_id));
@@ -96,6 +107,15 @@ export async function completeBooking(bookingId: string, uid: string) {
         updatedAt: now,
       }, { merge: true });
     }
+  }
+
+  if (options.syncMaintenance !== false) {
+    await syncMaintenanceRequestFromBooking(
+      bookingId,
+      uid,
+      "complete",
+      "تم إكمال الحجز المرتبط بطلب الصيانة.",
+    );
   }
 
   return {

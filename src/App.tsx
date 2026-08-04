@@ -51,6 +51,8 @@ import CustomersPage from "./pages/Customers";
 import ProductsPage from "./pages/Products";
 import InstallationsPage from "./pages/Installations";
 import BookingsPage from "./pages/Bookings";
+import MaintenanceRequestsPage from "./pages/MaintenanceRequests";
+import CustomerMaintenancePortal from "./pages/CustomerMaintenancePortal";
 import StoreOrdersPage from "./pages/StoreOrders";
 import CustomerCarePage from "./pages/CustomerCare";
 import OdooCrmPage from "./pages/OdooCrm";
@@ -85,6 +87,7 @@ const pageIds = new Set<Page>([
   "odooCrm",
   "products",
   "installations",
+  "maintenanceRequests",
   "bookings",
   "storeOrders",
   "care",
@@ -308,6 +311,7 @@ function Modal({ modal, onClose }: { modal: Exclude<ModalState, null>; onClose: 
 }
 
 export default function App() {
+  const isCustomerMaintenancePortal = new URL(window.location.href).searchParams.get("maintenance") === "customer";
   const [page, setPage] = useState<Page>(pageFromLocation);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(() => window.matchMedia("(max-width: 820px)").matches);
@@ -363,7 +367,7 @@ export default function App() {
     window.setTimeout(() => setToast(null), 3200);
   }, []);
 
-  const me = useData(api.getMe, [], authed && authReady);
+  const me = useData(api.getMe, [], authed && authReady && !isCustomerMaintenancePortal);
   const currentRole = normalizeAppRole(me.data?.role);
   const permissions = me.data?.permissions || {};
   const canManageUsers = hasAppCapability(currentRole, "users.manage", permissions);
@@ -371,6 +375,9 @@ export default function App() {
   const canManageCampaigns = hasAppCapability(currentRole, "campaigns.manage", permissions);
   const canManageCalls = hasAppCapability(currentRole, "calls.manage", permissions);
   const canManagePublicLeads = hasAppCapability(currentRole, "public_leads.manage", permissions);
+  const canViewMaintenanceRequests = hasAppCapability(currentRole, "maintenance.requests.view", permissions);
+  const canManageMaintenanceRequests = hasAppCapability(currentRole, "maintenance.requests.manage", permissions);
+  const canOverrideMaintenanceClose = hasAppCapability(currentRole, "maintenance.requests.close_override", permissions);
   const canPrepareOperations = hasAppCapability(currentRole, "operations.prepare", permissions);
   const canManageTechnicianWallet = currentRole === "admin" || currentRole === "manager";
   const canSeedDemoData = hasAppCapability(currentRole, "demo.seed", permissions);
@@ -389,7 +396,7 @@ export default function App() {
   const canManageMobileSims = hasAppCapability(currentRole, "mobile.sims.manage", permissions);
   const currentUid = me.data?.uid || null;
 
-  const stats = useData(api.getStats, [page], authed && authReady);
+  const stats = useData(api.getStats, [page], authed && authReady && !isCustomerMaintenancePortal);
   const summary: api.DashboardStats = stats.data || {
     customers: 0,
     products: 0,
@@ -430,6 +437,8 @@ export default function App() {
     };
   }, [authed, authReady, notify, stats.refresh]);
 
+  if (isCustomerMaintenancePortal) return <CustomerMaintenancePortal />;
+
   const nav = [
     { id: "dash" as Page, label: "الرئيسية", icon: ClipboardList },
     { id: "customers" as Page, label: "العملاء", icon: Users },
@@ -438,6 +447,9 @@ export default function App() {
     { id: "odooCrm" as Page, label: "CRM Odoo", icon: ClipboardList },
     { id: "products" as Page, label: "المنتجات", icon: Package },
     { id: "installations" as Page, label: "الصيانة", icon: Wrench, badge: summary.overdue },
+    ...(canViewMaintenanceRequests
+      ? [{ id: "maintenanceRequests" as Page, label: "طلبات الصيانة", icon: ClipboardList }]
+      : []),
     { id: "bookings" as Page, label: "الحجوزات", icon: CalendarDays },
     { id: "storeOrders" as Page, label: "طلبات المتجر", icon: ClipboardList },
     { id: "care" as Page, label: "رعاية العملاء", icon: UserPlus, badge: summary.care },
@@ -515,6 +527,15 @@ export default function App() {
     odooCrm: <OdooCrmPage notify={notify} go={openPage} canManagePublicLeads={canManagePublicLeads} />,
     products: <ProductsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     installations: <InstallationsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
+    maintenanceRequests: canViewMaintenanceRequests
+      ? (
+          <MaintenanceRequestsPage
+            notify={notify}
+            canManage={canManageMaintenanceRequests}
+            canOverrideClose={canOverrideMaintenanceClose}
+          />
+        )
+      : <AccessDenied />,
     bookings: <BookingsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     storeOrders: <StoreOrdersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     care: <CustomerCarePage notify={notify} refreshStats={stats.refresh} />,

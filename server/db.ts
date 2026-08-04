@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10905;
+const TARGET_SCHEMA_VERSION = 11001;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -416,6 +416,68 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now'))
   );
 
+  -- Public customer intake + operator/technician lifecycle. Portal access uses
+  -- a signed token derived at runtime; no bearer token is persisted here.
+  CREATE TABLE IF NOT EXISTS maintenance_requests (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    request_number TEXT NOT NULL,
+    client_request_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new'
+      CHECK (status IN ('new', 'approved', 'scheduled', 'in_progress', 'closed', 'rejected', 'cancelled')),
+    customer_id TEXT,
+    customer_name TEXT NOT NULL DEFAULT '',
+    customer_phone TEXT NOT NULL DEFAULT '',
+    city TEXT DEFAULT '',
+    address TEXT DEFAULT '',
+    service_type TEXT NOT NULL DEFAULT 'general',
+    product_id TEXT,
+    product_name TEXT NOT NULL DEFAULT '',
+    installation_id TEXT,
+    issue_description TEXT NOT NULL DEFAULT '',
+    warranty_status TEXT NOT NULL DEFAULT 'unknown',
+    invoice_number TEXT DEFAULT '',
+    preferred_date TEXT,
+    preferred_time TEXT,
+    scheduled_date TEXT,
+    scheduled_time TEXT,
+    technician_id TEXT,
+    technician_name TEXT,
+    booking_id TEXT,
+    customer_change_requested INTEGER NOT NULL DEFAULT 0,
+    customer_change_note TEXT DEFAULT '',
+    resolution_note TEXT DEFAULT '',
+    completion_override_reason TEXT DEFAULT '',
+    portal_token_version INTEGER NOT NULL DEFAULT 1,
+    portal_access_revoked_at TEXT,
+    rejection_reason TEXT DEFAULT '',
+    cancellation_reason TEXT DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'maintenance_portal',
+    accepted_terms_at TEXT,
+    closed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_uid, request_number),
+    UNIQUE(owner_uid, client_request_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS maintenance_request_events (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_number TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_uid TEXT,
+    from_status TEXT,
+    to_status TEXT,
+    message TEXT DEFAULT '',
+    customer_visible INTEGER NOT NULL DEFAULT 1,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS reminders (
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
@@ -521,6 +583,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_technicians_owner ON technicians(owner_uid);
   CREATE INDEX IF NOT EXISTS idx_bookings_owner ON bookings(owner_uid);
   CREATE INDEX IF NOT EXISTS idx_bookings_date ON bookings(date);
+  CREATE INDEX IF NOT EXISTS idx_maintenance_requests_owner_created ON maintenance_requests(owner_uid, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_maintenance_requests_owner_status ON maintenance_requests(owner_uid, status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_maintenance_requests_booking ON maintenance_requests(booking_id);
+  CREATE INDEX IF NOT EXISTS idx_maintenance_request_events_request ON maintenance_request_events(request_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(owner_uid);
   CREATE INDEX IF NOT EXISTS idx_reminders_sent ON reminders(sent_at);
   CREATE INDEX IF NOT EXISTS idx_store_orders_owner ON store_orders(owner_uid);
@@ -1331,6 +1397,33 @@ db.exec(WHATSAPP_COMMERCE_SCHEMA_SQL);
 db.exec(SALLA_CART_CONCIERGE_SCHEMA_SQL);
 db.exec(DELIVERY_REVIEW_SCHEMA_SQL);
 
+for (const col of [
+  ["portal_token_version", "INTEGER NOT NULL DEFAULT 1"],
+  ["portal_access_revoked_at", "TEXT"],
+  ["completion_override_reason", "TEXT DEFAULT ''"],
+] as const) {
+  if (!hasColumn("maintenance_requests", col[0])) {
+    db.exec(`ALTER TABLE maintenance_requests ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
+for (const col of [
+  ["before_photo_ref", "TEXT"],
+  ["before_photo_sha256", "TEXT"],
+  ["before_photo_captured_at", "TEXT"],
+  ["after_photo_ref", "TEXT"],
+  ["after_photo_sha256", "TEXT"],
+  ["after_photo_captured_at", "TEXT"],
+  ["signature_ref", "TEXT"],
+  ["signature_sha256", "TEXT"],
+  ["signature_captured_at", "TEXT"],
+  ["evidence_complete", "INTEGER NOT NULL DEFAULT 0"],
+] as const) {
+  if (!hasColumn("fieldtech_job_states", col[0])) {
+    db.exec(`ALTER TABLE fieldtech_job_states ADD COLUMN ${col[0]} ${col[1]}`);
+  }
+}
+
 for (const [table, columns] of [
   ["customers", [["address", "TEXT DEFAULT ''"], ["customer_address", "TEXT DEFAULT ''"]]],
   ["installations", [
@@ -2055,6 +2148,8 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10903, '1.9.3-salla-order-dispatch');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10904, '1.9.4-whatsapp-bulk-reminders');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10905, '1.9.5-whatsapp-deepseek-assistant');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11000, '1.9.6-maintenance-request-portal');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11001, '1.9.6-maintenance-request-acceptance-gates');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

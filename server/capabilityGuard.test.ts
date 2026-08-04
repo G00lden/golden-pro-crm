@@ -21,8 +21,8 @@ function invoke(role: "admin" | "manager" | "user", capability: Parameters<typeo
   return state;
 }
 
-test("admin reaches user, WhatsApp, campaign, public-lead, and setup handlers", () => {
-  for (const capability of ["users.manage", "whatsapp.manage", "campaigns.manage", "public_leads.manage", "operations.prepare"] as const) {
+test("admin reaches user, WhatsApp, campaign, public-lead, maintenance, and setup handlers", () => {
+  for (const capability of ["users.manage", "whatsapp.manage", "campaigns.manage", "public_leads.manage", "maintenance.requests.view", "maintenance.requests.manage", "maintenance.requests.close_override", "operations.prepare"] as const) {
     assert.deepEqual(invoke("admin", capability), { continued: true });
   }
 });
@@ -30,13 +30,16 @@ test("admin reaches user, WhatsApp, campaign, public-lead, and setup handlers", 
 test("manager reaches campaigns and operational preparation but not admin surfaces", () => {
   assert.deepEqual(invoke("manager", "campaigns.manage"), { continued: true });
   assert.deepEqual(invoke("manager", "public_leads.manage"), { continued: true });
+  assert.deepEqual(invoke("manager", "maintenance.requests.view"), { continued: true });
+  assert.deepEqual(invoke("manager", "maintenance.requests.manage"), { continued: true });
+  assert.deepEqual(invoke("manager", "maintenance.requests.close_override"), { continued: false, status: 403 });
   assert.deepEqual(invoke("manager", "operations.prepare"), { continued: true });
   assert.deepEqual(invoke("manager", "users.manage"), { continued: false, status: 403 });
   assert.deepEqual(invoke("manager", "whatsapp.manage"), { continued: false, status: 403 });
 });
 
 test("viewer persisted as user receives 403 for every privileged capability", () => {
-  for (const capability of ["users.manage", "whatsapp.manage", "campaigns.manage", "public_leads.manage", "operations.prepare", "demo.seed"] as const) {
+  for (const capability of ["users.manage", "whatsapp.manage", "campaigns.manage", "public_leads.manage", "maintenance.requests.view", "maintenance.requests.manage", "maintenance.requests.close_override", "operations.prepare", "demo.seed"] as const) {
     assert.deepEqual(invoke("user", capability), { continued: false, status: 403 });
   }
 });

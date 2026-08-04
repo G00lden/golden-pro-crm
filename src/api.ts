@@ -1590,7 +1590,7 @@ async function getApiAuthorizationToken() {
   return user?.local ? buildLocalToken(user.uid) : user?.getIdToken?.();
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = await getApiAuthorizationToken();
   if (!token) throw new Error("يجب تسجيل الدخول أولا.");
 

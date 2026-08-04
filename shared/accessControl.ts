@@ -24,6 +24,9 @@ export type AppCapability =
   | "mobile.device.lock"
   | "mobile.device.wipe"
   | "public_leads.manage"
+  | "maintenance.requests.view"
+  | "maintenance.requests.manage"
+  | "maintenance.requests.close_override"
   | "operations.prepare"
   | "demo.seed";
 
@@ -49,6 +52,9 @@ const CAPABILITY_ROLES: Record<AppCapability, ReadonlySet<AppRole>> = {
   "mobile.device.lock": new Set(["admin"]),
   "mobile.device.wipe": new Set(["admin"]),
   "public_leads.manage": new Set(["admin", "manager"]),
+  "maintenance.requests.view": new Set(["admin", "manager"]),
+  "maintenance.requests.manage": new Set(["admin", "manager"]),
+  "maintenance.requests.close_override": new Set(["admin"]),
   "operations.prepare": new Set(["admin", "manager"]),
   "demo.seed": new Set(["admin"]),
 };
