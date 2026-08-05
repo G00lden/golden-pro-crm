@@ -65,6 +65,8 @@ import {
 } from "./server/fieldtechIntegration";
 import {
   maintenanceRequestRateLimitOptions,
+  maintenanceReadRateLimitOptions,
+  maintenanceVerificationRateLimitOptions,
   registerMaintenanceRequestAdminRoutes,
   registerMaintenanceRequestPublicRoutes,
   resolveMaintenanceRequestOwnerUid,
@@ -99,7 +101,7 @@ function clientIp(req: Request) {
   return requestClientIp(req, TRUST_PROXY_HEADERS);
 }
 
-function createRateLimiter(options: { windowMs: number; max: number; name: string }) {
+function createRateLimiter(options: { windowMs: number; max: number; name: string; message?: string }) {
   const hits = new Map<string, { count: number; resetAt: number }>();
   // Hard ceiling on distinct buckets. Even with a spoofable/rotating key, the map
   // can never grow past this — expired buckets are dropped first, then the oldest
@@ -142,7 +144,8 @@ function createRateLimiter(options: { windowMs: number; max: number; name: strin
     res.setHeader("RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
 
     if (bucket.count > options.max) {
-      res.status(429).json({ error: "Too many requests. Please try again shortly." });
+      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+      res.status(429).json({ error: options.message || "Too many requests. Please try again shortly." });
       return;
     }
 
@@ -219,6 +222,8 @@ async function startServer() {
   const publicLeadRateLimit = createRateLimiter(publicLeadRateLimitOptions());
   const trackingEventRateLimit = createRateLimiter(trackingEventRateLimitOptions());
   const maintenanceRequestRateLimit = createRateLimiter(maintenanceRequestRateLimitOptions());
+  const maintenanceReadRateLimit = createRateLimiter(maintenanceReadRateLimitOptions());
+  const maintenanceVerificationRateLimit = createRateLimiter(maintenanceVerificationRateLimitOptions());
   const gatewayPairingRateLimit = createRateLimiter({
     windowMs: Number(process.env.GATEWAY_PAIRING_RATE_LIMIT_WINDOW_MS || 60_000),
     max: Number(process.env.GATEWAY_PAIRING_RATE_LIMIT_MAX || 10),
@@ -302,6 +307,8 @@ async function startServer() {
   registerPublicLeadRoutes(app, { database: db, rateLimit: publicLeadRateLimit });
   registerMaintenanceRequestPublicRoutes(app, {
     rateLimit: maintenanceRequestRateLimit,
+    readRateLimit: maintenanceReadRateLimit,
+    verificationRateLimit: maintenanceVerificationRateLimit,
     ownerUid: () => resolveMaintenanceRequestOwnerUid(),
     queueFieldTechSync,
   });

@@ -23,6 +23,7 @@ const files = [
   "server/maintenanceKitCompatibility.test.ts",
   "server/maintenancePortalPeriodicVariants.test.ts",
   "server/maintenanceAttachmentContract.test.ts",
+  "server/maintenanceRateLimit.test.ts",
   "server/clientIp.test.ts",
   "server/demoDataGuard.test.ts",
   "server/localAuthPolicy.test.ts",

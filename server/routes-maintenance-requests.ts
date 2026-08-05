@@ -36,6 +36,8 @@ import {
 
 type PublicRouteOptions = {
   rateLimit: RequestHandler;
+  readRateLimit?: RequestHandler;
+  verificationRateLimit?: RequestHandler;
   ownerUid: () => string | null;
   queueFieldTechSync: (reason: string) => void;
 };
@@ -180,11 +182,33 @@ export function maintenanceRequestRateLimitOptions(env: NodeJS.ProcessEnv = proc
     windowMs: boundedPositiveInteger(env.MAINTENANCE_REQUEST_RATE_LIMIT_WINDOW_MS, 15 * 60_000, 24 * 60 * 60_000),
     max: boundedPositiveInteger(env.MAINTENANCE_REQUEST_RATE_LIMIT_MAX, 20, 1_000),
     name: "maintenance-requests",
+    message: "تم تنفيذ عمليات كثيرة على طلب الصيانة. انتظر قليلاً ثم أعد المحاولة.",
+  };
+}
+
+export function maintenanceReadRateLimitOptions(env: NodeJS.ProcessEnv = process.env) {
+  return {
+    windowMs: boundedPositiveInteger(env.MAINTENANCE_READ_RATE_LIMIT_WINDOW_MS, 5 * 60_000, 24 * 60 * 60_000),
+    max: boundedPositiveInteger(env.MAINTENANCE_READ_RATE_LIMIT_MAX, 180, 5_000),
+    name: "maintenance-reads",
+    message: "تم تحميل بيانات الصيانة مرات كثيرة. انتظر قليلاً ثم أعد المحاولة.",
+  };
+}
+
+export function maintenanceVerificationRateLimitOptions(env: NodeJS.ProcessEnv = process.env) {
+  return {
+    windowMs: boundedPositiveInteger(env.MAINTENANCE_VERIFICATION_RATE_LIMIT_WINDOW_MS, 15 * 60_000, 24 * 60 * 60_000),
+    max: boundedPositiveInteger(env.MAINTENANCE_VERIFICATION_RATE_LIMIT_MAX, 12, 1_000),
+    name: "maintenance-verification",
+    message: "تم طلب رمز التحقق عدة مرات. انتظر قليلاً ثم أعد المحاولة.",
   };
 }
 
 export function registerMaintenanceRequestPublicRoutes(app: Express, options: PublicRouteOptions) {
-  app.get("/public/maintenance-products", options.rateLimit, asyncRoute(async (req, res) => {
+  const readRateLimit = options.readRateLimit || options.rateLimit;
+  const verificationRateLimit = options.verificationRateLimit || options.rateLimit;
+
+  app.get("/public/maintenance-products", readRateLimit, asyncRoute(async (req, res) => {
     const ownerUid = options.ownerUid();
     if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
     const query = String(req.query.q || "").slice(0, 120);
@@ -193,7 +217,7 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
     res.json({ data: await searchMaintenanceProducts(ownerUid, query, 24, requestType) });
   }));
 
-  app.get("/public/maintenance-kits", options.rateLimit, asyncRoute(async (req, res) => {
+  app.get("/public/maintenance-kits", readRateLimit, asyncRoute(async (req, res) => {
     const ownerUid = options.ownerUid();
     if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
     const productId = z.string().trim().min(1).max(128).safeParse(req.query.product_id);
@@ -202,14 +226,14 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
     res.json({ data: await listCompatibleMaintenanceKits(ownerUid, productId.data) });
   }));
 
-  app.get("/public/maintenance-availability", options.rateLimit, asyncRoute(async (_req, res) => {
+  app.get("/public/maintenance-availability", readRateLimit, asyncRoute(async (_req, res) => {
     const ownerUid = options.ownerUid();
     if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
     res.setHeader("Cache-Control", "no-store");
     res.json(await getMaintenanceAvailability(ownerUid));
   }));
 
-  app.post("/public/maintenance-phone-verification", options.rateLimit, asyncRoute(async (req, res) => {
+  app.post("/public/maintenance-phone-verification", verificationRateLimit, asyncRoute(async (req, res) => {
     const parsed = phoneVerificationRequestSchema.safeParse(req.body);
     if (!parsed.success) return validationError(res, { error: parsed.error! });
     const ownerUid = options.ownerUid();
@@ -225,7 +249,7 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
     }
   }));
 
-  app.post("/public/maintenance-phone-verification/confirm", options.rateLimit, asyncRoute(async (req, res) => {
+  app.post("/public/maintenance-phone-verification/confirm", verificationRateLimit, asyncRoute(async (req, res) => {
     const parsed = phoneVerificationConfirmSchema.safeParse(req.body);
     if (!parsed.success) return validationError(res, { error: parsed.error! });
     const ownerUid = options.ownerUid();
@@ -267,7 +291,7 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
     });
   }));
 
-  app.get("/public/maintenance-request", options.rateLimit, asyncRoute(async (req, res) => {
+  app.get("/public/maintenance-request", readRateLimit, asyncRoute(async (req, res) => {
     const parsed = portalTokenSchema.safeParse(req.query.token);
     if (!parsed.success) return res.status(404).json({ error: "رابط الطلب غير صالح أو منتهي." });
     const request = await getMaintenanceRequestByPortalToken(parsed.data);
