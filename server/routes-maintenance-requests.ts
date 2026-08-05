@@ -237,7 +237,7 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
   app.post(
     "/public/maintenance-attachments",
     options.rateLimit,
-    express.raw({ type: ["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime"], limit: "25mb" }),
+    express.raw({ type: ["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime", "application/pdf"], limit: "25mb" }),
     asyncRoute(async (req, res) => {
       const ownerUid = options.ownerUid();
       if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
@@ -342,8 +342,9 @@ export function registerMaintenanceRequestAdminRoutes(app: Express, options: Adm
     await getOwnedMaintenanceRequest(String(req.params.id), ownerUid);
     const attachment = await readMaintenanceAttachment(ownerUid, String(req.params.id), String(req.params.attachmentId));
     res.setHeader("Content-Type", attachment.media_type);
+    res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cache-Control", "private, no-store");
-    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Content-Disposition", attachment.kind === "document" ? 'attachment; filename="maintenance-invoice.pdf"' : "inline");
     res.send(attachment.body);
   }));
 

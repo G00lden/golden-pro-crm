@@ -5,6 +5,7 @@ import {
   ClipboardList,
   Copy,
   ExternalLink,
+  FileText,
   MapPin,
   Paperclip,
   Phone,
@@ -458,7 +459,7 @@ function MaintenanceRequestDrawer({
               {request.location_url && <a className="btn muted" href={request.location_url} target="_blank" rel="noreferrer"><MapPin size={16} aria-hidden="true" /> فتح الموقع</a>}
             </div>
 
-            {!!details.data?.attachments.length && <section className="maintenance-admin-attachments" aria-label="مرفقات العميل"><h3><Paperclip size={17} /> {request.request_type === "periodic" ? "صور ومقاطع الجهاز" : "مرفقات العطل"}</h3><div>{details.data.attachments.map((attachment) => <button type="button" key={attachment.id} onClick={() => openMaintenanceAttachment(request.id, attachment.id).catch((reason) => notify(reason instanceof Error ? reason.message : "تعذر فتح المرفق", false))}>{attachment.kind === "video" ? "مقطع فيديو" : "صورة"} · {(attachment.byte_size / 1024 / 1024).toFixed(1)}MB <ExternalLink size={14} /></button>)}</div></section>}
+            {!!details.data?.attachments.length && <section className="maintenance-admin-attachments" aria-label="مرفقات العميل"><h3><Paperclip size={17} aria-hidden="true" /> مرفقات الجهاز والفاتورة</h3><div>{details.data.attachments.map((attachment) => <button type="button" key={attachment.id} onClick={() => openMaintenanceAttachment(request.id, attachment.id).catch((reason) => notify(reason instanceof Error ? reason.message : "تعذر فتح المرفق", false))}>{attachment.kind === "video" ? "مقطع فيديو" : attachment.kind === "document" ? <><FileText size={14} aria-hidden="true" /> ملف فاتورة PDF</> : "صورة"} · {(attachment.byte_size / 1024 / 1024).toFixed(1)}MB <ExternalLink size={14} aria-hidden="true" /></button>)}</div></section>}
 
             {canManage ? <section className="maintenance-drawer__actions" aria-labelledby="request-actions-title">
               <h3 id="request-actions-title">إدارة الطلب</h3>

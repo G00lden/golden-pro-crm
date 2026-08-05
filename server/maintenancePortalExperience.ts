@@ -405,8 +405,8 @@ function attachmentRoot() {
   return path.join(path.dirname(path.resolve(dbPath === ":memory:" ? path.join(process.cwd(), "data", "test.db") : dbPath)), "maintenance-attachments");
 }
 
-function mediaContract(contentType: string, body: Buffer) {
-  const image = contentType === "image/jpeg" && body.length >= 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff
+export function mediaContract(contentType: string, body: Buffer) {
+  const contract = contentType === "image/jpeg" && body.length >= 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff
     ? { kind: "image", ext: "jpg", max: 8 * 1024 * 1024 }
     : contentType === "image/png" && body.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
       ? { kind: "image", ext: "png", max: 8 * 1024 * 1024 }
@@ -414,10 +414,19 @@ function mediaContract(contentType: string, body: Buffer) {
         ? { kind: "image", ext: "webp", max: 8 * 1024 * 1024 }
         : ["video/mp4", "video/quicktime"].includes(contentType) && body.length >= 12 && body.subarray(4, 8).toString() === "ftyp"
           ? { kind: "video", ext: "mp4", max: 25 * 1024 * 1024 }
-          : null;
-  if (!image) throw httpError(415, "الملف يجب أن يكون صورة JPG/PNG/WEBP أو مقطع MP4/MOV صالحاً.");
-  if (!body.length || body.length > image.max) throw httpError(413, image.kind === "video" ? "حجم المقطع يتجاوز 25MB." : "حجم الصورة يتجاوز 8MB.");
-  return image;
+          : contentType === "application/pdf" && body.length >= 5 && body.subarray(0, 5).toString("ascii") === "%PDF-"
+            ? { kind: "document", ext: "pdf", max: 10 * 1024 * 1024 }
+            : null;
+  if (!contract) throw httpError(415, "الملف يجب أن يكون صورة JPG/PNG/WEBP أو مقطع MP4/MOV أو فاتورة PDF صالحة.");
+  if (!body.length || body.length > contract.max) {
+    const message = contract.kind === "video"
+      ? "حجم المقطع يتجاوز 25MB."
+      : contract.kind === "document"
+        ? "حجم ملف الفاتورة يتجاوز 10MB."
+        : "حجم الصورة يتجاوز 8MB.";
+    throw httpError(413, message);
+  }
+  return contract;
 }
 
 export async function storeMaintenanceAttachment(ownerUid: string, verificationId: string, token: string, contentType: string, body: Buffer) {
@@ -490,8 +499,8 @@ export async function readMaintenanceAttachment(ownerUid: string, requestId: str
   const snapshot = await adminDb.collection("maintenance_request_attachments").doc(attachmentId).get();
   if (!snapshot.exists) throw httpError(404, "المرفق غير موجود.");
   const item = snapshotRecord(snapshot);
-  if (String(item.createdBy || item.owner_uid) !== ownerUid || String(item.request_id) !== requestId || !/^[a-f0-9]{48}\.(jpg|png|webp|mp4)$/.test(String(item.storage_ref))) {
+  if (String(item.createdBy || item.owner_uid) !== ownerUid || String(item.request_id) !== requestId || !/^[a-f0-9]{48}\.(jpg|png|webp|mp4|pdf)$/.test(String(item.storage_ref))) {
     throw httpError(404, "المرفق غير موجود.");
   }
-  return { body: await readFile(path.join(attachmentRoot(), item.storage_ref)), media_type: String(item.media_type) };
+  return { body: await readFile(path.join(attachmentRoot(), item.storage_ref)), media_type: String(item.media_type), kind: String(item.kind) };
 }

@@ -73,7 +73,7 @@ export type MaintenanceRequestList = {
   capped: boolean;
 };
 
-export type MaintenanceAttachment = { id: string; kind: "image" | "video"; media_type: string; byte_size: number };
+export type MaintenanceAttachment = { id: string; kind: "image" | "video" | "document"; media_type: string; byte_size: number };
 export type MaintenanceProduct = { id: string; name: string; category: string; sku: string; image_url: string };
 export type MaintenanceKitOption = MaintenanceProduct & {
   kind: "filter_change" | "cooling_cells";

@@ -30,7 +30,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11003/);
+    assert.match(result.stdout, /"userVersion":11004/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -52,7 +52,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11003/);
+    assert.match(backups[0], /pre-schema-11004/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -62,10 +62,10 @@ test("a previous 10307 deployment upgrades through a new backup and ledger marke
   const { directory, result } = runCase("previous-10307", true);
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11003/);
+    assert.match(result.stdout, /"userVersion":11004/);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11003/);
+    assert.match(backups[0], /pre-schema-11004/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -123,6 +123,19 @@ test("the Supabase migration mirrors the Salla order synchronization schema", ()
   }
 });
 
+test("a previous 11003 deployment preserves attachments while enabling invoice documents", () => {
+  const { directory, result } = runCase("previous-11003", true);
+  try {
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /"userVersion":11004/);
+    const backups = readdirSync(path.join(directory, "backups"));
+    assert.equal(backups.length, 1);
+    assert.match(backups[0], /pre-schema-11004/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("the Supabase maintenance migration persists periodic kit compatibility fields", () => {
   const migration = readFileSync(
     path.join(root, "supabase", "migrations", "20260805170000_periodic_maintenance_kits.sql"),
@@ -140,6 +153,15 @@ test("the Supabase maintenance migration persists periodic kit compatibility fie
   ]) {
     assert.match(migration, new RegExp(required));
   }
+});
+
+test("the Supabase attachment migration enables invoice documents", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260805200000_maintenance_invoice_documents.sql"),
+    "utf8",
+  );
+  assert.match(migration, /maintenance_request_attachments_kind_check/);
+  assert.match(migration, /'image', 'video', 'document'/);
 });
 
 test("invoice financial backfill is gated off after the first schema startup", () => {

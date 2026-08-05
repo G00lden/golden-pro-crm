@@ -5,7 +5,7 @@
 #   * golden-crm.db.gz         - consistent SQLite snapshot, gzipped.
 #   * salla-integrations.json  - validated Salla connection state, mode 0600.
 #   * campaign-media.tar.gz    - uploaded WhatsApp campaign images and videos.
-#   * maintenance-attachments.tar.gz - customer maintenance photos and videos.
+#   * maintenance-attachments.tar.gz - customer maintenance media and invoice PDFs.
 #   * wa-session.tar.gz        - WhatsApp linked-device session, when present.
 #   * env.production           - production secrets, mode 0600, when present.
 #   * manifest.sha256          - checksums for every captured payload.
@@ -248,7 +248,7 @@ if "${COMPOSE[@]}" exec -T crm sh -c '[ -d /app/.runtime/maintenance-attachments
     fail "Maintenance attachments must use one flat directory."
   fi
   if find "$DEST/maintenance-attachments" -regextype posix-extended -mindepth 1 -type f \
-    ! -regex '.*/[a-f0-9]{48}\.(jpg|png|webp|mp4)' -print -quit | grep -q .; then
+    ! -regex '.*/[a-f0-9]{48}\.(jpg|png|webp|mp4|pdf)' -print -quit | grep -q .; then
     fail "Maintenance attachments contain a non-whitelisted filename."
   fi
   tar -czf "$DEST/maintenance-attachments.tar.gz" -C "$DEST" maintenance-attachments \

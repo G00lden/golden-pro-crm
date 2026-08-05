@@ -21,6 +21,8 @@ const files = [
   "server/capabilityGuard.test.ts",
   "server/maintenanceRequestAcceptance.test.ts",
   "server/maintenanceKitCompatibility.test.ts",
+  "server/maintenancePortalPeriodicVariants.test.ts",
+  "server/maintenanceAttachmentContract.test.ts",
   "server/clientIp.test.ts",
   "server/demoDataGuard.test.ts",
   "server/localAuthPolicy.test.ts",

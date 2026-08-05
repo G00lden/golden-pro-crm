@@ -147,6 +147,13 @@ test("VPS backup uses external storage, one lock, unique snapshots, and guarded 
   assert.match(backup, /backup pruning disabled for this operation/);
 });
 
+test("maintenance attachment backup and restore preserve invoice PDFs through strict filenames", () => {
+  assert.match(backup, /maintenance-attachments\.tar\.gz/);
+  assert.ok(backup.includes("(jpg|png|webp|mp4|pdf)"));
+  assert.match(restore, /validate_maintenance_attachments_archive/);
+  assert.ok(restore.includes("(jpg|png|webp|mp4|pdf)"));
+});
+
 test("VPS backup rejects root, outside-base, and unsafe lock destinations before mutation", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "crm-backup-path-policy-"));
   const approved = path.join(directory, "approved");

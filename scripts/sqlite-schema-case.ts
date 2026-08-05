@@ -152,6 +152,36 @@ if (scenario === "legacy" || scenario === "previous-10307") {
   legacy.close();
 }
 
+if (scenario === "previous-11003") {
+  const previous = new Database(dbPath);
+  previous.pragma("user_version = 11003");
+  previous.exec(`
+    CREATE TABLE maintenance_request_attachments (
+      id TEXT PRIMARY KEY,
+      owner_uid TEXT NOT NULL,
+      verification_id TEXT NOT NULL,
+      request_id TEXT,
+      kind TEXT NOT NULL CHECK (kind IN ('image', 'video')),
+      media_type TEXT NOT NULL,
+      byte_size INTEGER NOT NULL,
+      sha256 TEXT NOT NULL,
+      storage_ref TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX idx_maintenance_attachments_verification ON maintenance_request_attachments(verification_id, created_at);
+    CREATE INDEX idx_maintenance_attachments_request ON maintenance_request_attachments(request_id, created_at);
+    INSERT INTO maintenance_request_attachments (
+      id, owner_uid, verification_id, request_id, kind, media_type,
+      byte_size, sha256, storage_ref
+    ) VALUES (
+      'legacy-image', 'owner', 'verification-1', NULL, 'image', 'image/png',
+      8, '${"a".repeat(64)}', '${"b".repeat(48)}.png'
+    );
+  `);
+  previous.close();
+}
+
 const { default: db } = await import("../server/db");
 
 function columns(table: string) {
@@ -234,7 +264,19 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 11003) throw new Error(`Expected schema 11003, got ${userVersion}`);
+if (userVersion !== 11004) throw new Error(`Expected schema 11004, got ${userVersion}`);
+const attachmentTable = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_request_attachments'").get() as { sql?: string };
+if (!attachmentTable.sql?.includes("'document'")) throw new Error("Maintenance invoice document kind is missing.");
+if (scenario === "previous-11003") {
+  const legacyAttachment = db.prepare("SELECT kind FROM maintenance_request_attachments WHERE id = 'legacy-image'").get() as { kind?: string } | undefined;
+  if (legacyAttachment?.kind !== "image") throw new Error("Legacy maintenance attachment was not preserved.");
+}
+db.prepare(`
+  INSERT INTO maintenance_request_attachments (
+    id, owner_uid, verification_id, request_id, kind, media_type,
+    byte_size, sha256, storage_ref
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`).run("invoice-document-probe", "owner", "verification-probe", null, "document", "application/pdf", 9, "c".repeat(64), `${"d".repeat(48)}.pdf`);
 for (const required of [
   "request_number",
   "client_request_id",
@@ -669,12 +711,14 @@ const maintenancePortalMigration = db.prepare("SELECT release FROM schema_migrat
 const maintenanceAcceptanceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 11001").get() as { release?: string };
 const maintenanceExperienceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 11002").get() as { release?: string };
 const periodicMaintenanceMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 11003").get() as { release?: string };
+const maintenanceWizardMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 11004").get() as { release?: string };
 if (bulkReminderMigration?.release !== "1.9.4-whatsapp-bulk-reminders") throw new Error("WhatsApp bulk reminder migration was not updated.");
 if (deepSeekAssistantMigration?.release !== "1.9.5-whatsapp-deepseek-assistant") throw new Error("WhatsApp DeepSeek assistant migration was not updated.");
 if (maintenancePortalMigration?.release !== "1.9.6-maintenance-request-portal") throw new Error("Maintenance portal migration was not updated.");
 if (maintenanceAcceptanceMigration?.release !== "1.9.6-maintenance-request-acceptance-gates") throw new Error("Maintenance acceptance migration was not updated.");
 if (maintenanceExperienceMigration?.release !== "1.9.7-maintenance-customer-experience") throw new Error("Maintenance customer experience migration was not updated.");
 if (periodicMaintenanceMigration?.release !== "1.9.8-periodic-maintenance-kits") throw new Error("Periodic maintenance migration was not updated.");
+if (maintenanceWizardMigration?.release !== "1.9.9-maintenance-wizard-invoice-files") throw new Error("Maintenance wizard migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

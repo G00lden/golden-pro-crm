@@ -13,6 +13,8 @@ const whatsAppSource = read("./WhatsAppConsole.tsx");
 const callsSource = read("./CallSystem.tsx");
 const usersSource = read("./AdminUsers.tsx");
 const settingsSource = read("./Settings.tsx");
+const maintenancePortalSource = read("./CustomerMaintenancePortal.tsx");
+const maintenanceStylesSource = read("./MaintenanceRequests.css");
 
 test("application navigation and shared modals expose keyboard landmarks", () => {
   assert.match(appSource, /className="skip-link" href="#main-content"/);
@@ -99,4 +101,19 @@ test("focus, reduced-motion, modal overscroll, and mobile touch targets are expl
   assert.match(stylesSource, /\.sidebar\s*\{[\s\S]*?visibility:\s*hidden;[\s\S]*?pointer-events:\s*none;[\s\S]*?translateX\(calc\(100% \+ 2px\)\)/);
   assert.match(stylesSource, /@media \(max-width: 520px\)[\s\S]*?\.stats-grid,[\s\S]*?\.ops-strip\s*\{[\s\S]*?grid-template-columns:\s*1fr/);
   assert.match(stylesSource, /@media \(max-width: 520px\)[\s\S]*?\.store-filters-bar\s*\{[\s\S]*?grid-template-columns:\s*1fr/);
+});
+
+test("maintenance intake reveals one validated step and preserves accessible progress", () => {
+  assert.match(maintenancePortalSource, /const \[currentStep, setCurrentStep\] = useState<WizardStep>\(1\)/);
+  assert.match(maintenancePortalSource, /aria-label="تقدم طلب الصيانة"/);
+  assert.match(maintenancePortalSource, /<p aria-live="polite">الخطوة \{currentStep\} من \{wizardSteps\.length\}/);
+  for (const step of [1, 2, 3, 4]) {
+    assert.match(maintenancePortalSource, new RegExp(`id="maintenance-step-${step}"[\\s\\S]{0,180}?hidden=\\{currentStep !== ${step}\\}`));
+  }
+  assert.match(maintenancePortalSource, /ref=\{formRef\}/);
+  assert.match(maintenancePortalSource, /name="customer_phone"/);
+  assert.match(maintenancePortalSource, /accept="image\/jpeg,image\/png,image\/webp,video\/mp4,video\/quicktime,application\/pdf"/);
+  assert.match(maintenanceStylesSource, /\.maintenance-step\[hidden\]\s*\{\s*display:\s*none;/);
+  assert.match(maintenanceStylesSource, /\.maintenance-step:focus-visible/);
+  assert.doesNotMatch(maintenanceStylesSource, /transition:\s*all/);
 });

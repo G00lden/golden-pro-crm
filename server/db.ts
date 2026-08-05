@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 11003;
+const TARGET_SCHEMA_VERSION = 11004;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -523,7 +523,7 @@ db.exec(`
     owner_uid TEXT NOT NULL,
     verification_id TEXT NOT NULL,
     request_id TEXT,
-    kind TEXT NOT NULL CHECK (kind IN ('image', 'video')),
+    kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'document')),
     media_type TEXT NOT NULL,
     byte_size INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
@@ -2017,6 +2017,35 @@ if (schemaVersionBeforeMigration < TARGET_SCHEMA_VERSION) {
 // one IMMEDIATE transaction because separate Node processes can open the same
 // fresh database during startup; DROP + CREATE must never interleave.
 db.transaction(() => {
+  const attachmentSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_request_attachments'").get() as { sql?: string } | undefined;
+  if (attachmentSchema?.sql && !attachmentSchema.sql.includes("'document'")) {
+    db.exec(`
+      ALTER TABLE maintenance_request_attachments RENAME TO maintenance_request_attachments_legacy_11004;
+      CREATE TABLE maintenance_request_attachments (
+        id TEXT PRIMARY KEY,
+        owner_uid TEXT NOT NULL,
+        verification_id TEXT NOT NULL,
+        request_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'document')),
+        media_type TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        storage_ref TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO maintenance_request_attachments (
+        id, owner_uid, verification_id, request_id, kind, media_type,
+        byte_size, sha256, storage_ref, created_at, updated_at
+      ) SELECT
+        id, owner_uid, verification_id, request_id, kind, media_type,
+        byte_size, sha256, storage_ref, created_at, updated_at
+      FROM maintenance_request_attachments_legacy_11004;
+      DROP TABLE maintenance_request_attachments_legacy_11004;
+      CREATE INDEX IF NOT EXISTS idx_maintenance_attachments_verification ON maintenance_request_attachments(verification_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_maintenance_attachments_request ON maintenance_request_attachments(request_id, created_at);
+    `);
+  }
   db.exec(`
   DROP TRIGGER IF EXISTS invoices_prevent_issued_financial_update;
   CREATE TRIGGER invoices_prevent_issued_financial_update
@@ -2223,6 +2252,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11001, '1.9.6-maintenance-request-acceptance-gates');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11002, '1.9.7-maintenance-customer-experience');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11003, '1.9.8-periodic-maintenance-kits');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11004, '1.9.9-maintenance-wizard-invoice-files');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

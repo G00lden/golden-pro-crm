@@ -371,7 +371,7 @@ validate_maintenance_attachments_archive() {
   fi
   if ! awk '
     BEGIN { count=0 }
-    $0 !~ /^maintenance-attachments\/?$/ && $0 !~ /^maintenance-attachments\/[a-f0-9]{48}\.(jpg|png|webp|mp4)$/ { exit 1 }
+    $0 !~ /^maintenance-attachments\/?$/ && $0 !~ /^maintenance-attachments\/[a-f0-9]{48}\.(jpg|png|webp|mp4|pdf)$/ { exit 1 }
     { count++ }
     END { if (count == 0) exit 1 }
   ' "$listing"; then
@@ -704,7 +704,7 @@ log "validating restored runtime before CRM startup"
       const name = current.split("/").pop() || "";
       if (
         stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())
-        || (stat.isFile() && !/^[a-f0-9]{48}\.(jpg|png|webp|mp4)$/.test(name))
+        || (stat.isFile() && !/^[a-f0-9]{48}\.(jpg|png|webp|mp4|pdf)$/.test(name))
       ) {
         console.error("Restored maintenance attachments contain an unsupported file or name.");
         process.exitCode = 5;
