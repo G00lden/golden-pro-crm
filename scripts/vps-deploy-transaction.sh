@@ -477,7 +477,7 @@ staged_proxy_contract_matches() {
   done
 }
 staged_proxy_contract_matches \
-  || restore_previous "The staged release would drop or misroute the required CRM/ERP/Stage proxy or Caddy volume contract."
+  || restore_previous "The staged release would drop the required CRM/ERP proxy or Caddy volume contract, or drop/misroute the isolated Odoo Stage route."
 
 START_CADDY_DATA_VOLUME=""
 START_CADDY_CONFIG_VOLUME=""
