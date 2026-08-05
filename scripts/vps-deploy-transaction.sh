@@ -9,6 +9,7 @@ APP_DIR="${APP_DIR:-/opt/golden-pro-crm}"
 DEPLOY_APPROVED_APP_BASE="${DEPLOY_APPROVED_APP_BASE:-}"
 CRM_DOMAIN="${CRM_DOMAIN:-crm.breexe-pro.com}"
 ERP_DOMAIN="${ERP_DOMAIN:-erp.breexe-pro.com}"
+ODOO_STAGE_DOMAIN="${ODOO_STAGE_DOMAIN:-stage-erp.breexe-pro.com}"
 DEPLOY_ARCHIVE="${DEPLOY_ARCHIVE:-}"
 DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-}"
 DEPLOY_BACKUP_HELPER="${DEPLOY_BACKUP_HELPER:-}"
@@ -119,6 +120,7 @@ CANONICAL_RETENTION_ROOT="$(readlink -m -- "$SOURCE_RETENTION_ROOT")"
 case "$SOURCE_RETENTION_ROOT" in "$APP_DIR"|"$APP_DIR"/*) fail "source retention cannot be inside APP_DIR" ;; esac
 case "$CRM_DOMAIN" in ''|*[!A-Za-z0-9.-]*) fail "CRM_DOMAIN is invalid" ;; esac
 case "$ERP_DOMAIN" in ''|*[!A-Za-z0-9.-]*) fail "ERP_DOMAIN is invalid" ;; esac
+case "$ODOO_STAGE_DOMAIN" in ''|*[!A-Za-z0-9.-]*) fail "ODOO_STAGE_DOMAIN is invalid" ;; esac
 for volume_name in "$FIRST_DEPLOY_CADDY_DATA_VOLUME" "$FIRST_DEPLOY_CADDY_CONFIG_VOLUME"; do
   case "$volume_name" in
     ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) fail "first-deploy Caddy volume names are invalid" ;;
@@ -441,7 +443,7 @@ for required_file in release.json deploy/docker-compose.yml deploy/Caddyfile dep
 done
 
 staged_proxy_contract_matches() {
-  local caddy="$STAGED_SOURCE/deploy/Caddyfile" compose="$STAGED_SOURCE/deploy/docker-compose.yml" marker
+  local caddy="$STAGED_SOURCE/deploy/Caddyfile" compose="$STAGED_SOURCE/deploy/docker-compose.yml" marker stage_block
   for marker in \
     'auto_https off' \
     'http://{$CRM_DOMAIN}' \
@@ -451,9 +453,21 @@ staged_proxy_contract_matches() {
     'https://{$ERP_DOMAIN}' \
     '/{$ERP_DOMAIN}/{$ERP_DOMAIN}.crt' \
     '/{$ERP_DOMAIN}/{$ERP_DOMAIN}.key' \
-    'reverse_proxy host.docker.internal:8069'; do
+    'reverse_proxy host.docker.internal:8069' \
+    'http://stage-erp.breexe-pro.com' \
+    'https://stage-erp.breexe-pro.com' \
+    '/stage-erp.breexe-pro.com/stage-erp.breexe-pro.com.crt' \
+    '/stage-erp.breexe-pro.com/stage-erp.breexe-pro.com.key'; do
     grep -Fq -- "$marker" "$caddy" || return 1
   done
+  stage_block="$(awk '
+    /^https:\/\/stage-erp\.breexe-pro\.com[[:space:]]*\{/ { inside=1 }
+    inside { print }
+    inside && /^[[:space:]]*}[[:space:]]*$/ { exit }
+  ' "$caddy")"
+  [ -n "$stage_block" ] || return 1
+  printf '%s\n' "$stage_block" | grep -Fq -- 'reverse_proxy host.docker.internal:18070' || return 1
+  if printf '%s\n' "$stage_block" | grep -Fq -- 'host.docker.internal:8069'; then return 1; fi
   for marker in \
     'host.docker.internal:host-gateway' \
     'ERP_DOMAIN: ${ERP_DOMAIN:-erp.breexe-pro.com}' \
@@ -463,7 +477,7 @@ staged_proxy_contract_matches() {
   done
 }
 staged_proxy_contract_matches \
-  || restore_previous "The staged release would drop the required CRM/ERP proxy or Caddy volume contract."
+  || restore_previous "The staged release would drop or misroute the required CRM/ERP/Stage proxy or Caddy volume contract."
 
 START_CADDY_DATA_VOLUME=""
 START_CADDY_CONFIG_VOLUME=""
@@ -527,6 +541,7 @@ RUNTIME_MUTATED=true
 if ! APP_DIR="$APP_DIR" CRM_DOMAIN="$CRM_DOMAIN" EXPECTED_VERSION="$EXPECTED_VERSION" \
   EXPECTED_BUILD="$EXPECTED_BUILD" BUILD_COMMIT="$EXPECTED_BUILD" \
   HEALTH_RETRIES="$HEALTH_RETRIES" HEALTH_SLEEP="$HEALTH_SLEEP" ERP_DOMAIN="$ERP_DOMAIN" \
+  ODOO_STAGE_DOMAIN="$ODOO_STAGE_DOMAIN" \
   CADDY_VALIDATION_DATA_VOLUME="$START_CADDY_DATA_VOLUME" \
   CADDY_VALIDATION_CONFIG_VOLUME="$START_CADDY_CONFIG_VOLUME" \
   bash "$APP_DIR/deploy/remote-start.sh"; then

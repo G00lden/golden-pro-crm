@@ -66,3 +66,15 @@ https://{$ERP_DOMAIN} {
 	tls /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/{$ERP_DOMAIN}/{$ERP_DOMAIN}.crt /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/{$ERP_DOMAIN}/{$ERP_DOMAIN}.key
 	reverse_proxy host.docker.internal:8069
 }
+
+# Odoo Stage is intentionally isolated from Live. Keep this literal route in
+# the release artifact so a CRM deployment cannot silently drop Stage TLS or
+# fall back to the Live Odoo upstream on port 8069.
+http://stage-erp.breexe-pro.com {
+	redir https://{host}{uri} permanent
+}
+
+https://stage-erp.breexe-pro.com {
+	tls /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/stage-erp.breexe-pro.com/stage-erp.breexe-pro.com.crt /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/stage-erp.breexe-pro.com/stage-erp.breexe-pro.com.key
+	reverse_proxy host.docker.internal:18070
+}

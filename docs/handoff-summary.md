@@ -641,3 +641,12 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Adversarial coverage includes malformed/empty model output, timeouts, HTTP errors, rate limits, untrusted fields, low confidence, cross-customer/cross-owner order access, exact-order extraction, duplicate handoffs, department assignment, and active-session AI bypass.
 - Live DeepSeek activation is intentionally blocked until the key exposed in the user-provided image is revoked and a replacement is stored directly in the production environment. No exposed credential was used or saved.
 - Arabic architecture, activation, canary, and rollback guide: `docs/whatsapp-deepseek-assistant-ar.md`.
+
+## 2026-08-05 - Permanent Odoo Stage TLS route guard [Codex]
+
+- Restored `stage-erp.breexe-pro.com` after a CRM/Caddy recreation dropped its site block and caused `ERR_SSL_PROTOCOL_ERROR` while Odoo Stage itself remained healthy.
+- The release Caddyfile now keeps Stage on the isolated bridge `host.docker.internal:18070`; the Live Odoo upstream remains `host.docker.internal:8069`.
+- The deployment transaction fails before source replacement if the Stage HTTP/HTTPS blocks, certificate paths, or isolated upstream are missing, and explicitly rejects a Stage block routed to port `8069`.
+- Post-recreate health checks now require both the Live ERP and Stage Odoo login pages to respond before a release can succeed.
+- Added `scripts/stage-route-contract.test.mjs` to the unit suite. It covers route presence, certificate paths, the `18070` upstream, and the no-`8069` isolation invariant.
+- Recovery evidence: Caddy validation passed, TLS 1.3 negotiated with CN `stage-erp.breexe-pro.com`, the endpoint returned HTTP `303` to Odoo login, `odoo19-stage.service` and its proxy socket remained active, and `database.is_neutralized` returned `true` for `BreeXe_Stage`.

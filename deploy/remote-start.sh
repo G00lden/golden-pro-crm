@@ -4,6 +4,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/golden-pro-crm}"
 CRM_DOMAIN="${CRM_DOMAIN:-crm.breexe-pro.com}"
 ERP_DOMAIN="${ERP_DOMAIN:-erp.breexe-pro.com}"
+ODOO_STAGE_DOMAIN="${ODOO_STAGE_DOMAIN:-stage-erp.breexe-pro.com}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-30}"
 HEALTH_SLEEP="${HEALTH_SLEEP:-4}"
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
@@ -28,6 +29,9 @@ case "$CRM_DOMAIN" in
 esac
 case "$ERP_DOMAIN" in
   *[!A-Za-z0-9.-]*|'') fail "ERP_DOMAIN is invalid" ;;
+esac
+case "$ODOO_STAGE_DOMAIN" in
+  *[!A-Za-z0-9.-]*|'') fail "ODOO_STAGE_DOMAIN is invalid" ;;
 esac
 case "$HEALTH_RETRIES:$HEALTH_SLEEP" in
   *[!0-9:]*) fail "health retry settings must be integers" ;;
@@ -232,7 +236,9 @@ erp_login_matches() {
 wait_for_release() {
   local attempt
   for attempt in $(seq 1 "$HEALTH_RETRIES"); do
-    if internal_release_matches && caddy_release_matches && erp_login_matches "$ERP_DOMAIN"; then
+    if internal_release_matches && caddy_release_matches \
+      && erp_login_matches "$ERP_DOMAIN" \
+      && erp_login_matches "$ODOO_STAGE_DOMAIN"; then
       return 0
     fi
     sleep "$HEALTH_SLEEP"
@@ -255,4 +261,4 @@ if ! wait_for_release; then
 fi
 
 "${COMPOSE[@]}" ps
-echo "Golden Pro CRM $EXPECTED_VERSION is healthy internally and through the HTTP origin at build $EXPECTED_BUILD; the Odoo ERP login page is healthy."
+echo "Golden Pro CRM $EXPECTED_VERSION is healthy internally and through the HTTP origin at build $EXPECTED_BUILD; the Odoo Live and isolated Stage login pages are healthy."

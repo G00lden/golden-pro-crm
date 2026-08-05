@@ -9,6 +9,7 @@ const files = [
   "scripts/schema-migration.test.mjs",
   "scripts/user-identity.test.mjs",
   "scripts/vps-backup-restore.test.mjs",
+  "scripts/stage-route-contract.test.mjs",
   "shared/date.test.ts",
   "shared/financial.test.ts",
   "shared/invoiceItems.test.ts",
