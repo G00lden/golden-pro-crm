@@ -129,3 +129,17 @@ test("maintenance location permission and 12-hour appointment display remain exp
   assert.match(maintenancePortalSource, /formatMaintenanceTime\(slot\.time\)/);
   assert.match(maintenancePortalSource, /معاينة الموقع المسجّل/);
 });
+
+test("maintenance portal exposes responsive branded navigation and safe-area footer actions", () => {
+  assert.match(maintenancePortalSource, /className="maintenance-portal__header-inner"/);
+  assert.match(maintenancePortalSource, /className="maintenance-portal__header-nav" aria-label=/);
+  assert.match(maintenancePortalSource, /<footer className="maintenance-portal__footer">/);
+  assert.match(maintenancePortalSource, /<nav className="maintenance-portal__bottom-nav" aria-label=/);
+  assert.match(maintenancePortalSource, /className="maintenance-portal__bottom-support"/);
+  assert.match(maintenancePortalSource, /href="\/legal\/privacy"/);
+  assert.match(maintenancePortalSource, /href="\/legal\/terms"/);
+  assert.match(maintenanceStylesSource, /\.maintenance-portal__header\s*\{[\s\S]*?position:\s*sticky/);
+  assert.match(maintenanceStylesSource, /\.maintenance-portal\s*\{[\s\S]*?overflow-x:\s*clip/);
+  assert.match(maintenanceStylesSource, /\.maintenance-portal__bottom-nav\s*\{[\s\S]*?position:\s*fixed/);
+  assert.match(maintenanceStylesSource, /env\(safe-area-inset-bottom\)/);
+});

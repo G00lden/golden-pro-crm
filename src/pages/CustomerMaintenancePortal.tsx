@@ -40,6 +40,7 @@ import {
 } from "../maintenanceRequestsApi";
 import { maintenanceRequestStatusLabel, maintenanceRequestStatusTone } from "../../shared/maintenanceRequest";
 import { formatMaintenanceTime } from "../../shared/maintenanceTime";
+import { PublicContactLink } from "../components/PublicContactLink";
 import "./MaintenanceRequests.css";
 
 const dateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", { dateStyle: "medium", timeStyle: "short" });
@@ -47,6 +48,7 @@ const dayFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", { weekday: "l
 const GEOLOCATION_PERMISSION_DENIED = 1;
 const GEOLOCATION_POSITION_UNAVAILABLE = 2;
 const GEOLOCATION_TIMEOUT = 3;
+const MAINTENANCE_SUPPORT_MESSAGE = "السلام عليكم، أحتاج مساعدة في بوابة صيانة BreeXe Pro.";
 const wizardSteps = [
   { number: 1, label: "نوع الصيانة" },
   { number: 2, label: "تأكيد واتساب" },
@@ -357,7 +359,20 @@ export default function CustomerMaintenancePortal() {
     <div className="maintenance-portal" dir="rtl">
       <a className="skip-link" href="#maintenance-portal-main">انتقل إلى المحتوى</a>
       <header className="maintenance-portal__header">
-        <Brand />
+        <div className="maintenance-portal__header-inner">
+          <Brand />
+          <nav className="maintenance-portal__header-nav" aria-label="روابط بوابة الصيانة">
+            <a href={customerPortalUrl()}><Wrench aria-hidden="true" /> طلب صيانة</a>
+            <PublicContactLink
+              channel="whatsapp"
+              whatsappText={MAINTENANCE_SUPPORT_MESSAGE}
+              className="maintenance-portal__header-support"
+              ariaLabel="المساعدة عبر واتساب"
+            >
+              <MessageCircleMore aria-hidden="true" /> المساعدة عبر واتساب
+            </PublicContactLink>
+          </nav>
+        </div>
       </header>
 
       <main id="maintenance-portal-main" className="maintenance-portal__main" tabIndex={-1}>
@@ -415,7 +430,7 @@ export default function CustomerMaintenancePortal() {
               <div className="maintenance-portal__trust-grid"><span><MessageCircleMore /> تحقق عبر واتساب</span><span><CalendarClock /> مواعيد متاحة فعلياً</span><span><ShieldCheck /> ملف متابعة خاص</span></div>
             </div>
 
-            <nav className="maintenance-wizard-progress" aria-label="تقدم طلب الصيانة">
+            <nav id="maintenance-request-flow" className="maintenance-wizard-progress" aria-label="تقدم طلب الصيانة">
               <ol>
                 {wizardSteps.map((step) => <li key={step.number} className={currentStep === step.number ? "active" : currentStep > step.number ? "complete" : ""} aria-current={currentStep === step.number ? "step" : undefined}>
                   <span>{currentStep > step.number ? <Check aria-hidden="true" /> : step.number}</span>
@@ -511,6 +526,45 @@ export default function CustomerMaintenancePortal() {
           </section>
         )}
       </main>
+
+      <footer className="maintenance-portal__footer">
+        <div className="maintenance-portal__footer-inner">
+          <div className="maintenance-portal__footer-brand">
+            <img src="/brand/icon-256.png" width="46" height="46" alt="" loading="lazy" />
+            <span><strong translate="no">BreeXe Pro</strong><small>مركز الصيانة وخدمة ما بعد البيع</small></span>
+          </div>
+          <nav aria-label="روابط معلومات بوابة الصيانة">
+            <a href="/legal/privacy">الخصوصية</a>
+            <a href="/legal/terms">الشروط والأحكام</a>
+            <PublicContactLink
+              channel="whatsapp"
+              whatsappText={MAINTENANCE_SUPPORT_MESSAGE}
+              className="maintenance-portal__footer-support"
+              ariaLabel="تواصل مع دعم الصيانة عبر واتساب"
+            >
+              دعم الصيانة
+            </PublicContactLink>
+          </nav>
+          <p>خدمة صيانة موثقة لأجهزة <span translate="no">BreeXe Pro</span> من الطلب حتى الإغلاق.</p>
+        </div>
+      </footer>
+
+      <nav className="maintenance-portal__bottom-nav" aria-label="اختصارات بوابة الصيانة">
+        <a href={customerPortalUrl()} aria-current={!token ? "page" : undefined}>
+          <Wrench aria-hidden="true" /><span>طلب جديد</span>
+        </a>
+        <a href={token ? "#maintenance-portal-main" : "#maintenance-request-flow"} aria-current={token ? "page" : undefined}>
+          <ClipboardList aria-hidden="true" /><span>{token ? "ملف الطلب" : "الخطوات"}</span>
+        </a>
+        <PublicContactLink
+          channel="whatsapp"
+          whatsappText={MAINTENANCE_SUPPORT_MESSAGE}
+          className="maintenance-portal__bottom-support"
+          ariaLabel="المساعدة عبر واتساب"
+        >
+          <MessageCircleMore aria-hidden="true" /><span>واتساب</span>
+        </PublicContactLink>
+      </nav>
     </div>
   );
 }
