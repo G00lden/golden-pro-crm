@@ -607,6 +607,7 @@
 .maintenance-slot-times { display: flex; flex-wrap: wrap; gap: 8px; }
 .maintenance-slot-times button { display: inline-flex; align-items: center; justify-content: center; min-width: 88px; gap: 5px; font-variant-numeric: tabular-nums; }
 .maintenance-location { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.maintenance-location .maintenance-map-link { margin: 0; }
 .maintenance-map-link { display: inline-flex; align-items: center; min-height: 44px; gap: 7px; margin: 0 0 20px; padding: 9px 13px; border: 1px solid #cbd7df; border-radius: 10px; color: #0b355c; background: #fff; font-weight: 800; text-decoration: none; }
 .maintenance-product-summary { grid-template-columns: 64px minmax(0, 1fr); }
 .maintenance-product-summary img { grid-row: 1 / 4; object-fit: contain; border-radius: 9px; background: #f2f5f7; }

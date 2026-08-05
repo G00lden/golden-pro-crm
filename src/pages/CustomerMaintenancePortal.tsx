@@ -39,10 +39,14 @@ import {
   type PublicMaintenanceRequest,
 } from "../maintenanceRequestsApi";
 import { maintenanceRequestStatusLabel, maintenanceRequestStatusTone } from "../../shared/maintenanceRequest";
+import { formatMaintenanceTime } from "../../shared/maintenanceTime";
 import "./MaintenanceRequests.css";
 
 const dateFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", { dateStyle: "medium", timeStyle: "short" });
 const dayFormatter = new Intl.DateTimeFormat("ar-SA-u-ca-gregory", { weekday: "long", day: "numeric", month: "short" });
+const GEOLOCATION_PERMISSION_DENIED = 1;
+const GEOLOCATION_POSITION_UNAVAILABLE = 2;
+const GEOLOCATION_TIMEOUT = 3;
 const wizardSteps = [
   { number: 1, label: "نوع الصيانة" },
   { number: 2, label: "تأكيد واتساب" },
@@ -96,6 +100,7 @@ export default function CustomerMaintenancePortal() {
   const [attachments, setAttachments] = useState<MaintenanceAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [location, setLocation] = useState<{ latitude: number; longitude: number; accuracy: number } | null>(null);
+  const [locating, setLocating] = useState(false);
   const clientRequestId = useRef(crypto.randomUUID());
   const formRef = useRef<HTMLFormElement>(null);
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
@@ -156,9 +161,9 @@ export default function CustomerMaintenancePortal() {
   const canCustomerChange = request && ["new", "approved", "scheduled"].includes(request.status);
   const scheduleText = useMemo(() => {
     if (!request?.scheduled_date) return request?.preferred_date
-      ? `${request.preferred_date}${request.preferred_time ? ` · ${request.preferred_time}` : ""} (مطلوب)`
+      ? `${request.preferred_date}${request.preferred_time ? ` · ${formatMaintenanceTime(request.preferred_time)}` : ""} (مطلوب)`
       : "لم يُحدد الموعد بعد";
-    return `${request.scheduled_date}${request.scheduled_time ? ` · ${request.scheduled_time}` : ""}`;
+    return `${request.scheduled_date}${request.scheduled_time ? ` · ${formatMaintenanceTime(request.scheduled_time)}` : ""}`;
   }, [request]);
 
   const sendOtp = async () => {
@@ -200,18 +205,53 @@ export default function CustomerMaintenancePortal() {
     } finally { setUploading(false); }
   };
 
-  const captureLocation = () => {
-    if (!navigator.geolocation) { setError("المتصفح لا يدعم تحديد الموقع. أضف رابط الموقع بدلاً منه."); return; }
+  const captureLocation = async () => {
+    if (!window.isSecureContext) { setError("تحديد الموقع يحتاج اتصالاً آمناً. افتح الصفحة عبر HTTPS أو أضف رابط الموقع."); return; }
+    if (!navigator.geolocation) { setError("المتصفح لا يدعم تحديد الموقع. أضف رابط Google Maps بدلاً منه."); return; }
+    const locate = (options: PositionOptions) => new Promise<GeolocationPosition>((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, options);
+    });
+    setLocating(true);
     setError("");
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setLocation({ latitude: position.coords.latitude, longitude: position.coords.longitude, accuracy: position.coords.accuracy });
-        setNotice("تم تسجيل موقع الصيانة.");
-      },
-      () => setError("تعذر الوصول إلى الموقع. اسمح بالوصول أو أضف رابط الموقع."),
-      { enableHighAccuracy: true, timeout: 15_000, maximumAge: 60_000 },
-    );
+    setNotice("");
+    try {
+      let position: GeolocationPosition;
+      try {
+        position = await locate({ enableHighAccuracy: true, timeout: 12_000, maximumAge: 60_000 });
+      } catch (reason) {
+        const code = Number((reason as GeolocationPositionError)?.code || 0);
+        if (code === GEOLOCATION_PERMISSION_DENIED) throw reason;
+        position = await locate({ enableHighAccuracy: false, timeout: 10_000, maximumAge: 300_000 });
+      }
+      const nextLocation = {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+      };
+      if (![nextLocation.latitude, nextLocation.longitude, nextLocation.accuracy].every(Number.isFinite)) {
+        throw new Error("invalid_geolocation");
+      }
+      setLocation(nextLocation);
+      setNotice("تم تسجيل موقع الصيانة. راجع الموقع المسجّل قبل إرسال الطلب.");
+    } catch (reason) {
+      const code = Number((reason as GeolocationPositionError)?.code || 0);
+      if (code === GEOLOCATION_PERMISSION_DENIED) {
+        setError("صلاحية الموقع مرفوضة. اسمح للموقع من إعدادات المتصفح ثم حاول مجدداً، أو أضف رابط Google Maps.");
+      } else if (code === GEOLOCATION_POSITION_UNAVAILABLE) {
+        setError("تعذر تحديد موقع الجهاز. فعّل GPS والإنترنت ثم حاول مجدداً، أو أضف رابط Google Maps.");
+      } else if (code === GEOLOCATION_TIMEOUT) {
+        setError("استغرق تحديد الموقع وقتاً طويلاً. انتقل لمكان مفتوح وحاول مجدداً، أو أضف رابط Google Maps.");
+      } else {
+        setError("تعذر تسجيل الموقع. حاول مجدداً أو أضف رابط Google Maps.");
+      }
+    } finally {
+      setLocating(false);
+    }
   };
+
+  const locationMapUrl = location
+    ? `https://www.google.com/maps?q=${encodeURIComponent(`${location.latitude},${location.longitude}`)}`
+    : "";
 
   const continueFromServiceType = () => {
     if (!requestType) {
@@ -458,7 +498,7 @@ export default function CustomerMaintenancePortal() {
                 <SlotPicker availability={availability} date={selectedDate} time={selectedTime} onSelect={(date, time) => { setSelectedDate(date); setSelectedTime(time); }} />
                 <label>المدينة<input name="city" autoComplete="address-level2" maxLength={160} required placeholder="مثال: الرياض" /></label>
                 <label className="maintenance-portal__full">عنوان موقع الصيانة<input name="address" autoComplete="street-address" minLength={5} maxLength={1000} required placeholder="الحي، الشارع، رقم المبنى" /></label>
-                <div className="maintenance-location maintenance-portal__full"><button className="maintenance-link-button" type="button" onClick={captureLocation}><MapPin aria-hidden="true" /> {location ? "تحديث الموقع" : "تسجيل موقعي الحالي"}</button>{location && <span className="maintenance-verified"><Check aria-hidden="true" /> تم تسجيل الموقع بدقة {Math.round(location.accuracy)}م</span>}</div>
+                <div className="maintenance-location maintenance-portal__full"><button className="maintenance-link-button" type="button" onClick={captureLocation} disabled={locating} aria-busy={locating || undefined}><MapPin aria-hidden="true" /> {locating ? "جاري تحديد الموقع…" : location ? "تحديث الموقع" : "تسجيل موقعي الحالي"}</button>{location && <><span className="maintenance-verified" role="status"><Check aria-hidden="true" /> تم تسجيل الموقع بدقة {Math.round(location.accuracy)} م</span><a className="maintenance-map-link" href={locationMapUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" /> معاينة الموقع المسجّل</a></>}</div>
                 <label className="maintenance-portal__full">أو رابط الموقع<input name="location_url" type="url" inputMode="url" autoComplete="url" placeholder="https://maps.google.com/?q=24.7136,46.6753" /></label>
                 <label className="maintenance-portal__checkbox maintenance-portal__full"><input name="accept_terms" type="checkbox" required /><span>أوافق على استخدام بياناتي وموقعي ومرفقاتي لإدارة طلب الصيانة والتواصل بشأنه فقط.</span></label>
                 <label className="maintenance-portal__honeypot" aria-hidden="true">الموقع<input name="website" tabIndex={-1} autoComplete="off" /></label>
@@ -479,5 +519,5 @@ function SlotPicker({ availability, date, time, onSelect }: { availability: Main
   if (!availability) return <div className="maintenance-slots maintenance-portal__full" role="status">جاري تحميل المواعيد المتاحة</div>;
   if (!availability.ready) return <div className="maintenance-portal__warning maintenance-portal__full" role="status">لا توجد مواعيد متاحة حالياً. يرجى المحاولة لاحقاً.</div>;
   const selected = availability.dates.find((item) => item.date === date);
-  return <div className="maintenance-slots maintenance-portal__full"><h3>اختر اليوم المتاح</h3><div className="maintenance-slot-days">{availability.dates.map((item) => <button key={item.date} type="button" className={date === item.date ? "active" : ""} onClick={() => onSelect(item.date, "")}><span>{dayFormatter.format(new Date(`${item.date}T12:00:00+03:00`))}</span><small>{item.slots.length} أوقات</small></button>)}</div>{selected && <><h3>اختر الوقت</h3><div className="maintenance-slot-times">{selected.slots.map((slot) => <button key={slot.time} type="button" className={time === slot.time ? "active" : ""} onClick={() => onSelect(date, slot.time)}><bdi>{slot.time}</bdi>{time === slot.time && <Check size={16} />}</button>)}</div></>}</div>;
+  return <div className="maintenance-slots maintenance-portal__full"><h3>اختر اليوم المتاح</h3><div className="maintenance-slot-days">{availability.dates.map((item) => <button key={item.date} type="button" className={date === item.date ? "active" : ""} onClick={() => onSelect(item.date, "")}><span>{dayFormatter.format(new Date(`${item.date}T12:00:00+03:00`))}</span><small>{item.slots.length} أوقات</small></button>)}</div>{selected && <><h3>اختر الوقت</h3><div className="maintenance-slot-times">{selected.slots.map((slot) => <button key={slot.time} type="button" className={time === slot.time ? "active" : ""} onClick={() => onSelect(date, slot.time)}><bdi>{formatMaintenanceTime(slot.time)}</bdi>{time === slot.time && <Check size={16} aria-hidden="true" />}</button>)}</div></>}</div>;
 }

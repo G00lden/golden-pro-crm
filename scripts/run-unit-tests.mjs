@@ -12,6 +12,7 @@ const files = [
   "scripts/vps-backup-restore.test.mjs",
   "shared/date.test.ts",
   "shared/financial.test.ts",
+  "shared/maintenanceTime.test.ts",
   "shared/invoiceItems.test.ts",
   "shared/invoiceLifecycle.test.ts",
   "shared/phone.test.ts",

@@ -51,6 +51,7 @@ import {
   maintenanceRequestStatusTone,
   type MaintenanceRequestStatus,
 } from "../../shared/maintenanceRequest";
+import { formatMaintenanceTime } from "../../shared/maintenanceTime";
 import "./MaintenanceRequests.css";
 import { useDialogAccessibility } from "../dialogAccessibility";
 
@@ -432,8 +433,8 @@ function MaintenanceRequestDrawer({
               {request.maintenance_kit_name && <article><span>طقم الصيانة المعتمد</span><strong>{request.maintenance_kit_name}</strong><small>{request.maintenance_kind === "cooling_cells" ? "تغيير خلايا تبريد" : "تغيير فلاتر"}</small></article>}
               <article className="wide"><span>العنوان</span><strong>{request.address || "غير محدد"}</strong><small>{request.city}</small></article>
               <article className="wide"><span>{request.request_type === "periodic" ? "ملاحظات الطلب" : "وصف العطل"}</span><p>{request.issue_description || "لا توجد ملاحظات إضافية"}</p></article>
-              <article><span>الموعد المطلوب</span><strong><bdi>{request.preferred_date || "غير محدد"} {request.preferred_time || ""}</bdi></strong></article>
-              <article><span>الموعد المعتمد</span><strong><bdi>{request.scheduled_date || "لم يحدد"} {request.scheduled_time || ""}</bdi></strong><small>{request.technician_name || "لم يسند"}</small></article>
+              <article><span>الموعد المطلوب</span><strong><bdi>{request.preferred_date || "غير محدد"} {formatMaintenanceTime(request.preferred_time)}</bdi></strong></article>
+              <article><span>الموعد المعتمد</span><strong><bdi>{request.scheduled_date || "لم يحدد"} {formatMaintenanceTime(request.scheduled_time)}</bdi></strong><small>{request.technician_name || "لم يسند"}</small></article>
               <article><span>التحقق والمرفقات</span><strong>{request.phone_verified_at || request.phone_verified ? "واتساب مؤكد" : "غير مؤكد"}</strong><small>{request.attachment_count || details.data?.attachments.length || 0} مرفقات</small></article>
             </section>
 
@@ -484,7 +485,7 @@ function MaintenanceRequestDrawer({
                         </SelectInput>
                       </Field>
                       <Field label="التاريخ"><SelectInput name="date" value={assignDate} onChange={(event) => { const nextDate = event.target.value; setAssignDate(nextDate); setAssignTime(availability?.dates.find((item) => item.date === nextDate)?.slots[0]?.time || ""); }} required><option value="" disabled>اختر من الجدول المتاح</option>{availability?.dates.map((item) => <option value={item.date} key={item.date}>{item.date}</option>)}</SelectInput></Field>
-                      <Field label="الوقت"><SelectInput name="scheduled_time" value={assignTime} onChange={(event) => setAssignTime(event.target.value)} required><option value="" disabled>اختر الوقت</option>{availability?.dates.find((item) => item.date === assignDate)?.slots.map((slot) => <option value={slot.time} key={slot.time}>{slot.time}</option>)}</SelectInput></Field>
+                      <Field label="الوقت"><SelectInput name="scheduled_time" value={assignTime} onChange={(event) => setAssignTime(event.target.value)} required><option value="" disabled>اختر الوقت</option>{availability?.dates.find((item) => item.date === assignDate)?.slots.map((slot) => <option value={slot.time} key={slot.time}>{formatMaintenanceTime(slot.time)}</option>)}</SelectInput></Field>
                       <Field label="تعليمات للفني"><TextArea name="note" rows={3} maxLength={2000} placeholder="تفاصيل الوصول أو تعليمات المهمة…" /></Field>
                     </>
                   ) : actionMode === "close" ? (

@@ -15,6 +15,7 @@ const usersSource = read("./AdminUsers.tsx");
 const settingsSource = read("./Settings.tsx");
 const maintenancePortalSource = read("./CustomerMaintenancePortal.tsx");
 const maintenanceStylesSource = read("./MaintenanceRequests.css");
+const serverSource = read("../../server.ts");
 
 test("application navigation and shared modals expose keyboard landmarks", () => {
   assert.match(appSource, /className="skip-link" href="#main-content"/);
@@ -116,4 +117,15 @@ test("maintenance intake reveals one validated step and preserves accessible pro
   assert.match(maintenanceStylesSource, /\.maintenance-step\[hidden\]\s*\{\s*display:\s*none;/);
   assert.match(maintenanceStylesSource, /\.maintenance-step:focus-visible/);
   assert.doesNotMatch(maintenanceStylesSource, /transition:\s*all/);
+});
+
+test("maintenance location permission and 12-hour appointment display remain explicit", () => {
+  assert.match(serverSource, /Permissions-Policy", "camera=\(\), microphone=\(\), geolocation=\(self\)"/);
+  assert.doesNotMatch(serverSource, /Permissions-Policy", "[^"]*geolocation=\(\)"/);
+  assert.match(maintenancePortalSource, /const \[locating, setLocating\] = useState\(false\)/);
+  assert.match(maintenancePortalSource, /GEOLOCATION_PERMISSION_DENIED/);
+  assert.match(maintenancePortalSource, /enableHighAccuracy: false, timeout: 10_000/);
+  assert.match(maintenancePortalSource, /aria-busy=\{locating \|\| undefined\}/);
+  assert.match(maintenancePortalSource, /formatMaintenanceTime\(slot\.time\)/);
+  assert.match(maintenancePortalSource, /معاينة الموقع المسجّل/);
 });
