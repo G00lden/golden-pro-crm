@@ -168,6 +168,30 @@ async function main() {
     } else {
       ok(`صلاحية رابط العميل محددة (${portalTtlDays} يوم)`);
     }
+    const maintenanceOtpMode = String(env.MAINTENANCE_WHATSAPP_OTP_MODE || "disabled").trim();
+    if (!["disabled", "allowlist", "production"].includes(maintenanceOtpMode)) {
+      fail("MAINTENANCE_WHATSAPP_OTP_MODE يجب أن يكون disabled أو allowlist أو production");
+    } else if (!env.MAINTENANCE_WHATSAPP_OTP_TEMPLATE) {
+      fail("قالب تحقق واتساب للصيانة غير مضبوط");
+    } else if (maintenanceOtpMode === "production" && env.MAINTENANCE_WHATSAPP_OTP_LAUNCH_APPROVED !== "true") {
+      fail("تشغيل OTP للإنتاج يتطلب MAINTENANCE_WHATSAPP_OTP_LAUNCH_APPROVED=true");
+    } else if (maintenanceOtpMode !== "disabled" && env.WHATSAPP_PROVIDER !== "cloud_api") {
+      fail("تحقق واتساب للصيانة يتطلب WHATSAPP_PROVIDER=cloud_api");
+    } else {
+      ok(`بوابة تحقق واتساب للصيانة مضبوطة بوضع ${maintenanceOtpMode}`);
+    }
+    if (maintenanceOtpMode === "production") {
+      const otpCanaryEvidence = String(env.MAINTENANCE_WHATSAPP_OTP_CANARY_EVIDENCE || "").trim();
+      const otpCanaryAt = Date.parse(String(env.MAINTENANCE_WHATSAPP_OTP_CANARY_AT || ""));
+      const otpCanaryAge = Date.now() - otpCanaryAt;
+      if (!/^\/app\/\.runtime\/maintenance-otp-canary-[A-Za-z0-9:-]+\.json$/.test(otpCanaryEvidence)) {
+        fail("تشغيل OTP للإنتاج يتطلب مسار دليل Canary داخلي صالح");
+      } else if (!Number.isFinite(otpCanaryAt) || otpCanaryAge < 0 || otpCanaryAge > 30 * 24 * 60 * 60_000) {
+        fail("دليل Canary تحقق واتساب مفقود أو أقدم من 30 يوماً");
+      } else {
+        ok("دليل Canary تحقق واتساب حديث ومسجل");
+      }
+    }
     const leadHours = Number(env.MAINTENANCE_MIN_LEAD_HOURS || 2);
     if (!Number.isFinite(leadHours) || leadHours < 0 || leadHours > 168) {
       fail("MAINTENANCE_MIN_LEAD_HOURS يجب أن يكون بين 0 و168 ساعة");

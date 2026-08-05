@@ -9,6 +9,7 @@ import { decideOutbound, dryRunSendResult, outboundSafetyStatus, type OutboundSe
 import { cloudTemplateEnvKey, renderTemplate, templateToCloudParams, type RenderVars, type TemplateName } from "./whatsappTemplates";
 import { normalizePhoneDigits, requirePhoneDigits } from "../shared/phone";
 import { advanceMessageStatus } from "./communicationStatus";
+import { decideMaintenanceOtpOutbound } from "./maintenanceOtpSafety";
 import { communicationCampaignStore } from "./communicationCampaigns";
 import {
   isCampaignOfferTemplate,
@@ -482,6 +483,40 @@ export class WhatsAppService {
       return this.sendCloudTemplate(phone, template, vars, options.templateOptions);
     }
     return this.sendText(phone, renderTemplate(template, vars, { strict: false }), options);
+  }
+
+  /** Sends only the dedicated Meta AUTHENTICATION template used by the public
+   * maintenance portal. It has an independent fail-closed launch switch, so
+   * enabling OTP never unlocks reminders, campaigns, or free-form messages. */
+  async sendMaintenanceOtp(phone: string, code: string) {
+    const decision = decideMaintenanceOtpOutbound(phone);
+    if (!decision.allowed) {
+      throw new WhatsAppConfigurationError(decision.reason || "Maintenance WhatsApp verification is blocked.");
+    }
+    if (this.provider !== "cloud_api") {
+      throw new WhatsAppConfigurationError("Maintenance OTP requires WhatsApp Cloud API.");
+    }
+    if (!/^\d{6}$/.test(code)) throw new Error("Maintenance OTP must contain exactly six digits.");
+    const templateName = String(process.env.MAINTENANCE_WHATSAPP_OTP_TEMPLATE || "").trim();
+    if (!/^[a-z0-9_]{1,512}$/.test(templateName)) {
+      throw new WhatsAppConfigurationError("Maintenance OTP template mapping is missing or invalid.");
+    }
+    const language = String(process.env.MAINTENANCE_WHATSAPP_OTP_LANGUAGE || "ar").trim() || "ar";
+    const to = this.toInternationalPhone(decision.normalizedPhone);
+    return this.postCloudPayload(to, {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to,
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: language },
+        components: [
+          { type: "body", parameters: [{ type: "text", text: code }] },
+          { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: code }] },
+        ],
+      },
+    });
   }
 
   private async startSocket() {

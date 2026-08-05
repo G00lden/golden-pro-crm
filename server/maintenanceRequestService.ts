@@ -13,6 +13,15 @@ import {
   type MaintenanceAtomicMutation,
 } from "./maintenanceRequestAtomic";
 import { assertStoredBookingCompletionEvidence } from "./fieldtechEvidence";
+import {
+  assertMaintenanceSlotAvailable,
+  assertMaintenanceAttachments,
+  claimMaintenanceAttachments,
+  consumeMaintenanceVerification,
+  getMaintenancePortalSettings,
+  requireMaintenanceProduct,
+  restoreMaintenanceVerification,
+} from "./maintenancePortalExperience";
 
 type UnknownRecord = Record<string, any>;
 
@@ -261,13 +270,19 @@ export type PublicMaintenanceRequestInput = {
   customer_phone: string;
   city?: string;
   address: string;
-  service_type: string;
-  product_name: string;
+  product_id: string;
   issue_description: string;
   warranty_status?: string;
   invoice_number?: string;
-  preferred_date?: string;
-  preferred_time?: string;
+  preferred_date: string;
+  preferred_time: string;
+  customer_latitude?: number;
+  customer_longitude?: number;
+  location_accuracy?: number;
+  location_url?: string;
+  verification_id: string;
+  verification_token: string;
+  attachment_ids?: string[];
 };
 
 export async function createPublicMaintenanceRequest(
@@ -277,9 +292,7 @@ export async function createPublicMaintenanceRequest(
   if (!ownerUid.trim()) throw httpError(503, "استقبال طلبات الصيانة غير مهيأ بحساب مالك.");
   const phone = normalizePhone(rawInput.customer_phone);
   if (!phone.valid) throw httpError(400, "أدخل رقم جوال صحيحاً مع مفتاح الدولة عند الحاجة.");
-  if (rawInput.preferred_date) {
-    assertMaintenanceLeadTime(rawInput.preferred_date, rawInput.preferred_time);
-  }
+  assertMaintenanceLeadTime(rawInput.preferred_date, rawInput.preferred_time);
 
   // Calling this here deliberately fails closed in production before customer
   // data is written if the portal signing secret has not been configured.
@@ -297,6 +310,36 @@ export async function createPublicMaintenanceRequest(
     return { request: record, portal_token: portalToken, duplicate: true };
   }
 
+  const [settings, product] = await Promise.all([
+    getMaintenancePortalSettings(ownerUid),
+    requireMaintenanceProduct(ownerUid, rawInput.product_id),
+  ]);
+  await assertMaintenanceSlotAvailable(ownerUid, rawInput.preferred_date, rawInput.preferred_time);
+  const hasCoordinates = Number.isFinite(rawInput.customer_latitude) && Number.isFinite(rawInput.customer_longitude);
+  let locationUrl = cleanText(rawInput.location_url, 2_048);
+  if (locationUrl) {
+    let parsedLocation: URL;
+    try { parsedLocation = new URL(locationUrl); } catch { throw httpError(400, "رابط الموقع غير صالح."); }
+    if (parsedLocation.protocol !== "https:") throw httpError(400, "رابط الموقع يجب أن يكون آمناً بصيغة HTTPS.");
+    const host = parsedLocation.hostname.toLowerCase();
+    if (!(host === "maps.app.goo.gl" || host === "maps.apple.com" || host === "google.com" || host.endsWith(".google.com"))) {
+      throw httpError(400, "استخدم رابط موقع من خرائط Google أو Apple فقط.");
+    }
+  }
+  if (settings.location_required && !hasCoordinates && !locationUrl) {
+    throw httpError(400, "سجّل موقع الصيانة أو أضف رابط الموقع.");
+  }
+  if (!locationUrl && hasCoordinates) {
+    locationUrl = `https://www.google.com/maps?q=${Number(rawInput.customer_latitude)},${Number(rawInput.customer_longitude)}`;
+  }
+  if (!settings.attachments_enabled && (rawInput.attachment_ids || []).length) {
+    throw httpError(409, "إرفاق الملفات متوقف مؤقتاً من لوحة التحكم.");
+  }
+  await assertMaintenanceAttachments(ownerUid, rawInput.verification_id, rawInput.attachment_ids || []);
+  const phoneVerifiedAt = settings.whatsapp_verification_required
+    ? await consumeMaintenanceVerification(ownerUid, rawInput.verification_id, rawInput.verification_token, rawInput.customer_phone)
+    : null;
+
   const customerName = cleanText(rawInput.customer_name, 200);
   const customerPhone = phone.digits;
   const customerId = await findOrCreateCustomer(ownerUid, {
@@ -305,7 +348,7 @@ export async function createPublicMaintenanceRequest(
     city: rawInput.city,
     address: rawInput.address,
   });
-  const installation = await findRelatedInstallation(ownerUid, customerId, rawInput.product_name);
+  const installation = await findRelatedInstallation(ownerUid, customerId, product.name);
   const timestamp = nowIso();
   const requestNumber = `SR-${timestamp.slice(0, 10).replace(/-/g, "")}-${requestId.slice(-8).toUpperCase()}`;
   const record = {
@@ -318,15 +361,23 @@ export async function createPublicMaintenanceRequest(
     customer_phone: customerPhone,
     city: cleanText(rawInput.city, 160),
     address: cleanText(rawInput.address, 1_000),
-    service_type: cleanText(rawInput.service_type, 80),
-    product_id: cleanText(installation?.product_id, 128),
-    product_name: cleanText(installation?.product_name || rawInput.product_name, 240),
+    service_type: "product_maintenance",
+    product_id: product.id,
+    product_name: product.name,
+    product_category: product.category,
+    product_image_url: product.image_url,
     installation_id: cleanText(installation?.id, 128),
     issue_description: cleanText(rawInput.issue_description, 4_000),
     warranty_status: cleanText(rawInput.warranty_status || "unknown", 32),
     invoice_number: cleanText(rawInput.invoice_number, 120),
     preferred_date: cleanText(rawInput.preferred_date, 10),
     preferred_time: cleanText(rawInput.preferred_time, 5),
+    customer_latitude: hasCoordinates ? Number(rawInput.customer_latitude) : null,
+    customer_longitude: hasCoordinates ? Number(rawInput.customer_longitude) : null,
+    location_accuracy: Number.isFinite(rawInput.location_accuracy) ? Number(rawInput.location_accuracy) : null,
+    location_url: locationUrl,
+    phone_verified_at: phoneVerifiedAt,
+    attachment_count: 0,
     scheduled_date: "",
     scheduled_time: "",
     technician_id: "",
@@ -346,7 +397,12 @@ export async function createPublicMaintenanceRequest(
     if (typeof requestRef.create === "function") await requestRef.create(record);
     else await requestRef.set(record);
   } catch (error) {
-    if (String((error as { code?: unknown })?.code || "") !== "ALREADY_EXISTS") throw error;
+    if (String((error as { code?: unknown })?.code || "") !== "ALREADY_EXISTS") {
+      if (settings.whatsapp_verification_required) {
+        await restoreMaintenanceVerification(ownerUid, rawInput.verification_id, rawInput.verification_token, rawInput.customer_phone).catch(() => false);
+      }
+      throw error;
+    }
     const duplicate = dataOf(await requestRef.get()) as MaintenanceRequestRecord;
     const portalToken = maintenancePortalTokenForRequest(duplicate, ownerUid);
     if (!portalToken) throw httpError(410, "تم إلغاء رابط متابعة هذا الطلب. تواصل مع خدمة العملاء لإصدار رابط جديد.");
@@ -354,6 +410,16 @@ export async function createPublicMaintenanceRequest(
   }
 
   const request = { id: requestId, ...record } as MaintenanceRequestRecord;
+  const attachmentCount = await claimMaintenanceAttachments(
+    ownerUid,
+    rawInput.verification_id,
+    requestId,
+    rawInput.attachment_ids || [],
+  );
+  if (attachmentCount) {
+    await requestRef.update({ attachment_count: attachmentCount, updatedAt: new Date().toISOString() });
+    request.attachment_count = attachmentCount;
+  }
   await eventForRequest(request, {
     action: "created",
     actorType: "customer",
@@ -555,6 +621,9 @@ export async function assignMaintenanceRequest(
     booking_type: request.installation_id ? "maintenance" : "external_maintenance",
     source: "maintenance_portal",
     customer_address: request.address || "",
+    customer_latitude: request.customer_latitude ?? null,
+    customer_longitude: request.customer_longitude ?? null,
+    location_url: request.location_url || "",
     notes: [`طلب الصيانة: ${request.request_number}`, request.issue_description, cleanText(input.note, 2_000)].filter(Boolean).join("\n"),
     parts: [],
     fieldtech_require_before_photo: true,
@@ -807,13 +876,21 @@ export function publicMaintenanceRequest(record: MaintenanceRequestRecord, event
     status: record.status,
     customer_name: record.customer_name,
     service_type: record.service_type,
+    product_id: record.product_id,
     product_name: record.product_name,
+    product_category: record.product_category || "",
+    product_image_url: record.product_image_url || "",
     issue_description: record.issue_description,
     preferred_date: record.preferred_date || null,
     preferred_time: record.preferred_time || null,
     scheduled_date: record.scheduled_date || null,
     scheduled_time: record.scheduled_time || null,
     technician_name: record.technician_name || null,
+    location_url: record.location_url || null,
+    customer_latitude: Number.isFinite(Number(record.customer_latitude)) ? Number(record.customer_latitude) : null,
+    customer_longitude: Number.isFinite(Number(record.customer_longitude)) ? Number(record.customer_longitude) : null,
+    phone_verified: Boolean(record.phone_verified_at),
+    attachment_count: Number(record.attachment_count || 0),
     customer_change_requested: Boolean(record.customer_change_requested),
     resolution_note: record.status === "closed" ? record.resolution_note || null : null,
     created_at: record.createdAt || record.created_at,

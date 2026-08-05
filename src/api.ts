@@ -1612,6 +1612,14 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return body as T;
 }
 
+export async function apiFetchResponse(path: string, init: RequestInit = {}) {
+  const token = await getApiAuthorizationToken();
+  if (!token) throw new Error("يجب تسجيل الدخول أولا.");
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  return fetch(path, { ...init, headers });
+}
+
 export const logout = firebaseLogout;
 export const isAuthenticated = () => !!getCurrentAppUser();
 

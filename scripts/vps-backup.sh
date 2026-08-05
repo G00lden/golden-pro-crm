@@ -5,6 +5,7 @@
 #   * golden-crm.db.gz         - consistent SQLite snapshot, gzipped.
 #   * salla-integrations.json  - validated Salla connection state, mode 0600.
 #   * campaign-media.tar.gz    - uploaded WhatsApp campaign images and videos.
+#   * maintenance-attachments.tar.gz - customer maintenance photos and videos.
 #   * wa-session.tar.gz        - WhatsApp linked-device session, when present.
 #   * env.production           - production secrets, mode 0600, when present.
 #   * manifest.sha256          - checksums for every captured payload.
@@ -233,6 +234,32 @@ else
   log "Campaign media directory is absent; continuing without it"
 fi
 
+log "archiving maintenance request attachments"
+MAINTENANCE_ATTACHMENTS_PRESENT=false
+if "${COMPOSE[@]}" exec -T crm sh -c '[ -d /app/.runtime/maintenance-attachments ]'; then
+  docker cp "$CID:/app/.runtime/maintenance-attachments/." "$DEST/maintenance-attachments" >/dev/null \
+    || fail "Unable to copy maintenance attachments from the CRM volume."
+  [ -d "$DEST/maintenance-attachments" ] && [ ! -L "$DEST/maintenance-attachments" ] \
+    || fail "Maintenance attachment copy did not create a safe directory."
+  if find "$DEST/maintenance-attachments" \( -type l -o \( ! -type f ! -type d \) \) -print -quit | grep -q .; then
+    fail "Maintenance attachments contain a link or special file."
+  fi
+  if find "$DEST/maintenance-attachments" -mindepth 1 -type d -print -quit | grep -q .; then
+    fail "Maintenance attachments must use one flat directory."
+  fi
+  if find "$DEST/maintenance-attachments" -regextype posix-extended -mindepth 1 -type f \
+    ! -regex '.*/[a-f0-9]{48}\.(jpg|png|webp|mp4)' -print -quit | grep -q .; then
+    fail "Maintenance attachments contain a non-whitelisted filename."
+  fi
+  tar -czf "$DEST/maintenance-attachments.tar.gz" -C "$DEST" maintenance-attachments \
+    || fail "Unable to archive maintenance attachments."
+  chmod 600 "$DEST/maintenance-attachments.tar.gz"
+  rm -rf -- "$DEST/maintenance-attachments"
+  MAINTENANCE_ATTACHMENTS_PRESENT=true
+else
+  log "Maintenance attachment directory is absent; continuing without it"
+fi
+
 # 4) WhatsApp session (from the named volume, via the container). The mounted
 # directory is part of the production storage contract, so a missing directory
 # or any copy/archive error makes the whole backup incomplete.
@@ -257,6 +284,7 @@ log "writing checksum manifest"
 manifest_files=("golden-crm.db.gz")
 [ "$SALLA_PRESENT" = true ] && manifest_files+=("salla-integrations.json")
 [ "$CAMPAIGN_MEDIA_PRESENT" = true ] && manifest_files+=("campaign-media.tar.gz")
+[ "$MAINTENANCE_ATTACHMENTS_PRESENT" = true ] && manifest_files+=("maintenance-attachments.tar.gz")
 manifest_files+=("wa-session.tar.gz")
 [ -f "$DEST/env.production" ] && manifest_files+=("env.production")
 (

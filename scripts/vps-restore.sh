@@ -161,7 +161,7 @@ validate_backup_source_entries() {
     name="${entry##*/}"
     case "$name" in
       .incomplete) fail "Backup source is marked incomplete." ;;
-      manifest.sha256|golden-crm.db.gz|salla-integrations.json|campaign-media.tar.gz|wa-session.tar.gz|env.production) ;;
+      manifest.sha256|golden-crm.db.gz|salla-integrations.json|campaign-media.tar.gz|maintenance-attachments.tar.gz|wa-session.tar.gz|env.production) ;;
       *) fail "Backup source contains a non-whitelisted entry." ;;
     esac
     validate_trusted_regular_file "$entry" "Backup source payload"
@@ -191,6 +191,7 @@ stage_backup_source() {
     "golden-crm.db.gz"
     "salla-integrations.json"
     "campaign-media.tar.gz"
+    "maintenance-attachments.tar.gz"
     "wa-session.tar.gz"
     "env.production"
   )
@@ -214,6 +215,7 @@ validate_manifest() {
     "golden-crm.db.gz"
     "salla-integrations.json"
     "campaign-media.tar.gz"
+    "maintenance-attachments.tar.gz"
     "wa-session.tar.gz"
     "env.production"
   )
@@ -225,7 +227,7 @@ validate_manifest() {
   }
 
   while IFS= read -r line || [ -n "$line" ]; do
-    if [[ ! "$line" =~ ^([[:xdigit:]]{64})[[:space:]][[:space:]*](golden-crm\.db\.gz|salla-integrations\.json|campaign-media\.tar\.gz|wa-session\.tar\.gz|env\.production)$ ]]; then
+    if [[ ! "$line" =~ ^([[:xdigit:]]{64})[[:space:]][[:space:]*](golden-crm\.db\.gz|salla-integrations\.json|campaign-media\.tar\.gz|maintenance-attachments\.tar\.gz|wa-session\.tar\.gz|env\.production)$ ]]; then
       echo "backup manifest contains a malformed or non-whitelisted entry." >&2
       return 1
     fi
@@ -261,7 +263,7 @@ validate_manifest() {
 
   while IFS= read -r entry; do
     case "$entry" in
-      manifest.sha256|golden-crm.db.gz|salla-integrations.json|campaign-media.tar.gz|wa-session.tar.gz|env.production) ;;
+      manifest.sha256|golden-crm.db.gz|salla-integrations.json|campaign-media.tar.gz|maintenance-attachments.tar.gz|wa-session.tar.gz|env.production) ;;
       *)
         echo "backup directory contains a non-whitelisted entry: $entry" >&2
         return 1
@@ -281,6 +283,7 @@ SRC="$STAGED_SRC"
 DB_GZ="$SRC/golden-crm.db.gz"
 SALLA_SRC="$SRC/salla-integrations.json"
 CAMPAIGN_MEDIA_SRC="$SRC/campaign-media.tar.gz"
+MAINTENANCE_ATTACHMENTS_SRC="$SRC/maintenance-attachments.tar.gz"
 [ -f "$DB_GZ" ] || { echo "no golden-crm.db.gz in $SRC" >&2; exit 1; }
 
 validate_wa_archive() {
@@ -354,6 +357,39 @@ validate_campaign_media_archive() {
 if [ -f "$CAMPAIGN_MEDIA_SRC" ]; then
   log "validating WhatsApp campaign media archive"
   validate_campaign_media_archive "$CAMPAIGN_MEDIA_SRC"
+fi
+
+validate_maintenance_attachments_archive() {
+  local archive="$1" listing types
+  listing="$(mktemp "${TMPDIR:-/tmp}/golden-crm-maintenance-attachments-list.XXXXXX")"
+  types="$(mktemp "${TMPDIR:-/tmp}/golden-crm-maintenance-attachments-types.XXXXXX")"
+  if ! tar -tzf "$archive" --quoting-style=escape > "$listing" \
+    || ! tar -tvzf "$archive" --quoting-style=escape > "$types"; then
+    rm -f -- "$listing" "$types"
+    echo "Maintenance attachment archive cannot be inspected." >&2
+    return 1
+  fi
+  if ! awk '
+    BEGIN { count=0 }
+    $0 !~ /^maintenance-attachments\/?$/ && $0 !~ /^maintenance-attachments\/[a-f0-9]{48}\.(jpg|png|webp|mp4)$/ { exit 1 }
+    { count++ }
+    END { if (count == 0) exit 1 }
+  ' "$listing"; then
+    rm -f -- "$listing" "$types"
+    echo "Maintenance attachment archive contains an unsafe path or filename." >&2
+    return 1
+  fi
+  if ! awk 'substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { exit 1 }' "$types"; then
+    rm -f -- "$listing" "$types"
+    echo "Maintenance attachment archive contains a link or special file." >&2
+    return 1
+  fi
+  rm -f -- "$listing" "$types"
+}
+
+if [ -f "$MAINTENANCE_ATTACHMENTS_SRC" ]; then
+  log "validating maintenance attachment archive"
+  validate_maintenance_attachments_archive "$MAINTENANCE_ATTACHMENTS_SRC"
 fi
 
 CID="$("${COMPOSE[@]}" ps -q crm)"
@@ -470,6 +506,40 @@ else
   log "backup has no campaign media payload; preserving the current volume state"
 fi
 
+if [ -f "$MAINTENANCE_ATTACHMENTS_SRC" ]; then
+  log "restoring maintenance attachments"
+  WT="$(mktemp -d "${TMPDIR:-/tmp}/golden-crm-maintenance-attachments-restore-${RUN_ID}.XXXXXX")"
+  tar -xzf "$MAINTENANCE_ATTACHMENTS_SRC" --no-same-owner --no-same-permissions -C "$WT"
+  [ -d "$WT/maintenance-attachments" ] && [ ! -L "$WT/maintenance-attachments" ] \
+    || { echo "Maintenance attachment archive has no safe root directory." >&2; exit 1; }
+  if find "$WT/maintenance-attachments" \( -type l -o \( ! -type f ! -type d \) \) -print -quit | grep -q .; then
+    echo "Maintenance attachment archive extracted an unsupported file type." >&2
+    exit 1
+  fi
+  "${COMPOSE[@]}" run --rm --no-deps --user root \
+    -e RESTORE_RUN_ID="$RUN_ID" \
+    -v "$WT/maintenance-attachments:/tmp/maintenance-attachments-restore:ro" \
+    crm sh -eu -c '
+      target=/app/.runtime/maintenance-attachments
+      stage="/app/.runtime/.maintenance-attachments-restore-$RESTORE_RUN_ID"
+      rm -rf -- "$stage"
+      mkdir -m 700 -- "$stage" "$target"
+      cp -a /tmp/maintenance-attachments-restore/. "$stage/"
+      find "$stage" -type d -exec chmod 700 {} +
+      find "$stage" -type f -exec chmod 600 {} +
+      chown -R node:node "$stage"
+      find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+      find "$stage" -mindepth 1 -maxdepth 1 -exec mv -t "$target" -- {} +
+      rmdir -- "$stage"
+      chown node:node "$target"
+      chmod 700 "$target"
+    '
+  rm -rf "$WT"
+  WT=""
+else
+  log "backup has no maintenance attachment payload; preserving the current volume state"
+fi
+
 if [ -f "$SRC/wa-session.tar.gz" ]; then
   log "restoring WhatsApp session"
   WT="$(mktemp -d "${TMPDIR:-/tmp}/golden-crm-wa-restore-${RUN_ID}.XXXXXX")"
@@ -519,6 +589,11 @@ log "repairing runtime ownership and permissions"
     chown -R node:node /app/.runtime/whatsapp-campaign-media
     find /app/.runtime/whatsapp-campaign-media -type d -exec chmod 700 {} +
     find /app/.runtime/whatsapp-campaign-media -type f -exec chmod 640 {} +
+  fi
+  if [ -d /app/.runtime/maintenance-attachments ]; then
+    chown -R node:node /app/.runtime/maintenance-attachments
+    find /app/.runtime/maintenance-attachments -type d -exec chmod 700 {} +
+    find /app/.runtime/maintenance-attachments -type f -exec chmod 600 {} +
   fi
   chown -R node:node /app/.wa-session
   find /app/.wa-session -type d -exec chmod 700 {} +
@@ -616,6 +691,38 @@ log "validating restored runtime before CRM startup"
       }
       if (stat.isDirectory()) {
         for (const child of fs.readdirSync(current)) pendingMedia.push(`${current}/${child}`);
+      }
+    }
+  }
+
+  const maintenanceAttachmentRoot = "/app/.runtime/maintenance-attachments";
+  if (fs.existsSync(maintenanceAttachmentRoot)) {
+    const pendingAttachments = [maintenanceAttachmentRoot];
+    while (pendingAttachments.length > 0) {
+      const current = pendingAttachments.pop();
+      const stat = fs.lstatSync(current);
+      const name = current.split("/").pop() || "";
+      if (
+        stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())
+        || (stat.isFile() && !/^[a-f0-9]{48}\.(jpg|png|webp|mp4)$/.test(name))
+      ) {
+        console.error("Restored maintenance attachments contain an unsupported file or name.");
+        process.exitCode = 5;
+        break;
+      }
+      if (expectedUid !== null && stat.uid !== expectedUid) {
+        console.error("Restored maintenance attachment ownership is invalid.");
+        process.exitCode = 5;
+        break;
+      }
+      const mode = stat.mode & 0o777;
+      if ((stat.isDirectory() && mode !== 0o700) || (stat.isFile() && mode !== 0o600)) {
+        console.error("Restored maintenance attachment permissions are invalid.");
+        process.exitCode = 5;
+        break;
+      }
+      if (stat.isDirectory()) {
+        for (const child of fs.readdirSync(current)) pendingAttachments.push(`${current}/${child}`);
       }
     }
   }

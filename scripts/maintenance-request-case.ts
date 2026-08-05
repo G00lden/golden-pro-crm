@@ -20,6 +20,28 @@ await adminDb.collection("technicians").doc("tech-maintenance-1").set({
   createdAt: "2026-08-02T08:00:00.000Z",
   updatedAt: "2026-08-02T08:00:00.000Z",
 });
+await adminDb.collection("products").doc("product-maintenance-1").set({
+  createdBy: ownerUid,
+  name: "مكيف BreeXe Pro سبليت",
+  category: "تكييف وتبريد",
+  sku: "BX-TEST-1",
+  catalog_visible: true,
+  is_available: true,
+  image_url: "https://example.com/product.png",
+  createdAt: "2026-08-02T08:00:00.000Z",
+  updatedAt: "2026-08-02T08:00:00.000Z",
+});
+await adminDb.collection("maintenance_portal_settings").doc(ownerUid).set({
+  createdBy: ownerUid,
+  slot_times: ["09:00", "11:00", "14:00"],
+  closed_weekdays: [5],
+  booking_horizon_days: 21,
+  slot_capacity: 1,
+  min_lead_hours: 0,
+  location_required: false,
+  attachments_enabled: false,
+  whatsapp_verification_required: false,
+});
 
 const app = express();
 app.use(express.json({ limit: "64kb" }));
@@ -53,15 +75,14 @@ await new Promise<void>((resolve, reject) => {
 const address = server.address() as AddressInfo;
 const baseUrl = `http://127.0.0.1:${address.port}`;
 
-function futureDate(days: number) {
-  return new Date(Date.now() + days * 24 * 60 * 60_000).toISOString().slice(0, 10);
-}
-
 async function jsonFetch(path: string, init?: RequestInit) {
   const response = await fetch(`${baseUrl}${path}`, init);
   const body = await response.json();
   return { status: response.status, body };
 }
+
+const availability = await jsonFetch("/public/maintenance-availability");
+const availableDates = availability.body.dates as Array<{ date: string; slots: Array<{ time: string }> }>;
 
 const payload = {
   client_request_id: "client-maintenance-test-0001",
@@ -69,12 +90,14 @@ const payload = {
   customer_phone: "050 123 4567",
   city: "الرياض",
   address: "حي الاختبار، شارع 1",
-  service_type: "air_conditioning",
-  product_name: "مكيف سبليت",
+  product_id: "product-maintenance-1",
   issue_description: "المكيف لا يبرد ويصدر صوتاً مرتفعاً.",
   warranty_status: "unknown",
-  preferred_date: futureDate(2),
-  preferred_time: "10:00",
+  preferred_date: availableDates[0].date,
+  preferred_time: availableDates[0].slots[0].time,
+  verification_id: `mpv_${"a".repeat(32)}`,
+  verification_token: "a".repeat(40),
+  attachment_ids: [],
   accept_terms: true,
 };
 
@@ -110,8 +133,8 @@ try {
     body: JSON.stringify({
       action: "assign",
       technician_id: "tech-maintenance-1",
-      date: futureDate(3),
-      scheduled_time: "11:30",
+      date: availableDates[1].date,
+      scheduled_time: availableDates[1].slots[0].time,
       note: "الاتصال قبل الوصول",
     }),
   });
@@ -121,8 +144,8 @@ try {
     body: JSON.stringify({
       token,
       action: "request_reschedule",
-      preferred_date: futureDate(4),
-      preferred_time: "15:00",
+      preferred_date: availableDates[2].date,
+      preferred_time: availableDates[2].slots[0].time,
       note: "الفترة المسائية مناسبة",
     }),
   });

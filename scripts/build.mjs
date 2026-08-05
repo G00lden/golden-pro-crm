@@ -6,6 +6,7 @@ await bundleServer({
   entryPoints: {
     server: "server/bootstrap.ts",
     "sync-salla-products": "scripts/sync-salla-products.ts",
+    "maintenance-otp-canary": "scripts/maintenance-otp-canary.ts",
   },
   outdir: "dist-server",
   entryNames: "[name]",
@@ -19,4 +20,4 @@ await bundleServer({
   legalComments: "none",
 });
 
-console.log("Production bundles: dist-server/server.mjs, dist-server/sync-salla-products.mjs");
+console.log("Production bundles: dist-server/server.mjs, dist-server/sync-salla-products.mjs, dist-server/maintenance-otp-canary.mjs");

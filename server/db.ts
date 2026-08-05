@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 11001;
+const TARGET_SCHEMA_VERSION = 11002;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -478,6 +478,53 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS maintenance_portal_settings (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL UNIQUE,
+    slot_times TEXT NOT NULL DEFAULT '["09:00","11:00","14:00","16:00"]',
+    closed_weekdays TEXT NOT NULL DEFAULT '[5]',
+    booking_horizon_days INTEGER NOT NULL DEFAULT 21,
+    slot_capacity INTEGER NOT NULL DEFAULT 1,
+    min_lead_hours INTEGER NOT NULL DEFAULT 2,
+    location_required INTEGER NOT NULL DEFAULT 1,
+    attachments_enabled INTEGER NOT NULL DEFAULT 1,
+    whatsapp_verification_required INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS maintenance_phone_verifications (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    phone_hash TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    token_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending', 'verified', 'consumed', 'invalid', 'expired')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    provider_message_id TEXT,
+    expires_at TEXT NOT NULL,
+    token_expires_at TEXT,
+    verified_at TEXT,
+    consumed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS maintenance_request_attachments (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    verification_id TEXT NOT NULL,
+    request_id TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('image', 'video')),
+    media_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    storage_ref TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS reminders (
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
@@ -587,6 +634,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_maintenance_requests_owner_status ON maintenance_requests(owner_uid, status, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_maintenance_requests_booking ON maintenance_requests(booking_id);
   CREATE INDEX IF NOT EXISTS idx_maintenance_request_events_request ON maintenance_request_events(request_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_maintenance_verifications_phone_created ON maintenance_phone_verifications(owner_uid, phone_hash, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_maintenance_attachments_verification ON maintenance_request_attachments(verification_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_maintenance_attachments_request ON maintenance_request_attachments(request_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(owner_uid);
   CREATE INDEX IF NOT EXISTS idx_reminders_sent ON reminders(sent_at);
   CREATE INDEX IF NOT EXISTS idx_store_orders_owner ON store_orders(owner_uid);
@@ -1401,6 +1451,14 @@ for (const col of [
   ["portal_token_version", "INTEGER NOT NULL DEFAULT 1"],
   ["portal_access_revoked_at", "TEXT"],
   ["completion_override_reason", "TEXT DEFAULT ''"],
+  ["product_category", "TEXT DEFAULT ''"],
+  ["product_image_url", "TEXT DEFAULT ''"],
+  ["customer_latitude", "REAL"],
+  ["customer_longitude", "REAL"],
+  ["location_accuracy", "REAL"],
+  ["location_url", "TEXT DEFAULT ''"],
+  ["phone_verified_at", "TEXT"],
+  ["attachment_count", "INTEGER NOT NULL DEFAULT 0"],
 ] as const) {
   if (!hasColumn("maintenance_requests", col[0])) {
     db.exec(`ALTER TABLE maintenance_requests ADD COLUMN ${col[0]} ${col[1]}`);
@@ -2150,6 +2208,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10905, '1.9.5-whatsapp-deepseek-assistant');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11000, '1.9.6-maintenance-request-portal');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11001, '1.9.6-maintenance-request-acceptance-gates');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11002, '1.9.7-maintenance-customer-experience');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

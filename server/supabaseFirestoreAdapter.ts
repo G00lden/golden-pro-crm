@@ -35,6 +35,9 @@ const collectionPrefixes: Record<string, string> = {
   fieldtech_technician_locations: "ftloc",
   maintenance_requests: "mreq",
   maintenance_request_events: "mrev",
+  maintenance_portal_settings: "mps",
+  maintenance_phone_verifications: "mpv",
+  maintenance_request_attachments: "mra",
 };
 
 const primaryKeyByTable: Record<string, string> = {

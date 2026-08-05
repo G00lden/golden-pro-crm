@@ -5,10 +5,13 @@ import {
   ClipboardList,
   Copy,
   ExternalLink,
+  MapPin,
+  Paperclip,
   Phone,
   Play,
   RefreshCw,
   Search,
+  Settings2,
   ShieldCheck,
   UserRoundCog,
   XCircle,
@@ -20,6 +23,11 @@ import {
   customerPortalUrl,
   getMaintenanceRequest,
   getMaintenanceRequests,
+  getMaintenancePortalSettings,
+  openMaintenanceAttachment,
+  saveMaintenancePortalSettings,
+  type MaintenanceAvailability,
+  type MaintenancePortalSettings,
   type MaintenanceRequest,
   type MaintenanceRequestAction,
   type MaintenanceRequestEvent,
@@ -35,7 +43,6 @@ import {
   SelectInput,
   TextArea,
   TextInput,
-  today,
   useData,
 } from "../shared";
 import {
@@ -111,6 +118,7 @@ export default function MaintenanceRequestsPage({
   const [selectedId, setSelectedId] = useState(initial.selectedId);
   const requests = useData(() => getMaintenanceRequests({ status, search }), [status, search]);
   const technicians = useData(crmApi.getTechnicians, [], canManage);
+  const portalSettings = useData(getMaintenancePortalSettings, []);
   useVisiblePolling(requests.refreshSilent);
 
   useEffect(() => {
@@ -165,6 +173,14 @@ export default function MaintenanceRequestsPage({
             </a>
           </>
         }
+      />
+
+      <MaintenanceSchedulePanel
+        data={portalSettings.data}
+        loading={portalSettings.loading}
+        canManage={canManage}
+        notify={notify}
+        refresh={portalSettings.refresh}
       />
 
       <section className="maintenance-kpis" aria-label="ملخص طلبات الصيانة">
@@ -233,6 +249,7 @@ export default function MaintenanceRequestsPage({
           requestId={selectedId}
           technicians={technicians.data || []}
           techniciansLoading={technicians.loading}
+          availability={portalSettings.data?.availability || null}
           notify={notify}
           canManage={canManage}
           canOverrideClose={canOverrideClose}
@@ -244,10 +261,65 @@ export default function MaintenanceRequestsPage({
   );
 }
 
+function MaintenanceSchedulePanel({
+  data,
+  loading,
+  canManage,
+  notify,
+  refresh,
+}: {
+  data?: { settings: MaintenancePortalSettings; availability: MaintenanceAvailability };
+  loading: boolean;
+  canManage: boolean;
+  notify: (message: string, ok?: boolean) => void;
+  refresh: () => Promise<unknown>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<MaintenancePortalSettings | null>(null);
+  useEffect(() => { if (data?.settings) setDraft(data.settings); }, [data?.settings]);
+  if (loading && !data) return <Loading />;
+  if (!draft || !data) return null;
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await saveMaintenancePortalSettings(draft);
+      await refresh();
+      notify("تم تحديث جدول مواعيد صفحة العميل");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "تعذر حفظ جدول المواعيد", false);
+    } finally { setSaving(false); }
+  };
+  const weekdayNames = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+  return (
+    <section className="maintenance-schedule-panel" aria-labelledby="maintenance-schedule-title">
+      <div className="maintenance-schedule-panel__head">
+        <div><Settings2 aria-hidden="true" /><span><strong id="maintenance-schedule-title">جدول صفحة العميل</strong><small>{data.availability.ready ? `${data.availability.dates.length} أيام متاحة حالياً` : "لا توجد مواعيد متاحة"}</small></span></div>
+        <Button tone="muted" onClick={() => setOpen((value) => !value)}>{open ? "إغلاق الإعدادات" : "إدارة المواعيد"}</Button>
+      </div>
+      {open && <form className="maintenance-schedule-form" onSubmit={save}>
+        <Field label="الأوقات المتاحة (افصل بفاصلة)"><TextInput value={draft.slot_times.join(", ")} onChange={(event) => setDraft({ ...draft, slot_times: event.target.value.split(/[,،\s]+/).filter(Boolean) })} placeholder="09:00, 11:00, 14:00" disabled={!canManage} /></Field>
+        <Field label="مدة ظهور الجدول بالأيام"><TextInput type="number" min={1} max={60} value={draft.booking_horizon_days} onChange={(event) => setDraft({ ...draft, booking_horizon_days: Number(event.target.value) })} disabled={!canManage} /></Field>
+        <Field label="سعة كل وقت"><TextInput type="number" min={1} max={20} value={draft.slot_capacity} onChange={(event) => setDraft({ ...draft, slot_capacity: Number(event.target.value) })} disabled={!canManage} /></Field>
+        <Field label="الحد الأدنى قبل الموعد (ساعات)"><TextInput type="number" min={0} max={72} value={draft.min_lead_hours} onChange={(event) => setDraft({ ...draft, min_lead_hours: Number(event.target.value) })} disabled={!canManage} /></Field>
+        <fieldset className="maintenance-schedule-form__weekdays"><legend>أيام الإغلاق</legend>{weekdayNames.map((name, index) => <label key={name}><input type="checkbox" checked={draft.closed_weekdays.includes(index)} onChange={(event) => setDraft({ ...draft, closed_weekdays: event.target.checked ? [...draft.closed_weekdays, index] : draft.closed_weekdays.filter((item) => item !== index) })} disabled={!canManage} /> {name}</label>)}</fieldset>
+        <div className="maintenance-schedule-form__toggles">
+          <label><input type="checkbox" checked={draft.whatsapp_verification_required} onChange={(event) => setDraft({ ...draft, whatsapp_verification_required: event.target.checked })} disabled={!canManage} /> تحقق واتساب إلزامي</label>
+          <label><input type="checkbox" checked={draft.location_required} onChange={(event) => setDraft({ ...draft, location_required: event.target.checked })} disabled={!canManage} /> الموقع إلزامي</label>
+          <label><input type="checkbox" checked={draft.attachments_enabled} onChange={(event) => setDraft({ ...draft, attachments_enabled: event.target.checked })} disabled={!canManage} /> السماح بالمرفقات</label>
+        </div>
+        {canManage && <div className="maintenance-schedule-form__footer"><Button type="submit" loading={saving}>حفظ ونشر الجدول</Button></div>}
+      </form>}
+    </section>
+  );
+}
+
 function MaintenanceRequestDrawer({
   requestId,
   technicians,
   techniciansLoading,
+  availability,
   notify,
   canManage,
   canOverrideClose,
@@ -257,6 +329,7 @@ function MaintenanceRequestDrawer({
   requestId: string;
   technicians: crmApi.Technician[];
   techniciansLoading: boolean;
+  availability: MaintenanceAvailability | null;
   notify: (message: string, ok?: boolean) => void;
   canManage: boolean;
   canOverrideClose: boolean;
@@ -266,10 +339,22 @@ function MaintenanceRequestDrawer({
   const details = useData(() => getMaintenanceRequest(requestId), [requestId]);
   const [actionMode, setActionMode] = useState<"" | "assign" | "reject" | "close" | "close_override" | "cancel">("");
   const [saving, setSaving] = useState(false);
+  const [assignDate, setAssignDate] = useState("");
+  const [assignTime, setAssignTime] = useState("");
   const request = details.data?.request;
   const drawerRef = useRef<HTMLElement>(null);
   useDialogAccessibility(drawerRef, onClose);
   useVisiblePolling(details.refreshSilent);
+
+  useEffect(() => {
+    if (actionMode !== "assign" || !availability?.dates.length) return;
+    const preferred = request?.scheduled_date || request?.preferred_date || "";
+    const nextDate = availability.dates.some((item) => item.date === preferred) ? preferred : availability.dates[0].date;
+    const slots = availability.dates.find((item) => item.date === nextDate)?.slots || [];
+    const preferredTime = request?.scheduled_time || request?.preferred_time || "";
+    setAssignDate(nextDate);
+    setAssignTime(slots.some((item) => item.time === preferredTime) ? preferredTime : slots[0]?.time || "");
+  }, [actionMode, availability, request?.preferred_date, request?.scheduled_date]);
 
   const runAction = async (action: MaintenanceRequestAction, successMessage: string) => {
     setSaving(true);
@@ -335,11 +420,12 @@ function MaintenanceRequestDrawer({
 
             <section className="maintenance-detail-grid" aria-label="بيانات الطلب">
               <article><span>العميل</span><strong>{request.customer_name}</strong><a href={`tel:+${request.customer_phone}`}><Phone size={15} aria-hidden="true" /> <bdi>{request.customer_phone}</bdi></a></article>
-              <article><span>الخدمة</span><strong>{request.product_name}</strong><small>{serviceTypeLabel(request.service_type)}</small></article>
+              <article className="maintenance-admin-product">{request.product_image_url && <img src={request.product_image_url} width="60" height="60" alt="" loading="lazy" />}<span>منتج BreeXe Pro</span><strong>{request.product_name}</strong><small>{request.product_category || serviceTypeLabel(request.service_type)}</small></article>
               <article className="wide"><span>العنوان</span><strong>{request.address || "غير محدد"}</strong><small>{request.city}</small></article>
               <article className="wide"><span>وصف العطل</span><p>{request.issue_description}</p></article>
               <article><span>الموعد المطلوب</span><strong><bdi>{request.preferred_date || "غير محدد"} {request.preferred_time || ""}</bdi></strong></article>
               <article><span>الموعد المعتمد</span><strong><bdi>{request.scheduled_date || "لم يحدد"} {request.scheduled_time || ""}</bdi></strong><small>{request.technician_name || "لم يسند"}</small></article>
+              <article><span>التحقق والمرفقات</span><strong>{request.phone_verified_at || request.phone_verified ? "واتساب مؤكد" : "غير مؤكد"}</strong><small>{request.attachment_count || details.data?.attachments.length || 0} مرفقات</small></article>
             </section>
 
             <div className="maintenance-drawer__links">
@@ -361,7 +447,10 @@ function MaintenanceRequestDrawer({
               )}
               {request.customer_id && <a className="btn muted" href={`?section=customers&customerId=${encodeURIComponent(request.customer_id)}`}><ExternalLink size={16} aria-hidden="true" /> سجل العميل</a>}
               {request.booking_id && <a className="btn muted" href="?section=bookings"><CalendarClock size={16} aria-hidden="true" /> الحجز المرتبط</a>}
+              {request.location_url && <a className="btn muted" href={request.location_url} target="_blank" rel="noreferrer"><MapPin size={16} aria-hidden="true" /> فتح الموقع</a>}
             </div>
+
+            {!!details.data?.attachments.length && <section className="maintenance-admin-attachments" aria-label="مرفقات العميل"><h3><Paperclip size={17} /> مرفقات المشكلة</h3><div>{details.data.attachments.map((attachment) => <button type="button" key={attachment.id} onClick={() => openMaintenanceAttachment(request.id, attachment.id).catch((reason) => notify(reason instanceof Error ? reason.message : "تعذر فتح المرفق", false))}>{attachment.kind === "video" ? "مقطع فيديو" : "صورة"} · {(attachment.byte_size / 1024 / 1024).toFixed(1)}MB <ExternalLink size={14} /></button>)}</div></section>}
 
             {canManage ? <section className="maintenance-drawer__actions" aria-labelledby="request-actions-title">
               <h3 id="request-actions-title">إدارة الطلب</h3>
@@ -385,8 +474,8 @@ function MaintenanceRequestDrawer({
                           {technicians.map((technician) => <option value={technician.id} key={technician.id}>{technician.name}</option>)}
                         </SelectInput>
                       </Field>
-                      <Field label="التاريخ"><TextInput name="date" type="date" min={today()} defaultValue={request.scheduled_date || request.preferred_date || today()} required /></Field>
-                      <Field label="الوقت"><TextInput name="scheduled_time" type="time" defaultValue={request.scheduled_time || request.preferred_time || "10:00"} required /></Field>
+                      <Field label="التاريخ"><SelectInput name="date" value={assignDate} onChange={(event) => { const nextDate = event.target.value; setAssignDate(nextDate); setAssignTime(availability?.dates.find((item) => item.date === nextDate)?.slots[0]?.time || ""); }} required><option value="" disabled>اختر من الجدول المتاح</option>{availability?.dates.map((item) => <option value={item.date} key={item.date}>{item.date}</option>)}</SelectInput></Field>
+                      <Field label="الوقت"><SelectInput name="scheduled_time" value={assignTime} onChange={(event) => setAssignTime(event.target.value)} required><option value="" disabled>اختر الوقت</option>{availability?.dates.find((item) => item.date === assignDate)?.slots.map((slot) => <option value={slot.time} key={slot.time}>{slot.time}</option>)}</SelectInput></Field>
                       <Field label="تعليمات للفني"><TextArea name="note" rows={3} maxLength={2000} placeholder="تفاصيل الوصول أو تعليمات المهمة…" /></Field>
                     </>
                   ) : actionMode === "close" ? (

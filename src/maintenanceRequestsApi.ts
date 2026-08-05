@@ -1,4 +1,4 @@
-import { apiFetch } from "./api";
+import { apiFetch, apiFetchResponse } from "./api";
 import type { MaintenanceRequestStatus } from "../shared/maintenanceRequest";
 
 export type MaintenanceRequestEvent = {
@@ -25,6 +25,8 @@ export type MaintenanceRequest = {
   service_type: string;
   product_id?: string;
   product_name: string;
+  product_category?: string;
+  product_image_url?: string;
   installation_id?: string;
   issue_description: string;
   warranty_status?: "yes" | "no" | "unknown";
@@ -42,6 +44,13 @@ export type MaintenanceRequest = {
   portal_token?: string | null;
   portal_token_version?: number;
   portal_access_revoked_at?: string | null;
+  customer_latitude?: number | null;
+  customer_longitude?: number | null;
+  location_accuracy?: number | null;
+  location_url?: string | null;
+  phone_verified?: boolean;
+  phone_verified_at?: string | null;
+  attachment_count?: number;
   created_at?: string;
   createdAt?: string;
   updated_at?: string;
@@ -56,6 +65,25 @@ export type MaintenanceRequestList = {
   data: MaintenanceRequest[];
   stats: { total: number; new: number; active: number; closed: number; customer_changes: number };
   capped: boolean;
+};
+
+export type MaintenanceAttachment = { id: string; kind: "image" | "video"; media_type: string; byte_size: number };
+export type MaintenanceProduct = { id: string; name: string; category: string; sku: string; image_url: string };
+export type MaintenanceSlot = { time: string; available: boolean; capacity: number };
+export type MaintenanceAvailability = {
+  ready: boolean;
+  dates: Array<{ date: string; slots: MaintenanceSlot[] }>;
+  settings: { location_required: boolean; attachments_enabled: boolean };
+};
+export type MaintenancePortalSettings = {
+  slot_times: string[];
+  closed_weekdays: number[];
+  booking_horizon_days: number;
+  slot_capacity: number;
+  min_lead_hours: number;
+  location_required: boolean;
+  attachments_enabled: boolean;
+  whatsapp_verification_required: boolean;
 };
 
 export type MaintenanceRequestAction =
@@ -99,7 +127,7 @@ export function getMaintenanceRequests(filters: { status?: string; search?: stri
 }
 
 export function getMaintenanceRequest(id: string) {
-  return apiFetch<{ request: MaintenanceRequest; events: MaintenanceRequestEvent[] }>(
+  return apiFetch<{ request: MaintenanceRequest; events: MaintenanceRequestEvent[]; attachments: MaintenanceAttachment[] }>(
     `/api/maintenance-requests/${encodeURIComponent(id)}`,
   );
 }
@@ -117,13 +145,19 @@ export function createPublicMaintenanceRequest(payload: {
   customer_phone: string;
   city?: string;
   address: string;
-  service_type: string;
-  product_name: string;
+  product_id: string;
   issue_description: string;
   warranty_status: "yes" | "no" | "unknown";
   invoice_number?: string;
-  preferred_date?: string;
-  preferred_time?: string;
+  preferred_date: string;
+  preferred_time: string;
+  customer_latitude?: number;
+  customer_longitude?: number;
+  location_accuracy?: number;
+  location_url?: string;
+  verification_id: string;
+  verification_token: string;
+  attachment_ids: string[];
   accept_terms: true;
   website?: string;
 }) {
@@ -131,6 +165,70 @@ export function createPublicMaintenanceRequest(payload: {
     "/public/maintenance-requests",
     { method: "POST", body: JSON.stringify(payload) },
   );
+}
+
+export function getPublicMaintenanceProducts(query = "") {
+  return publicFetch<{ data: MaintenanceProduct[] }>(`/public/maintenance-products${query ? `?q=${encodeURIComponent(query)}` : ""}`);
+}
+
+export function getPublicMaintenanceAvailability() {
+  return publicFetch<MaintenanceAvailability>("/public/maintenance-availability");
+}
+
+export function requestPublicMaintenanceVerification(customerPhone: string) {
+  return publicFetch<{ verification_id: string; expires_in_seconds: number; phone_hint: string }>(
+    "/public/maintenance-phone-verification",
+    { method: "POST", body: JSON.stringify({ customer_phone: customerPhone }) },
+  );
+}
+
+export function confirmPublicMaintenanceVerification(verificationId: string, customerPhone: string, code: string) {
+  return publicFetch<{ verification_token: string; expires_in_seconds: number }>(
+    "/public/maintenance-phone-verification/confirm",
+    { method: "POST", body: JSON.stringify({ verification_id: verificationId, customer_phone: customerPhone, code }) },
+  );
+}
+
+export async function uploadPublicMaintenanceAttachment(
+  file: File,
+  verificationId: string,
+  verificationToken: string,
+) {
+  return publicFetch<MaintenanceAttachment>("/public/maintenance-attachments", {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type,
+      "X-Maintenance-Verification-Id": verificationId,
+      "X-Maintenance-Verification-Token": verificationToken,
+    },
+    body: file,
+  });
+}
+
+export function getMaintenancePortalSettings() {
+  return apiFetch<{ settings: MaintenancePortalSettings; availability: MaintenanceAvailability }>("/api/maintenance-portal/settings");
+}
+
+export function saveMaintenancePortalSettings(settings: MaintenancePortalSettings) {
+  return apiFetch<{ success: true; settings: MaintenancePortalSettings; availability: MaintenanceAvailability }>(
+    "/api/maintenance-portal/settings",
+    { method: "PUT", body: JSON.stringify(settings) },
+  );
+}
+
+export async function openMaintenanceAttachment(requestId: string, attachmentId: string) {
+  const response = await apiFetchResponse(`/api/maintenance-requests/${encodeURIComponent(requestId)}/attachments/${encodeURIComponent(attachmentId)}`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error || "تعذر فتح المرفق.");
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.target = "_blank";
+  anchor.rel = "noreferrer";
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export function getPublicMaintenanceRequest(token: string) {
@@ -142,7 +240,7 @@ export function getPublicMaintenanceRequest(token: string) {
 export function actOnPublicMaintenanceRequest(
   payload:
     | { token: string; action: "cancel"; reason: string }
-    | { token: string; action: "request_reschedule"; preferred_date: string; preferred_time?: string; note?: string },
+    | { token: string; action: "request_reschedule"; preferred_date: string; preferred_time: string; note?: string },
 ) {
   return publicFetch<{ success: true; request: PublicMaintenanceRequest }>(
     "/public/maintenance-request/action",

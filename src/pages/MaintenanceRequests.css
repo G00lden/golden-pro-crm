@@ -467,3 +467,118 @@
 @media (prefers-reduced-motion: reduce) {
   .maintenance-portal__spinner { animation: none; }
 }
+
+/* BreeXe Pro customer experience */
+.maintenance-portal__brand { gap: 12px; }
+.maintenance-portal__brand > img { flex: 0 0 auto; border-radius: 50%; box-shadow: 0 8px 24px rgba(11, 53, 92, 0.14); }
+.maintenance-portal__brand > span {
+  display: grid;
+  width: auto;
+  height: auto;
+  place-items: initial;
+  gap: 1px;
+  border-radius: 0;
+  color: #0b355c;
+  background: transparent;
+}
+.maintenance-portal__brand strong { font-size: 1.16rem; line-height: 1.1; }
+.maintenance-portal__brand small { color: #6f7f8d; font-size: 0.68rem; font-weight: 700; }
+.maintenance-portal__hero--branded { max-width: 880px; padding: clamp(24px, 5vw, 48px); border: 1px solid rgba(201, 164, 122, 0.34); border-radius: 28px; background: linear-gradient(135deg, #082e52, #0b416f); box-shadow: 0 24px 60px rgba(8, 46, 82, 0.2); }
+.maintenance-portal__hero--branded h1 { max-width: 20ch; color: #fff; }
+.maintenance-portal__hero--branded p { color: #d9e6f0; }
+.maintenance-portal__hero--branded .maintenance-portal__eyebrow { color: #e6c89e; }
+.maintenance-portal__hero--tracking { max-width: none; padding: clamp(22px, 4vw, 38px); border: 1px solid #d8e3eb; border-radius: 22px; background: #fff; }
+.maintenance-portal__trust-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+.maintenance-portal__trust-grid span { display: inline-flex; align-items: center; min-height: 42px; gap: 7px; padding: 8px 12px; border: 1px solid rgba(230, 200, 158, 0.32); border-radius: 999px; color: #fff; background: rgba(255, 255, 255, 0.08); font-weight: 750; }
+.maintenance-portal__trust-grid svg { width: 17px; }
+.maintenance-portal__announcer { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+.maintenance-portal__form--steps { grid-template-columns: 1fr; padding: 0; }
+.maintenance-step { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 0; padding: clamp(22px, 4vw, 36px); }
+.maintenance-step[disabled] { opacity: 0.58; }
+.maintenance-step legend { padding: 0 8px; color: #0b355c; font-size: 1.18rem; font-weight: 900; }
+.maintenance-step legend span { display: inline-grid; width: 30px; height: 30px; margin-left: 7px; place-items: center; border-radius: 50%; color: #fff; background: #b0834f; font-size: 0.9rem; }
+.maintenance-step__intro { display: flex; align-items: flex-start; grid-column: 1 / -1; gap: 12px; padding: 14px; border-radius: 13px; color: #0b355c; background: #eff6fb; }
+.maintenance-step__intro > svg { flex: 0 0 auto; }
+.maintenance-step__intro p { margin: 4px 0 0; color: #5a6c7c; font-weight: 500; }
+.maintenance-verify-row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 14px; border: 1px solid #d9e3ea; border-radius: 14px; background: #f8fbfd; }
+.maintenance-verify-row label { width: 100%; }
+.maintenance-verify-row input { width: min(180px, 100%); font-size: 1.2rem; font-variant-numeric: tabular-nums; letter-spacing: 0.2em; text-align: center; }
+.maintenance-submit--compact { min-height: 46px; }
+.maintenance-submit--wide { width: 100%; min-height: 52px; font-size: 1.02rem; }
+.maintenance-verified { display: inline-flex; align-items: center; min-height: 42px; gap: 6px; color: #176853; font-weight: 850; }
+.maintenance-verified svg { width: 18px; }
+
+.maintenance-product-search { position: relative; }
+.maintenance-product-search svg { position: absolute; top: 50%; right: 13px; z-index: 1; color: #6f7f8d; transform: translateY(-50%); }
+.maintenance-product-search input { padding-right: 42px; }
+.maintenance-products { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; max-height: 390px; overflow-y: auto; padding: 3px; }
+.maintenance-product { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 92px; gap: 12px; padding: 10px; border: 1px solid #d4dee6; border-radius: 14px; color: #172337; background: #fff; cursor: pointer; text-align: right; }
+.maintenance-product:hover { border-color: #9db2c3; background: #f8fbfd; }
+.maintenance-product.active { border-color: #b0834f; box-shadow: 0 0 0 2px rgba(176, 131, 79, 0.14); }
+.maintenance-product img, .maintenance-product__placeholder { width: 72px; height: 72px; object-fit: contain; border-radius: 10px; background: #f2f5f7; }
+.maintenance-product__placeholder { display: grid; place-items: center; color: #0b355c; font-weight: 900; }
+.maintenance-product > span:nth-child(2) { display: grid; min-width: 0; gap: 5px; }
+.maintenance-product strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.maintenance-product small { overflow: hidden; color: #687b8c; text-overflow: ellipsis; white-space: nowrap; }
+.maintenance-product > svg { color: #176853; }
+
+.maintenance-upload { padding: 16px; border: 1px dashed #9bb1c2; border-radius: 14px; background: #f8fbfd; }
+.maintenance-upload > label { display: inline-flex; width: fit-content; min-height: 44px; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 10px; color: #fff; background: #0b355c; cursor: pointer; }
+.maintenance-upload input[type="file"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.maintenance-upload > small { display: block; margin-top: 8px; color: #687b8c; }
+.maintenance-upload__files { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+.maintenance-upload__files span { display: inline-flex; align-items: center; gap: 5px; padding: 7px 9px; border: 1px solid #d8e3eb; border-radius: 9px; background: #fff; font-size: 0.82rem; }
+.maintenance-upload__files svg { width: 15px; }
+
+.maintenance-slots h3 { margin: 5px 0 10px; color: #20364a; font-size: 0.96rem; }
+.maintenance-slot-days { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; margin-bottom: 18px; }
+.maintenance-slot-days button, .maintenance-slot-times button { min-height: 48px; padding: 9px 11px; border: 1px solid #cbd7df; border-radius: 11px; color: #29445c; background: #fff; cursor: pointer; }
+.maintenance-slot-days button { display: grid; gap: 3px; text-align: right; }
+.maintenance-slot-days small { color: #778794; }
+.maintenance-slot-days button.active, .maintenance-slot-times button.active { border-color: #0b355c; color: #fff; background: #0b355c; }
+.maintenance-slot-days button.active small { color: #d9e6f0; }
+.maintenance-slot-times { display: flex; flex-wrap: wrap; gap: 8px; }
+.maintenance-slot-times button { display: inline-flex; align-items: center; justify-content: center; min-width: 88px; gap: 5px; font-variant-numeric: tabular-nums; }
+.maintenance-location { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.maintenance-map-link { display: inline-flex; align-items: center; min-height: 44px; gap: 7px; margin: 0 0 20px; padding: 9px 13px; border: 1px solid #cbd7df; border-radius: 10px; color: #0b355c; background: #fff; font-weight: 800; text-decoration: none; }
+.maintenance-product-summary { grid-template-columns: 64px minmax(0, 1fr); }
+.maintenance-product-summary img { grid-row: 1 / 4; object-fit: contain; border-radius: 9px; background: #f2f5f7; }
+.maintenance-product-summary span, .maintenance-product-summary strong, .maintenance-product-summary small { grid-column: 2; }
+
+@media (max-width: 720px) {
+  .maintenance-portal__brand small { display: none; }
+  .maintenance-step, .maintenance-products { grid-template-columns: 1fr; }
+  .maintenance-step__intro { grid-column: auto; }
+  .maintenance-portal__hero--branded { padding: 24px 20px; border-radius: 20px; }
+  .maintenance-portal__trust-grid { display: grid; }
+  .maintenance-portal__trust-grid span { border-radius: 12px; }
+  .maintenance-product { grid-template-columns: 62px minmax(0, 1fr) auto; }
+  .maintenance-product img, .maintenance-product__placeholder { width: 62px; height: 62px; }
+}
+
+.maintenance-schedule-panel { margin-bottom: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.maintenance-schedule-panel__head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 15px; }
+.maintenance-schedule-panel__head > div { display: flex; align-items: center; min-width: 0; gap: 10px; }
+.maintenance-schedule-panel__head svg { color: var(--gold); }
+.maintenance-schedule-panel__head span { display: grid; gap: 3px; }
+.maintenance-schedule-panel__head small { color: var(--muted); }
+.maintenance-schedule-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 16px; border-top: 1px solid var(--line); }
+.maintenance-schedule-form__weekdays, .maintenance-schedule-form__toggles { display: flex; flex-wrap: wrap; grid-column: 1 / -1; gap: 9px 15px; margin: 0; padding: 13px; border: 1px solid var(--line); border-radius: 11px; }
+.maintenance-schedule-form__weekdays legend { padding-inline: 5px; color: var(--muted); font-size: 0.82rem; }
+.maintenance-schedule-form__weekdays label, .maintenance-schedule-form__toggles label { display: inline-flex; align-items: center; min-height: 36px; gap: 6px; color: var(--text); cursor: pointer; }
+.maintenance-schedule-form__weekdays input, .maintenance-schedule-form__toggles input { width: 18px; height: 18px; }
+.maintenance-schedule-form__footer { grid-column: 1 / -1; }
+.maintenance-admin-product { grid-template-columns: 60px minmax(0, 1fr); }
+.maintenance-admin-product img { grid-row: 1 / 4; object-fit: contain; border-radius: 8px; background: var(--surface-2); }
+.maintenance-admin-product span, .maintenance-admin-product strong, .maintenance-admin-product small { grid-column: 2; }
+.maintenance-admin-attachments { padding: 15px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
+.maintenance-admin-attachments h3 { display: flex; align-items: center; gap: 7px; margin: 0 0 11px; font-size: 0.95rem; }
+.maintenance-admin-attachments > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.maintenance-admin-attachments button { display: inline-flex; align-items: center; min-height: 40px; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--gold-2); background: var(--surface); cursor: pointer; }
+
+@media (max-width: 720px) {
+  .maintenance-schedule-panel__head { align-items: stretch; flex-direction: column; }
+  .maintenance-schedule-form { grid-template-columns: 1fr; }
+  .maintenance-schedule-form__weekdays, .maintenance-schedule-form__toggles, .maintenance-schedule-form__footer { grid-column: auto; }
+}

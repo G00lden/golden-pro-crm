@@ -1,4 +1,4 @@
-import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
+import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
 import type { AuthedRequest } from "./auth";
 import { completeBooking } from "./bookingLifecycle";
@@ -20,6 +20,18 @@ import {
   transitionMaintenanceRequest,
   updateMaintenancePortalAccess,
 } from "./maintenanceRequestService";
+import {
+  assertMaintenanceSlotAvailable,
+  getMaintenanceAvailability,
+  getMaintenancePortalSettings,
+  listMaintenanceAttachments,
+  readMaintenanceAttachment,
+  requestMaintenancePhoneVerification,
+  saveMaintenancePortalSettings,
+  searchMaintenanceProducts,
+  storeMaintenanceAttachment,
+  verifyMaintenancePhone,
+} from "./maintenancePortalExperience";
 
 type PublicRouteOptions = {
   rateLimit: RequestHandler;
@@ -52,15 +64,39 @@ const publicCreateSchema = z.object({
   customer_phone: z.string().trim().min(7, "أدخل رقم الجوال.").max(30),
   city: z.string().trim().max(160).optional(),
   address: z.string().trim().min(5, "أدخل عنوان موقع الصيانة.").max(1_000),
-  service_type: z.enum(["air_conditioning", "electrical", "plumbing", "appliances", "general"]),
-  product_name: z.string().trim().min(2, "أدخل نوع الجهاز أو الخدمة.").max(240),
+  product_id: z.string().trim().min(1, "اختر منتجاً من منتجات BreeXe Pro.").max(128),
   issue_description: z.string().trim().min(10, "صف العطل بمزيد من التفاصيل.").max(4_000),
   warranty_status: z.enum(["yes", "no", "unknown"]).optional(),
   invoice_number: z.string().trim().max(120).optional(),
-  preferred_date: maintenanceCalendarDate.optional(),
-  preferred_time: time.optional(),
+  preferred_date: maintenanceCalendarDate,
+  preferred_time: time,
+  customer_latitude: z.number().finite().min(-90).max(90).optional(),
+  customer_longitude: z.number().finite().min(-180).max(180).optional(),
+  location_accuracy: z.number().finite().min(0).max(100_000).optional(),
+  location_url: z.string().trim().url().max(2_048).optional(),
+  verification_id: z.string().regex(/^mpv_[a-f0-9]{32}$/),
+  verification_token: z.string().min(40).max(128),
+  attachment_ids: z.array(z.string().regex(/^mra_[a-f0-9]{32}$/)).max(5).default([]),
   accept_terms: z.literal(true, "يجب الموافقة على سياسة الخدمة والخصوصية."),
   website: z.string().trim().max(2_048).optional(),
+}).strict();
+
+const phoneVerificationRequestSchema = z.object({ customer_phone: z.string().trim().min(7).max(30) }).strict();
+const phoneVerificationConfirmSchema = z.object({
+  verification_id: z.string().regex(/^mpv_[a-f0-9]{32}$/),
+  customer_phone: z.string().trim().min(7).max(30),
+  code: z.string().regex(/^\d{6}$/),
+}).strict();
+
+const settingsSchema = z.object({
+  slot_times: z.array(time).min(1).max(12),
+  closed_weekdays: z.array(z.number().int().min(0).max(6)).max(7),
+  booking_horizon_days: z.number().int().min(1).max(60),
+  slot_capacity: z.number().int().min(1).max(20),
+  min_lead_hours: z.number().int().min(0).max(72),
+  location_required: z.boolean(),
+  attachments_enabled: z.boolean(),
+  whatsapp_verification_required: z.boolean(),
 }).strict();
 
 const portalTokenSchema = z.string().trim().min(40).max(300);
@@ -71,7 +107,7 @@ const customerActionSchema = z.discriminatedUnion("action", [
     token: portalTokenSchema,
     action: z.literal("request_reschedule"),
     preferred_date: maintenanceCalendarDate,
-    preferred_time: time.optional(),
+    preferred_time: time,
     note: z.string().trim().max(1_000).optional(),
   }),
 ]);
@@ -135,6 +171,62 @@ export function maintenanceRequestRateLimitOptions(env: NodeJS.ProcessEnv = proc
 }
 
 export function registerMaintenanceRequestPublicRoutes(app: Express, options: PublicRouteOptions) {
+  app.get("/public/maintenance-products", options.rateLimit, asyncRoute(async (req, res) => {
+    const ownerUid = options.ownerUid();
+    if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
+    const query = String(req.query.q || "").slice(0, 120);
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.json({ data: await searchMaintenanceProducts(ownerUid, query) });
+  }));
+
+  app.get("/public/maintenance-availability", options.rateLimit, asyncRoute(async (_req, res) => {
+    const ownerUid = options.ownerUid();
+    if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(await getMaintenanceAvailability(ownerUid));
+  }));
+
+  app.post("/public/maintenance-phone-verification", options.rateLimit, asyncRoute(async (req, res) => {
+    const parsed = phoneVerificationRequestSchema.safeParse(req.body);
+    if (!parsed.success) return validationError(res, { error: parsed.error! });
+    const ownerUid = options.ownerUid();
+    if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
+    res.setHeader("Cache-Control", "no-store");
+    try {
+      res.status(201).json(await requestMaintenancePhoneVerification(ownerUid, parsed.data.customer_phone));
+    } catch (error) {
+      if (Number((error as { status?: unknown })?.status) === 503) {
+        return res.status(503).json({ error: "خدمة التحقق عبر واتساب غير متاحة حالياً. حاول بعد قليل." });
+      }
+      throw error;
+    }
+  }));
+
+  app.post("/public/maintenance-phone-verification/confirm", options.rateLimit, asyncRoute(async (req, res) => {
+    const parsed = phoneVerificationConfirmSchema.safeParse(req.body);
+    if (!parsed.success) return validationError(res, { error: parsed.error! });
+    const ownerUid = options.ownerUid();
+    if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(await verifyMaintenancePhone(ownerUid, parsed.data.verification_id, parsed.data.customer_phone, parsed.data.code));
+  }));
+
+  app.post(
+    "/public/maintenance-attachments",
+    options.rateLimit,
+    express.raw({ type: ["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime"], limit: "25mb" }),
+    asyncRoute(async (req, res) => {
+      const ownerUid = options.ownerUid();
+      if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
+      const verificationId = String(req.get("x-maintenance-verification-id") || "");
+      const token = String(req.get("x-maintenance-verification-token") || "");
+      if (!Buffer.isBuffer(req.body)) return res.status(415).json({ error: "صيغة المرفق غير مدعومة." });
+      const result = await storeMaintenanceAttachment(ownerUid, verificationId, token, String(req.get("content-type") || "").split(";")[0], req.body);
+      res.setHeader("Cache-Control", "no-store");
+      res.status(201).json(result);
+    }),
+  );
+
   app.post("/public/maintenance-requests", options.rateLimit, asyncRoute(async (req, res) => {
     const parsed = publicCreateSchema.safeParse(req.body);
     if (!parsed.success) return validationError(res, { error: parsed.error! });
@@ -180,6 +272,7 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
         options.queueFieldTechSync("maintenance_request_customer_cancelled");
       }
     } else {
+      await assertMaintenanceSlotAvailable(ownerUid, parsed.data.preferred_date, parsed.data.preferred_time || "");
       await requestCustomerReschedule(request, parsed.data);
     }
     const updated = await getOwnedMaintenanceRequest(request.id, ownerUid);
@@ -190,6 +283,19 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
 }
 
 export function registerMaintenanceRequestAdminRoutes(app: Express, options: AdminRouteOptions) {
+  app.get("/api/maintenance-portal/settings", requireCapability("maintenance.requests.view"), asyncRoute(async (req, res) => {
+    const ownerUid = adminWorkspaceOwnerUid(req);
+    res.json({ settings: await getMaintenancePortalSettings(ownerUid), availability: await getMaintenanceAvailability(ownerUid) });
+  }));
+
+  app.put("/api/maintenance-portal/settings", requireCapability("maintenance.requests.manage"), asyncRoute(async (req, res) => {
+    const parsed = settingsSchema.safeParse(req.body);
+    if (!parsed.success) return validationError(res, { error: parsed.error! });
+    const ownerUid = adminWorkspaceOwnerUid(req);
+    const settings = await saveMaintenancePortalSettings(ownerUid, parsed.data);
+    res.json({ success: true, settings, availability: await getMaintenanceAvailability(ownerUid) });
+  }));
+
   app.get("/api/maintenance-requests", requireCapability("maintenance.requests.view"), asyncRoute(async (req, res) => {
     const ownerUid = adminWorkspaceOwnerUid(req);
     res.json(await listMaintenanceRequests(ownerUid, {
@@ -204,7 +310,18 @@ export function registerMaintenanceRequestAdminRoutes(app: Express, options: Adm
     res.json({
       request: adminRequestResponse(request, ownerUid),
       events: await maintenanceRequestEvents(request.id, ownerUid),
+      attachments: await listMaintenanceAttachments(ownerUid, request.id),
     });
+  }));
+
+  app.get("/api/maintenance-requests/:id/attachments/:attachmentId", requireCapability("maintenance.requests.view"), asyncRoute(async (req, res) => {
+    const ownerUid = adminWorkspaceOwnerUid(req);
+    await getOwnedMaintenanceRequest(String(req.params.id), ownerUid);
+    const attachment = await readMaintenanceAttachment(ownerUid, String(req.params.id), String(req.params.attachmentId));
+    res.setHeader("Content-Type", attachment.media_type);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Content-Disposition", "inline");
+    res.send(attachment.body);
   }));
 
   app.post("/api/maintenance-requests/:id/action", requireCapability("maintenance.requests.manage"), asyncRoute(async (req, res) => {
@@ -230,6 +347,7 @@ export function registerMaintenanceRequestAdminRoutes(app: Express, options: Adm
         patch: { rejection_reason: parsed.data.reason },
       });
     } else if (parsed.data.action === "assign") {
+      await assertMaintenanceSlotAvailable(ownerUid, parsed.data.date, parsed.data.scheduled_time);
       request = await assignMaintenanceRequest(id, ownerUid, { ...parsed.data, actor_uid: uid });
       options.queueFieldTechSync("maintenance_request_assigned");
     } else if (parsed.data.action === "start") {
