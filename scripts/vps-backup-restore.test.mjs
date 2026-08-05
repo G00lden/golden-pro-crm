@@ -612,6 +612,11 @@ test("remote start validates Caddy, builds first, recreates both services, and c
   assert.doesNotMatch(remoteStart, /--resolve "\$CRM_DOMAIN:443:127\.0\.0\.1"/);
   assert.match(remoteStart, /if ! wait_for_release/);
   assert.match(remoteStart, /bash "\$APP_DIR\/deploy\/remote-rollback\.sh"/);
+  assert.match(
+    deployTransaction,
+    /BUILD_COMMIT\[\[:space:\]\]\*=\.\*\$\|BUILD_COMMIT=\$EXPECTED_BUILD/,
+    "the installed environment must retain the exact build after an ordinary Compose restart",
+  );
 });
 
 test("remote rollback restores image, env, Compose, and Caddy then verifies both paths", () => {

@@ -660,3 +660,12 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Advanced SQLite to schema `11002`, added a matching Supabase migration, and included maintenance attachments in the guarded VPS backup/restore whitelist with private file modes.
 - Added a bundled production OTP canary that performs send, code confirmation, and one-time consumption against the existing single allowlisted number while emitting only redacted evidence.
 - Pre-deploy evidence: TypeScript lint, schema migration tests (9/9), maintenance lifecycle test, OTP safety/payload tests (4/4), VPS backup/restore tests (34/34), version policy, production build, and source security audit passed. Agent-browser verified desktop/mobile RTL layout without horizontal overflow and saved the schedule through the authenticated CRM UI. Production deployment and canary evidence are recorded in the follow-up block after completion.
+
+### Production evidence
+
+- Deployed release `1.9.7` atomically to `https://crm.breexe-pro.com`; public health and version probes returned HTTP 200 and the exact packaged build.
+- The live SQLite database advanced to schema `11002` with `PRAGMA integrity_check=ok`. The public maintenance catalog returned 24 real owner-scoped products from 665 eligible catalog rows, and availability returned 17 dates with four admin-controlled slots on the first open day.
+- The dedicated WhatsApp OTP canary completed at `2026-08-05T13:38:34.889Z`: Meta accepted the template message, code confirmation succeeded, and the verification token was consumed exactly once. Its private redacted report is `/app/.runtime/maintenance-otp-canary-2026-08-05T13-38-34-889Z.json` with mode `0600`.
+- Dedicated maintenance OTP was promoted to `production` only after the canary. Global outbound remained `allowlist` with `OFFICIAL_LAUNCH_APPROVED=false`; unrelated WhatsApp flows without approved templates were disabled instead of being represented as ready.
+- Recoverable pre-deploy backups are `/var/backups/golden-pro-crm/20260805-153009-3389092-7949` and `/var/backups/golden-pro-crm/20260805-153412-3390652-15675`.
+- An adversarial restart check exposed stale build metadata from `.env.production`. The live value was corrected and the deployment transaction now persists `BUILD_COMMIT` into the installed environment; all 34 deployment/backup/rollback tests passed after the fix.

@@ -500,6 +500,11 @@ if [ "$USE_EXISTING_ENV" = "true" ]; then
 else
   cp -- "$DEPLOY_ENV_FILE" "$STAGED_SOURCE/.env.production"
 fi
+if grep -Eq '^[[:space:]]*BUILD_COMMIT[[:space:]]*=' "$STAGED_SOURCE/.env.production"; then
+  sed -i -E "s|^[[:space:]]*BUILD_COMMIT[[:space:]]*=.*$|BUILD_COMMIT=$EXPECTED_BUILD|" "$STAGED_SOURCE/.env.production"
+else
+  printf '\nBUILD_COMMIT=%s\n' "$EXPECTED_BUILD" >> "$STAGED_SOURCE/.env.production"
+fi
 chmod 600 "$STAGED_SOURCE/.env.production"
 
 DB_PATH_VALUE="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\?DB_PATH[[:space:]]*=[[:space:]]*//p' "$STAGED_SOURCE/.env.production" | tail -n 1 | sed 's/[[:space:]]*$//' | tr -d '\r')"
