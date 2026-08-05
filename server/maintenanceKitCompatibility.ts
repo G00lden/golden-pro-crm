@@ -19,6 +19,13 @@ export type CompatibleMaintenanceKit = {
   compatibility_note: string;
 };
 
+export type PeriodicMaintenanceVirtualDevice = MaintenanceCatalogProduct & {
+  periodic_parent_kit_id: string;
+  periodic_variant_id: string;
+};
+
+const PERIODIC_VARIANT_PREFIX = "periodic_variant:";
+
 const productTextCache = new WeakMap<object, string>();
 
 function normalize(value: unknown) {
@@ -167,4 +174,63 @@ export function maintenanceDevicesWithCompatibleKits(catalog: MaintenanceCatalog
   return catalog
     .filter((product) => !isMaintenanceKitProduct(product) && !isAccessoryProduct(product))
     .filter((device) => compatibleMaintenanceKits(device, kits).length > 0);
+}
+
+function catalogVariants(product: MaintenanceCatalogProduct) {
+  let raw = product.variants;
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  return Array.isArray(raw) ? raw : [];
+}
+
+function coolingCellDeviceName(value: unknown) {
+  const name = String(value || "").trim();
+  if (!name) return "";
+  return name.replace(/^خلايا\s+تبريد\s+(?:المكيف\s+)?/u, "مكيف ").trim();
+}
+
+/**
+ * Some approved cooling-cell kits carry their supported Breez Air models as
+ * variants even when the historical devices are no longer sold as separate
+ * catalog products. These server-derived choices preserve exact compatibility
+ * without accepting free text or a forged device/kit relationship.
+ */
+export function periodicCoolingCellVariantDevices(catalog: MaintenanceCatalogProduct[]) {
+  const devices: PeriodicMaintenanceVirtualDevice[] = [];
+  for (const kit of catalog) {
+    if (!kit?.id || maintenanceKitKind(kit) !== "cooling_cells") continue;
+    for (const candidate of catalogVariants(kit)) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const variant = candidate as Record<string, unknown>;
+      const variantId = String(variant.id || "").trim();
+      const name = coolingCellDeviceName(variant.name);
+      if (!variantId || !name) continue;
+      devices.push({
+        id: `${PERIODIC_VARIANT_PREFIX}${kit.id}:${variantId}`,
+        name,
+        category: kit.category,
+        nested_category: kit.nested_category,
+        subcategory: kit.subcategory,
+        sku: variant.sku || kit.sku,
+        image_url: kit.image_url || kit.imageUrl,
+        periodic_parent_kit_id: kit.id,
+        periodic_variant_id: variantId,
+      });
+    }
+  }
+  return devices;
+}
+
+export function resolvePeriodicCoolingCellVariantDevice(
+  productId: string,
+  catalog: MaintenanceCatalogProduct[],
+) {
+  const id = String(productId || "").trim();
+  if (!id.startsWith(PERIODIC_VARIANT_PREFIX)) return null;
+  const device = periodicCoolingCellVariantDevices(catalog).find((item) => item.id === id);
+  if (!device) return null;
+  const kit = catalog.find((item) => item.id === device.periodic_parent_kit_id);
+  if (!kit || maintenanceKitKind(kit) !== "cooling_cells") return null;
+  return { device, kit };
 }

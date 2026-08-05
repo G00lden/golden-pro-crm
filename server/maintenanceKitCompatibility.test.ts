@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compatibleMaintenanceKits, isMaintenanceKitProduct, maintenanceDevicesWithCompatibleKits } from "./maintenanceKitCompatibility";
+import {
+  compatibleMaintenanceKits,
+  isMaintenanceKitProduct,
+  maintenanceDevicesWithCompatibleKits,
+  periodicCoolingCellVariantDevices,
+  resolvePeriodicCoolingCellVariantDevice,
+} from "./maintenanceKitCompatibility";
 
 const kits = [
   { id: "home", name: "حزمة طقم تبديل فلاتر - إصدار الخاص", category: "قطع الصيانة الدورية لأنظمة التحلية", variants: ["5 مراحل", "6 مراحل", "7 مراحل"] },
@@ -65,6 +71,28 @@ test("spare-part identities are not devices and description text cannot promote 
 test("kit products cannot be selected as devices", () => {
   assert.equal(isMaintenanceKitProduct(kits[0]), true);
   assert.deepEqual(compatibleMaintenanceKits(kits[0], kits), []);
+});
+
+test("cooling-cell kit variants become exact server-derived device choices", () => {
+  const catalog = [{
+    id: "cells-variants",
+    name: "طقم قطع غيار خلايا تبريد المكيف الاسترالي Breez Air",
+    variants: [
+      { id: "350", name: "خلايا تبريد المكيف Breez Air ١ حصان TBQI-350" },
+      { id: "580", name: "خلايا تبريد المكيف Breez Air ١.٥ حصان TBSI-580" },
+    ],
+  }];
+  const devices = periodicCoolingCellVariantDevices(catalog);
+  assert.deepEqual(devices.map((item) => item.id), [
+    "periodic_variant:cells-variants:350",
+    "periodic_variant:cells-variants:580",
+  ]);
+  assert.deepEqual(devices.map((item) => item.name), [
+    "مكيف Breez Air ١ حصان TBQI-350",
+    "مكيف Breez Air ١.٥ حصان TBSI-580",
+  ]);
+  assert.equal(resolvePeriodicCoolingCellVariantDevice(devices[0].id, catalog)?.kit.id, "cells-variants");
+  assert.equal(resolvePeriodicCoolingCellVariantDevice("periodic_variant:cells-variants:forged", catalog), null);
 });
 
 test("periodic device indexing stays bounded on a production-sized catalog", () => {

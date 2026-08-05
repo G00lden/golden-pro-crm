@@ -8,6 +8,8 @@ import {
   compatibleMaintenanceKits,
   isMaintenanceKitProduct,
   maintenanceDevicesWithCompatibleKits,
+  periodicCoolingCellVariantDevices,
+  resolvePeriodicCoolingCellVariantDevice,
   type MaintenanceCatalogProduct,
 } from "./maintenanceKitCompatibility";
 
@@ -153,7 +155,9 @@ export async function searchMaintenanceProducts(
 ) {
   const catalog = await visibleMaintenanceCatalog(ownerUid);
   const needle = String(query || "").trim().toLocaleLowerCase("ar");
-  const products = (requestType === "periodic" ? maintenanceDevicesWithCompatibleKits(catalog) : catalog.filter((item) => !isMaintenanceKitProduct(item)))
+  const products = (requestType === "periodic"
+    ? [...maintenanceDevicesWithCompatibleKits(catalog), ...periodicCoolingCellVariantDevices(catalog)]
+    : catalog.filter((item) => !isMaintenanceKitProduct(item)))
     .filter((item: AnyRecord) => !needle || [item.name, item.category, item.sku].some((value) => String(value || "").toLocaleLowerCase("ar").includes(needle)))
     .sort((a: AnyRecord, b: AnyRecord) => Number(Boolean(b.image_url)) - Number(Boolean(a.image_url)) || String(a.name).localeCompare(String(b.name), "ar"))
     .slice(0, Math.max(1, Math.min(30, limit)))
@@ -163,6 +167,14 @@ export async function searchMaintenanceProducts(
 
 export async function listCompatibleMaintenanceKits(ownerUid: string, productId: string): Promise<MaintenanceKitOption[]> {
   const catalog = await visibleMaintenanceCatalog(ownerUid);
+  const virtualDevice = resolvePeriodicCoolingCellVariantDevice(productId, catalog);
+  if (virtualDevice) {
+    return [{
+      ...publicMaintenanceProduct(virtualDevice.kit),
+      kind: "cooling_cells",
+      compatibility_note: `خلايا تبريد مطابقة للموديل ${String(virtualDevice.device.name || "").trim()}.`,
+    }];
+  }
   const device = catalog.find((item) => String(item.id) === String(productId || "").trim());
   if (!device || isMaintenanceKitProduct(device)) throw httpError(400, "اختر جهازاً صالحاً من منتجات BreeXe Pro.");
   return compatibleMaintenanceKits(device, catalog.filter(isMaintenanceKitProduct)).map((match) => ({
@@ -180,6 +192,12 @@ export async function requireCompatibleMaintenanceKit(ownerUid: string, productI
 }
 
 export async function requireMaintenanceProduct(ownerUid: string, productId: string) {
+  if (String(productId || "").startsWith("periodic_variant:")) {
+    const catalog = await visibleMaintenanceCatalog(ownerUid);
+    const virtualDevice = resolvePeriodicCoolingCellVariantDevice(productId, catalog);
+    if (!virtualDevice) throw httpError(400, "اختر جهازاً دورياً صالحاً من منتجات BreeXe Pro.");
+    return publicMaintenanceProduct(virtualDevice.device);
+  }
   const snapshot = await adminDb.collection("products").doc(String(productId || "").trim()).get();
   if (!snapshot.exists) throw httpError(400, "اختر منتجاً من قائمة منتجات BreeXe Pro.");
   const item = snapshotRecord(snapshot);
