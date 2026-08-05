@@ -7,6 +7,7 @@ import { whatsappService } from "./whatsapp";
 import {
   compatibleMaintenanceKits,
   isMaintenanceKitProduct,
+  maintenanceDevicesWithCompatibleKits,
   type MaintenanceCatalogProduct,
 } from "./maintenanceKitCompatibility";
 
@@ -152,9 +153,7 @@ export async function searchMaintenanceProducts(
 ) {
   const catalog = await visibleMaintenanceCatalog(ownerUid);
   const needle = String(query || "").trim().toLocaleLowerCase("ar");
-  const products = catalog
-    .filter((item) => !isMaintenanceKitProduct(item))
-    .filter((item) => requestType !== "periodic" || compatibleMaintenanceKits(item, catalog).length > 0)
+  const products = (requestType === "periodic" ? maintenanceDevicesWithCompatibleKits(catalog) : catalog.filter((item) => !isMaintenanceKitProduct(item)))
     .filter((item: AnyRecord) => !needle || [item.name, item.category, item.sku].some((value) => String(value || "").toLocaleLowerCase("ar").includes(needle)))
     .sort((a: AnyRecord, b: AnyRecord) => Number(Boolean(b.image_url)) - Number(Boolean(a.image_url)) || String(a.name).localeCompare(String(b.name), "ar"))
     .slice(0, Math.max(1, Math.min(30, limit)))
@@ -166,7 +165,7 @@ export async function listCompatibleMaintenanceKits(ownerUid: string, productId:
   const catalog = await visibleMaintenanceCatalog(ownerUid);
   const device = catalog.find((item) => String(item.id) === String(productId || "").trim());
   if (!device || isMaintenanceKitProduct(device)) throw httpError(400, "اختر جهازاً صالحاً من منتجات BreeXe Pro.");
-  return compatibleMaintenanceKits(device, catalog).map((match) => ({
+  return compatibleMaintenanceKits(device, catalog.filter(isMaintenanceKitProduct)).map((match) => ({
     ...publicMaintenanceProduct(match.product),
     kind: match.kind,
     compatibility_note: match.compatibility_note,

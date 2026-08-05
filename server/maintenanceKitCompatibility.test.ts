@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compatibleMaintenanceKits, isMaintenanceKitProduct } from "./maintenanceKitCompatibility";
+import { compatibleMaintenanceKits, isMaintenanceKitProduct, maintenanceDevicesWithCompatibleKits } from "./maintenanceKitCompatibility";
 
 const kits = [
   { id: "home", name: "حزمة طقم تبديل فلاتر - إصدار الخاص", category: "قطع الصيانة الدورية لأنظمة التحلية", variants: ["5 مراحل", "6 مراحل", "7 مراحل"] },
@@ -38,4 +38,21 @@ test("Brafco cooler is fail-closed to its exact kit", () => {
 test("kit products cannot be selected as devices", () => {
   assert.equal(isMaintenanceKitProduct(kits[0]), true);
   assert.deepEqual(compatibleMaintenanceKits(kits[0], kits), []);
+});
+
+test("periodic device indexing stays bounded on a production-sized catalog", () => {
+  const unrelated = Array.from({ length: 2_000 }, (_, index) => ({
+    id: `unrelated-${index}`,
+    name: `مكيف BreeXe Pro سبليت ${index}`,
+    category: "تكييف وتبريد",
+    description: "وصف منتج ".repeat(20),
+  }));
+  const startedAt = performance.now();
+  const devices = maintenanceDevicesWithCompatibleKits([
+    ...unrelated,
+    { id: "ro7", name: "جهاز تحلية منزلي RO 7 مراحل" },
+    ...kits,
+  ]);
+  assert.deepEqual(devices.map((item) => item.id), ["ro7"]);
+  assert.ok(performance.now() - startedAt < 2_000, "periodic catalog matching exceeded two seconds");
 });

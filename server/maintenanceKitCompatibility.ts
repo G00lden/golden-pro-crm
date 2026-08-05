@@ -19,6 +19,8 @@ export type CompatibleMaintenanceKit = {
   compatibility_note: string;
 };
 
+const productTextCache = new WeakMap<object, string>();
+
 function normalize(value: unknown) {
   return String(value ?? "")
     .normalize("NFKD")
@@ -33,7 +35,9 @@ function normalize(value: unknown) {
 }
 
 function productText(product: MaintenanceCatalogProduct) {
-  return normalize([
+  const cached = productTextCache.get(product);
+  if (cached !== undefined) return cached;
+  const text = normalize([
     product.name,
     product.category,
     product.nested_category,
@@ -42,6 +46,8 @@ function productText(product: MaintenanceCatalogProduct) {
     typeof product.variants === "string" ? product.variants : JSON.stringify(product.variants || ""),
     product.sku,
   ].join(" "));
+  productTextCache.set(product, text);
+  return text;
 }
 
 function hasAny(text: string, values: string[]) {
@@ -134,4 +140,11 @@ export function compatibleMaintenanceKits(
     const rightExact = productText(right.product).includes(normalize(device.name));
     return Number(rightExact) - Number(leftExact) || String(left.product.name || "").localeCompare(String(right.product.name || ""), "ar");
   });
+}
+
+export function maintenanceDevicesWithCompatibleKits(catalog: MaintenanceCatalogProduct[]) {
+  const kits = catalog.filter(isMaintenanceKitProduct);
+  return catalog
+    .filter((product) => !isMaintenanceKitProduct(product))
+    .filter((device) => compatibleMaintenanceKits(device, kits).length > 0);
 }
