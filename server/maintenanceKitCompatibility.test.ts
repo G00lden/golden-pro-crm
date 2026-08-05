@@ -46,6 +46,22 @@ test("an accessory description cannot turn the accessory into a maintenance devi
   assert.deepEqual(maintenanceDevicesWithCompatibleKits([accessory, ...kits]), []);
 });
 
+test("spare-part identities are not devices and description text cannot promote a filter to a kit", () => {
+  const spareParts = [
+    { id: "tank", name: "خزان جهاز تحلية 15 لتر" },
+    { id: "motor", name: "دنمو جهاز تحلية 100 جالون" },
+    { id: "guard", name: "شبك حماية + حامل خزان للبرادة" },
+  ];
+  const looseFilter = {
+    id: "loose-filter",
+    name: "فلتر تنقية ثلاثي للغسالة والبرادة",
+    category: "قطع الصيانة الدورية",
+    description: "يمكن إضافته مع طقم الصيانة",
+  };
+  assert.equal(isMaintenanceKitProduct(looseFilter), false);
+  assert.deepEqual(maintenanceDevicesWithCompatibleKits([...spareParts, looseFilter, ...kits]), []);
+});
+
 test("kit products cannot be selected as devices", () => {
   assert.equal(isMaintenanceKitProduct(kits[0]), true);
   assert.deepEqual(compatibleMaintenanceKits(kits[0], kits), []);

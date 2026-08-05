@@ -68,7 +68,7 @@ function hasAny(text: string, values: string[]) {
 }
 
 export function maintenanceKitKind(product: MaintenanceCatalogProduct): MaintenanceKitKind | null {
-  const text = productText(product);
+  const text = deviceIdentityText(product);
   const coolingCells = hasAny(text, ["خلايا تبريد", "خلية تبريد"])
     && hasAny(text, ["طقم", "قطع غيار", "قطع الصيانة الدورية"]);
   if (coolingCells) return "cooling_cells";
@@ -79,6 +79,13 @@ export function maintenanceKitKind(product: MaintenanceCatalogProduct): Maintena
 
 export function isMaintenanceKitProduct(product: MaintenanceCatalogProduct) {
   return maintenanceKitKind(product) !== null;
+}
+
+function isAccessoryProduct(product: MaintenanceCatalogProduct) {
+  const name = normalize(product.name);
+  const categories = normalize([product.category, product.nested_category, product.subcategory].join(" "));
+  return categories.includes(normalize("قطع الصيانة الدورية"))
+    || /^(خزان|دنمو|شبك|حامل|اوتوماتيك|مضخه|حنفيه|توصيله|توصيلات|تطويله|تطويلات|بخاخ|راس|صمام|محبس|قاعده|ملحق|قطعه)(?: |$)/.test(name);
 }
 
 function deviceFamily(text: string) {
@@ -100,7 +107,7 @@ export function compatibleMaintenanceKits(
   device: MaintenanceCatalogProduct,
   catalog: MaintenanceCatalogProduct[],
 ): CompatibleMaintenanceKit[] {
-  if (!device?.id || isMaintenanceKitProduct(device)) return [];
+  if (!device?.id || isMaintenanceKitProduct(device) || isAccessoryProduct(device)) return [];
   // Descriptions can mention compatible devices for spare parts and
   // accessories. Device classification therefore uses identity fields only;
   // descriptions and variants remain available when classifying the kit.
@@ -158,6 +165,6 @@ export function compatibleMaintenanceKits(
 export function maintenanceDevicesWithCompatibleKits(catalog: MaintenanceCatalogProduct[]) {
   const kits = catalog.filter(isMaintenanceKitProduct);
   return catalog
-    .filter((product) => !isMaintenanceKitProduct(product))
+    .filter((product) => !isMaintenanceKitProduct(product) && !isAccessoryProduct(product))
     .filter((device) => compatibleMaintenanceKits(device, kits).length > 0);
 }
