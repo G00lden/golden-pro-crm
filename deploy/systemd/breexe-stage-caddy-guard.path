@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch release files that can remove the BreeXe Odoo Stage route
+
+[Path]
+PathChanged=/opt/golden-pro-crm/deploy/Caddyfile
+PathChanged=/opt/golden-pro-crm/deploy/docker-compose.yml
+Unit=breexe-stage-caddy-guard.service
+
+[Install]
+WantedBy=multi-user.target

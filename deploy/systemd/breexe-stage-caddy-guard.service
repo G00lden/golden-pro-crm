@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore and verify the isolated BreeXe Odoo Stage Caddy route
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/breexe-stage-caddy-guard --repair
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true

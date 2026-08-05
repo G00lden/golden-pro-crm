@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically verify the isolated BreeXe Odoo Stage route
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Persistent=true
+Unit=breexe-stage-caddy-guard.service
+
+[Install]
+WantedBy=timers.target

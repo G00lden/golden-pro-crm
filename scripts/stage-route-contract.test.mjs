@@ -44,3 +44,17 @@ test("deployment fails closed when the Stage route is removed or misrouted", asy
   assert.match(remoteStart, /ODOO_STAGE_DOMAIN=.*stage-erp\.breexe-pro\.com/);
   assert.match(remoteStart, /erp_login_matches "\$ODOO_STAGE_DOMAIN"/);
 });
+
+test("host-level guard survives complete release directory replacement", async () => {
+  const guard = await source("scripts/breexe-stage-caddy-guard.sh");
+  const pathUnit = await source("deploy/systemd/breexe-stage-caddy-guard.path");
+  const timerUnit = await source("deploy/systemd/breexe-stage-caddy-guard.timer");
+
+  assert.match(guard, /flock -w 300/);
+  assert.match(guard, /host\.docker\.internal:18070/);
+  assert.match(guard, /host\.docker\.internal:8069/);
+  assert.match(guard, /docker compose .*force-recreate caddy/);
+  assert.match(guard, /stage_https_is_healthy/);
+  assert.match(pathUnit, /PathChanged=\/opt\/golden-pro-crm\/deploy\/Caddyfile/);
+  assert.match(timerUnit, /OnUnitInactiveSec=30s/);
+});
