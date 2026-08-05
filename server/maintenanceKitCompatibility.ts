@@ -50,6 +50,16 @@ function productText(product: MaintenanceCatalogProduct) {
   return text;
 }
 
+function deviceIdentityText(product: MaintenanceCatalogProduct) {
+  return normalize([
+    product.name,
+    product.category,
+    product.nested_category,
+    product.subcategory,
+    product.sku,
+  ].join(" "));
+}
+
 function hasAny(text: string, values: string[]) {
   return values.some((value) => {
     const needle = normalize(value);
@@ -91,7 +101,10 @@ export function compatibleMaintenanceKits(
   catalog: MaintenanceCatalogProduct[],
 ): CompatibleMaintenanceKit[] {
   if (!device?.id || isMaintenanceKitProduct(device)) return [];
-  const deviceText = productText(device);
+  // Descriptions can mention compatible devices for spare parts and
+  // accessories. Device classification therefore uses identity fields only;
+  // descriptions and variants remain available when classifying the kit.
+  const deviceText = deviceIdentityText(device);
   const family = deviceFamily(deviceText);
   const stages = stageNumber(deviceText);
   const matches: CompatibleMaintenanceKit[] = [];

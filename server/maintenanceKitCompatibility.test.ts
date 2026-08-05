@@ -35,6 +35,17 @@ test("Brafco cooler is fail-closed to its exact kit", () => {
   assert.deepEqual(matches.map((item) => item.product.id), ["brafco"]);
 });
 
+test("an accessory description cannot turn the accessory into a maintenance device", () => {
+  const accessory = {
+    id: "pump-control",
+    name: "اوتوماتيك مضخة إسباني موديل SP-3",
+    category: "أنظمة دفع الماء والمضخات",
+    description: "قطعة غيار يمكن استخدامها مع برادة برافكو طاولة",
+  };
+  assert.deepEqual(compatibleMaintenanceKits(accessory, kits), []);
+  assert.deepEqual(maintenanceDevicesWithCompatibleKits([accessory, ...kits]), []);
+});
+
 test("kit products cannot be selected as devices", () => {
   assert.equal(isMaintenanceKitProduct(kits[0]), true);
   assert.deepEqual(compatibleMaintenanceKits(kits[0], kits), []);
