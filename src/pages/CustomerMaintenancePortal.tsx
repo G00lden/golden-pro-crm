@@ -6,13 +6,15 @@ import {
   Copy,
   ExternalLink,
   FileVideo,
-  Home,
   ImagePlus,
   MapPin,
   MessageCircleMore,
+  PackageCheck,
+  RefreshCw,
   Search,
   ShieldCheck,
   Upload,
+  Wrench,
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -22,12 +24,14 @@ import {
   createPublicMaintenanceRequest,
   customerPortalUrl,
   getPublicMaintenanceAvailability,
+  getPublicMaintenanceKits,
   getPublicMaintenanceProducts,
   getPublicMaintenanceRequest,
   requestPublicMaintenanceVerification,
   uploadPublicMaintenanceAttachment,
   type MaintenanceAttachment,
   type MaintenanceAvailability,
+  type MaintenanceKitOption,
   type MaintenanceProduct,
   type PublicMaintenanceRequest,
 } from "../maintenanceRequestsApi";
@@ -73,8 +77,12 @@ export default function CustomerMaintenancePortal() {
   const [otp, setOtp] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [productQuery, setProductQuery] = useState("");
+  const [requestType, setRequestType] = useState<"repair" | "periodic" | "">("");
   const [products, setProducts] = useState<MaintenanceProduct[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<MaintenanceProduct | null>(null);
+  const [maintenanceKits, setMaintenanceKits] = useState<MaintenanceKitOption[]>([]);
+  const [selectedKit, setSelectedKit] = useState<MaintenanceKitOption | null>(null);
+  const [kitsLoading, setKitsLoading] = useState(false);
   const [attachments, setAttachments] = useState<MaintenanceAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [location, setLocation] = useState<{ latitude: number; longitude: number; accuracy: number } | null>(null);
@@ -97,12 +105,28 @@ export default function CustomerMaintenancePortal() {
   }, [token]);
 
   useEffect(() => {
-    if (token) return;
+    if (token || !requestType) return;
     const timer = window.setTimeout(() => {
-      getPublicMaintenanceProducts(productQuery).then((result) => setProducts(result.data)).catch(() => setProducts([]));
+      getPublicMaintenanceProducts(productQuery, requestType).then((result) => setProducts(result.data)).catch(() => setProducts([]));
     }, productQuery ? 250 : 0);
     return () => window.clearTimeout(timer);
-  }, [productQuery, token]);
+  }, [productQuery, requestType, token]);
+
+  useEffect(() => {
+    if (requestType !== "periodic" || !selectedProduct) {
+      setMaintenanceKits([]);
+      setSelectedKit(null);
+      return;
+    }
+    let active = true;
+    setKitsLoading(true);
+    setSelectedKit(null);
+    getPublicMaintenanceKits(selectedProduct.id)
+      .then((result) => { if (active) setMaintenanceKits(result.data); })
+      .catch((reason) => { if (active) { setMaintenanceKits([]); setError(reason instanceof Error ? reason.message : "تعذر تحميل أطقم الصيانة المتوافقة."); } })
+      .finally(() => { if (active) setKitsLoading(false); });
+    return () => { active = false; };
+  }, [requestType, selectedProduct]);
 
   const canCustomerChange = request && ["new", "approved", "scheduled"].includes(request.status);
   const scheduleText = useMemo(() => {
@@ -168,7 +192,9 @@ export default function CustomerMaintenancePortal() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     if (!verificationToken) { setError("أكد رقم واتساب أولاً."); return; }
+    if (!requestType) { setError("اختر صيانة عطل أو صيانة دورية."); return; }
     if (!selectedProduct) { setError("اختر منتج BreeXe Pro المطلوب صيانته."); return; }
+    if (requestType === "periodic" && !selectedKit) { setError("اختر طقم الصيانة الدوري المتوافق مع جهازك."); return; }
     if (!selectedDate || !selectedTime) { setError("اختر موعداً متاحاً من الجدول."); return; }
     if (availability?.settings.location_required && !location && !String(data.get("location_url") || "").trim()) {
       setError("سجّل موقع الصيانة أو أضف رابط الموقع."); return;
@@ -181,7 +207,9 @@ export default function CustomerMaintenancePortal() {
         customer_phone: phone,
         city: String(data.get("city") || ""),
         address: String(data.get("address") || ""),
+        request_type: requestType,
         product_id: selectedProduct.id,
+        maintenance_kit_id: selectedKit?.id,
         issue_description: String(data.get("issue_description") || ""),
         warranty_status: String(data.get("warranty_status") || "unknown") as "yes" | "no" | "unknown",
         invoice_number: String(data.get("invoice_number") || ""),
@@ -225,7 +253,6 @@ export default function CustomerMaintenancePortal() {
       <a className="skip-link" href="#maintenance-portal-main">انتقل إلى المحتوى</a>
       <header className="maintenance-portal__header">
         <Brand />
-        <a className="maintenance-portal__home" href={window.location.origin}><Home size={17} aria-hidden="true" /> دخول الموظفين</a>
       </header>
 
       <main id="maintenance-portal-main" className="maintenance-portal__main" tabIndex={-1}>
@@ -250,6 +277,8 @@ export default function CustomerMaintenancePortal() {
                 {request.product_image_url && <img src={request.product_image_url} width="64" height="64" alt="" loading="lazy" />}
                 <span>منتج BreeXe Pro</span><strong>{request.product_name}</strong><small>{request.product_category}</small>
               </article>
+              <article><span>نوع الصيانة</span><strong>{request.request_type === "periodic" ? "صيانة دورية" : "صيانة عطل"}</strong><small>{request.maintenance_kind === "cooling_cells" ? "تغيير خلايا تبريد" : request.maintenance_kind === "filter_change" ? "تغيير فلاتر" : "فحص وإصلاح"}</small></article>
+              {request.maintenance_kit_name && <article><span>الطقم المعتمد</span><strong>{request.maintenance_kit_name}</strong><small>{request.maintenance_kit_category}</small></article>}
               <article><span>الموعد</span><strong><bdi>{scheduleText}</bdi></strong></article>
               <article><span>الفني</span><strong>{request.technician_name || "سيظهر بعد إسناد الطلب"}</strong></article>
               <article><span>بيانات الطلب</span><strong>{request.phone_verified ? "رقم واتساب مؤكد" : "قيد التحقق"}</strong><small>{request.attachment_count || 0} مرفقات</small></article>
@@ -276,14 +305,31 @@ export default function CustomerMaintenancePortal() {
           <section className="maintenance-portal__intake" aria-labelledby="intake-title">
             <div className="maintenance-portal__hero maintenance-portal__hero--branded">
               <span className="maintenance-portal__eyebrow">مركز صيانة BreeXe Pro</span>
-              <h1 id="intake-title">صيانة منتجك، بموعد واضح ومتابعة كاملة</h1>
-              <p>اختر منتجك الفعلي، وثّق المشكلة، وحدد موعداً متاحاً من جدول فريق الصيانة.</p>
+              <h1 id="intake-title">صيانة عطل أو صيانة دورية، حسب احتياج جهازك</h1>
+              <p>اختر نوع الصيانة أولاً، ثم جهازك الفعلي. في الصيانة الدورية سنعرض فقط طقم الفلاتر أو خلايا التبريد المتوافق معه.</p>
               <div className="maintenance-portal__trust-grid"><span><MessageCircleMore /> تحقق عبر واتساب</span><span><CalendarClock /> مواعيد متاحة فعلياً</span><span><ShieldCheck /> ملف متابعة خاص</span></div>
             </div>
 
             <form className="maintenance-portal__form maintenance-portal__form--steps" onSubmit={submitRequest}>
-              <fieldset className="maintenance-portal__card maintenance-step">
-                <legend><span>1</span> تأكيد هويتك</legend>
+              <fieldset className="maintenance-portal__card maintenance-step maintenance-request-type">
+                <legend><span>1</span> اختر نوع الصيانة</legend>
+                <p className="maintenance-request-type__intro maintenance-portal__full">ما الذي يحتاجه جهازك الآن؟ يمكنك تغيير الاختيار قبل إرسال الطلب.</p>
+                <label className={requestType === "repair" ? "maintenance-request-type__option active" : "maintenance-request-type__option"}>
+                  <input type="radio" name="request_type" value="repair" checked={requestType === "repair"} onChange={() => { setRequestType("repair"); setProducts([]); setSelectedProduct(null); setSelectedKit(null); setProductQuery(""); setError(""); }} required />
+                  <Wrench aria-hidden="true" />
+                  <span><strong>صيانة عطل</strong><small>فحص مشكلة أو توقف أو ضعف أداء وإصلاحها.</small></span>
+                  {requestType === "repair" && <CheckCircle2 aria-hidden="true" />}
+                </label>
+                <label className={requestType === "periodic" ? "maintenance-request-type__option active" : "maintenance-request-type__option"}>
+                  <input type="radio" name="request_type" value="periodic" checked={requestType === "periodic"} onChange={() => { setRequestType("periodic"); setProducts([]); setSelectedProduct(null); setSelectedKit(null); setProductQuery(""); setError(""); }} required />
+                  <RefreshCw aria-hidden="true" />
+                  <span><strong>صيانة دورية</strong><small>تغيير فلاتر أو خلايا تبريد بالطقم المناسب للجهاز.</small></span>
+                  {requestType === "periodic" && <CheckCircle2 aria-hidden="true" />}
+                </label>
+              </fieldset>
+
+              <fieldset className="maintenance-portal__card maintenance-step" disabled={!requestType}>
+                <legend><span>2</span> تأكيد هويتك</legend>
                 <div className="maintenance-step__intro"><MessageCircleMore aria-hidden="true" /><div><strong>تأكد من رقمك على واتساب</strong><p>سنرسل رمزاً من 6 أرقام لحماية طلبك وربطه برقمك.</p></div></div>
                 <label>الاسم الكامل<input name="customer_name" autoComplete="name" minLength={2} maxLength={200} required placeholder="مثال: محمد أحمد" /></label>
                 <label>رقم الجوال واتساب<input value={phone} onChange={(event) => { setPhone(event.target.value); setVerificationToken(""); setVerificationId(""); }} type="tel" inputMode="tel" autoComplete="tel" minLength={7} maxLength={30} required placeholder="05xxxxxxxx" /></label>
@@ -294,27 +340,35 @@ export default function CustomerMaintenancePortal() {
                 </div>
               </fieldset>
 
-              <fieldset className="maintenance-portal__card maintenance-step" disabled={!verificationToken}>
-                <legend><span>2</span> المنتج والمشكلة</legend>
-                <label className="maintenance-portal__full">ابحث في منتجات BreeXe Pro<div className="maintenance-product-search"><Search size={18} /><input value={productQuery} onChange={(event) => setProductQuery(event.target.value)} type="search" autoComplete="off" placeholder="اسم المنتج أو التصنيف" /></div></label>
+              <fieldset className="maintenance-portal__card maintenance-step" disabled={!verificationToken || !requestType}>
+                <legend><span>3</span> {requestType === "periodic" ? "الجهاز والطقم" : "الجهاز والعطل"}</legend>
+                <label className="maintenance-portal__full">ابحث عن جهاز BreeXe Pro<div className="maintenance-product-search"><Search size={18} /><input value={productQuery} onChange={(event) => setProductQuery(event.target.value)} type="search" autoComplete="off" placeholder="اسم الجهاز أو التصنيف" /></div></label>
                 <div className="maintenance-products maintenance-portal__full" role="listbox" aria-label="نتائج المنتجات">
-                  {products.map((product) => <button key={product.id} type="button" role="option" aria-selected={selectedProduct?.id === product.id} className={selectedProduct?.id === product.id ? "maintenance-product active" : "maintenance-product"} onClick={() => setSelectedProduct(product)}>
+                  {products.map((product) => <button key={product.id} type="button" role="option" aria-selected={selectedProduct?.id === product.id} className={selectedProduct?.id === product.id ? "maintenance-product active" : "maintenance-product"} onClick={() => { setSelectedProduct(product); setSelectedKit(null); }}>
                     {product.image_url ? <img src={product.image_url} width="72" height="72" alt="" loading="lazy" /> : <span className="maintenance-product__placeholder">BX</span>}
                     <span><strong>{product.name}</strong><small>{product.category || product.sku || "منتج BreeXe Pro"}</small></span>{selectedProduct?.id === product.id && <CheckCircle2 />}
                   </button>)}
                 </div>
-                <label className="maintenance-portal__full">وصف المشكلة<textarea name="issue_description" rows={5} minLength={10} maxLength={4000} required placeholder="متى بدأت المشكلة؟ وما الأعراض الظاهرة؟" /></label>
-                <label>حالة الضمان<select name="warranty_status" defaultValue="unknown"><option value="unknown">غير متأكد</option><option value="yes">داخل الضمان</option><option value="no">خارج الضمان</option></select></label>
-                <label>رقم الفاتورة<input name="invoice_number" autoComplete="off" maxLength={120} placeholder="اختياري" /></label>
+                {requestType === "periodic" && selectedProduct && <section className="maintenance-kit-picker maintenance-portal__full" aria-labelledby="maintenance-kit-title">
+                  <div className="maintenance-step__intro"><PackageCheck aria-hidden="true" /><div><strong id="maintenance-kit-title">الطقم المتوافق مع جهازك</strong><p>هذه الأطقم مطابقة آلياً من كتالوج BreeXe Pro، والاختيار يعاد التحقق منه عند إرسال الطلب.</p></div></div>
+                  {kitsLoading ? <p role="status">جاري مطابقة الجهاز مع أطقم الصيانة…</p> : maintenanceKits.length ? <div className="maintenance-kits" role="listbox" aria-label="أطقم الصيانة المتوافقة">{maintenanceKits.map((kit) => <button key={kit.id} type="button" role="option" aria-selected={selectedKit?.id === kit.id} className={selectedKit?.id === kit.id ? "maintenance-kit active" : "maintenance-kit"} onClick={() => setSelectedKit(kit)}>
+                    {kit.image_url ? <img src={kit.image_url} width="62" height="62" alt="" loading="lazy" /> : <span className="maintenance-product__placeholder">BX</span>}
+                    <span><strong>{kit.name}</strong><small>{kit.kind === "cooling_cells" ? "تغيير خلايا تبريد" : "تغيير فلاتر"}</small><small>{kit.compatibility_note}</small></span>
+                    {selectedKit?.id === kit.id && <CheckCircle2 aria-hidden="true" />}
+                  </button>)}</div> : <div className="maintenance-portal__warning" role="status">لا يوجد طقم دوري معتمد لهذا الجهاز حالياً. اختر جهازاً آخر أو أرسل طلب صيانة عطل.</div>}
+                </section>}
+                <label className="maintenance-portal__full">{requestType === "periodic" ? "ملاحظات إضافية (اختياري)" : "وصف العطل"}<textarea name="issue_description" rows={5} minLength={requestType === "repair" ? 10 : undefined} maxLength={4000} required={requestType === "repair"} placeholder={requestType === "periodic" ? "مثال: آخر تغيير للفلاتر أو ملاحظة عن الجهاز" : "متى بدأ العطل؟ وما الأعراض الظاهرة؟"} /></label>
+                {requestType === "repair" && <><label>حالة الضمان<select name="warranty_status" defaultValue="unknown"><option value="unknown">غير متأكد</option><option value="yes">داخل الضمان</option><option value="no">خارج الضمان</option></select></label>
+                <label>رقم الفاتورة<input name="invoice_number" autoComplete="off" maxLength={120} placeholder="اختياري" /></label></>}
                 {availability?.settings.attachments_enabled && <div className="maintenance-upload maintenance-portal__full">
-                  <label htmlFor="maintenance-files"><Upload /> إرفاق صورة أو مقطع للمشكلة<input id="maintenance-files" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime" multiple onChange={(event) => uploadFiles(event.target.files)} disabled={uploading || attachments.length >= 5} /></label>
+                  <label htmlFor="maintenance-files"><Upload /> {requestType === "periodic" ? "إرفاق صورة أو مقطع للجهاز" : "إرفاق صورة أو مقطع للعطل"}<input id="maintenance-files" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime" multiple onChange={(event) => uploadFiles(event.target.files)} disabled={uploading || attachments.length >= 5} /></label>
                   <small>حتى 5 ملفات، بينها مقطع واحد. الصور 8MB والمقطع 25MB كحد أقصى.</small>
                   <div className="maintenance-upload__files">{attachments.map((item) => <span key={item.id}>{item.kind === "video" ? <FileVideo /> : <ImagePlus />} {item.kind === "video" ? "مقطع" : "صورة"} · {(item.byte_size / 1024 / 1024).toFixed(1)}MB</span>)}</div>
                 </div>}
               </fieldset>
 
-              <fieldset className="maintenance-portal__card maintenance-step" disabled={!verificationToken || !selectedProduct}>
-                <legend><span>3</span> الموعد والموقع</legend>
+              <fieldset className="maintenance-portal__card maintenance-step" disabled={!verificationToken || !selectedProduct || (requestType === "periodic" && !selectedKit)}>
+                <legend><span>4</span> الموعد والموقع</legend>
                 <SlotPicker availability={availability} date={selectedDate} time={selectedTime} onSelect={(date, time) => { setSelectedDate(date); setSelectedTime(time); }} />
                 <label>المدينة<input name="city" autoComplete="address-level2" maxLength={160} required placeholder="مثال: الرياض" /></label>
                 <label className="maintenance-portal__full">عنوان موقع الصيانة<input name="address" autoComplete="street-address" minLength={5} maxLength={1000} required placeholder="الحي، الشارع، رقم المبنى" /></label>

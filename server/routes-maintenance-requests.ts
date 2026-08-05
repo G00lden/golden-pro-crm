@@ -24,6 +24,7 @@ import {
   assertMaintenanceSlotAvailable,
   getMaintenanceAvailability,
   getMaintenancePortalSettings,
+  listCompatibleMaintenanceKits,
   listMaintenanceAttachments,
   readMaintenanceAttachment,
   requestMaintenancePhoneVerification,
@@ -64,8 +65,10 @@ const publicCreateSchema = z.object({
   customer_phone: z.string().trim().min(7, "أدخل رقم الجوال.").max(30),
   city: z.string().trim().max(160).optional(),
   address: z.string().trim().min(5, "أدخل عنوان موقع الصيانة.").max(1_000),
+  request_type: z.enum(["repair", "periodic"]),
   product_id: z.string().trim().min(1, "اختر منتجاً من منتجات BreeXe Pro.").max(128),
-  issue_description: z.string().trim().min(10, "صف العطل بمزيد من التفاصيل.").max(4_000),
+  maintenance_kit_id: z.string().trim().min(1).max(128).optional(),
+  issue_description: z.string().trim().max(4_000).default(""),
   warranty_status: z.enum(["yes", "no", "unknown"]).optional(),
   invoice_number: z.string().trim().max(120).optional(),
   preferred_date: maintenanceCalendarDate,
@@ -79,7 +82,17 @@ const publicCreateSchema = z.object({
   attachment_ids: z.array(z.string().regex(/^mra_[a-f0-9]{32}$/)).max(5).default([]),
   accept_terms: z.literal(true, "يجب الموافقة على سياسة الخدمة والخصوصية."),
   website: z.string().trim().max(2_048).optional(),
-}).strict();
+}).strict().superRefine((input, context) => {
+  if (input.request_type === "repair" && input.issue_description.length < 10) {
+    context.addIssue({ code: "custom", path: ["issue_description"], message: "صف العطل بمزيد من التفاصيل." });
+  }
+  if (input.request_type === "periodic" && !input.maintenance_kit_id) {
+    context.addIssue({ code: "custom", path: ["maintenance_kit_id"], message: "اختر طقم الصيانة الدوري المتوافق مع جهازك." });
+  }
+  if (input.request_type === "repair" && input.maintenance_kit_id) {
+    context.addIssue({ code: "custom", path: ["maintenance_kit_id"], message: "طقم الصيانة متاح للطلبات الدورية فقط." });
+  }
+});
 
 const phoneVerificationRequestSchema = z.object({ customer_phone: z.string().trim().min(7).max(30) }).strict();
 const phoneVerificationConfirmSchema = z.object({
@@ -175,8 +188,18 @@ export function registerMaintenanceRequestPublicRoutes(app: Express, options: Pu
     const ownerUid = options.ownerUid();
     if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
     const query = String(req.query.q || "").slice(0, 120);
+    const requestType = req.query.mode === "periodic" ? "periodic" : "repair";
     res.setHeader("Cache-Control", "public, max-age=60");
-    res.json({ data: await searchMaintenanceProducts(ownerUid, query) });
+    res.json({ data: await searchMaintenanceProducts(ownerUid, query, 24, requestType) });
+  }));
+
+  app.get("/public/maintenance-kits", options.rateLimit, asyncRoute(async (req, res) => {
+    const ownerUid = options.ownerUid();
+    if (!ownerUid) return res.status(503).json({ error: "بوابة الصيانة غير مهيأة بحساب مالك." });
+    const productId = z.string().trim().min(1).max(128).safeParse(req.query.product_id);
+    if (!productId.success) return res.status(400).json({ error: "اختر جهازاً صالحاً لعرض طقم الصيانة." });
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.json({ data: await listCompatibleMaintenanceKits(ownerUid, productId.data) });
   }));
 
   app.get("/public/maintenance-availability", options.rateLimit, asyncRoute(async (_req, res) => {

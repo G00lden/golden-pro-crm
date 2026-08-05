@@ -24,6 +24,14 @@ test("customer request flows through CRM assignment, booking, technician executi
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const output = JSON.parse(result.stdout);
+    assert.deepEqual(output.periodicProductIds, ["product-periodic-ro7"]);
+    assert.deepEqual(output.periodicKitIds, ["kit-periodic-ro7"]);
+    assert.deepEqual(output.splitKitIds, []);
+    assert.equal(output.forgedPeriodicStatus, 400);
+    assert.match(output.forgedPeriodicError, /غير متوافق/);
+    assert.equal(output.periodicCreatedStatus, 201);
+    assert.equal(output.periodicRequestType, "periodic");
+    assert.equal(output.periodicKitName, "حزمة طقم تبديل فلاتر - إصدار الخاص");
     assert.equal(output.createdStatus, 201);
     assert.equal(output.duplicateStatus, 200);
     assert.equal(output.duplicate, true);

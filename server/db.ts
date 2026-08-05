@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 11002;
+const TARGET_SCHEMA_VERSION = 11003;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -431,8 +431,15 @@ db.exec(`
     city TEXT DEFAULT '',
     address TEXT DEFAULT '',
     service_type TEXT NOT NULL DEFAULT 'general',
+    request_type TEXT NOT NULL DEFAULT 'repair'
+      CHECK (request_type IN ('repair', 'periodic')),
     product_id TEXT,
     product_name TEXT NOT NULL DEFAULT '',
+    maintenance_kind TEXT DEFAULT '',
+    maintenance_kit_id TEXT DEFAULT '',
+    maintenance_kit_name TEXT DEFAULT '',
+    maintenance_kit_category TEXT DEFAULT '',
+    maintenance_kit_sku TEXT DEFAULT '',
     installation_id TEXT,
     issue_description TEXT NOT NULL DEFAULT '',
     warranty_status TEXT NOT NULL DEFAULT 'unknown',
@@ -1459,6 +1466,12 @@ for (const col of [
   ["location_url", "TEXT DEFAULT ''"],
   ["phone_verified_at", "TEXT"],
   ["attachment_count", "INTEGER NOT NULL DEFAULT 0"],
+  ["request_type", "TEXT NOT NULL DEFAULT 'repair'"],
+  ["maintenance_kind", "TEXT DEFAULT ''"],
+  ["maintenance_kit_id", "TEXT DEFAULT ''"],
+  ["maintenance_kit_name", "TEXT DEFAULT ''"],
+  ["maintenance_kit_category", "TEXT DEFAULT ''"],
+  ["maintenance_kit_sku", "TEXT DEFAULT ''"],
 ] as const) {
   if (!hasColumn("maintenance_requests", col[0])) {
     db.exec(`ALTER TABLE maintenance_requests ADD COLUMN ${col[0]} ${col[1]}`);
@@ -2209,6 +2222,7 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11000, '1.9.6-maintenance-request-portal');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11001, '1.9.6-maintenance-request-acceptance-gates');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11002, '1.9.7-maintenance-customer-experience');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11003, '1.9.8-periodic-maintenance-kits');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

@@ -4,6 +4,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { adminDb } from "./firebaseAdmin";
 import { normalizePhone } from "../shared/phone";
 import { whatsappService } from "./whatsapp";
+import {
+  compatibleMaintenanceKits,
+  isMaintenanceKitProduct,
+  type MaintenanceCatalogProduct,
+} from "./maintenanceKitCompatibility";
 
 type AnyRecord = Record<string, any>;
 
@@ -117,23 +122,62 @@ export type MaintenanceProduct = {
   image_url: string;
 };
 
-export async function searchMaintenanceProducts(ownerUid: string, query = "", limit = 24) {
+export type MaintenanceKitOption = MaintenanceProduct & {
+  kind: "filter_change" | "cooling_cells";
+  compatibility_note: string;
+};
+
+async function visibleMaintenanceCatalog(ownerUid: string) {
   const snapshot = await adminDb.collection("products").where("createdBy", "==", ownerUid).limit(2_000).get();
-  const needle = String(query || "").trim().toLocaleLowerCase("ar");
-  const products = snapshot.docs
+  return snapshot.docs
     .map(snapshotRecord)
-    .filter((item: AnyRecord) => bool(item.catalog_visible, true) && bool(item.is_available, true) && !item.merged_into)
+    .filter((item: AnyRecord) => bool(item.catalog_visible, true) && bool(item.is_available, true) && !item.merged_into) as MaintenanceCatalogProduct[];
+}
+
+function publicMaintenanceProduct(item: MaintenanceCatalogProduct): MaintenanceProduct {
+  return {
+    id: String(item.id),
+    name: String(item.name || "").trim(),
+    category: String(item.category || "").trim(),
+    sku: String(item.sku || "").trim(),
+    image_url: safeProductImage(item.image_url || item.imageUrl),
+  };
+}
+
+export async function searchMaintenanceProducts(
+  ownerUid: string,
+  query = "",
+  limit = 24,
+  requestType: "repair" | "periodic" = "repair",
+) {
+  const catalog = await visibleMaintenanceCatalog(ownerUid);
+  const needle = String(query || "").trim().toLocaleLowerCase("ar");
+  const products = catalog
+    .filter((item) => !isMaintenanceKitProduct(item))
+    .filter((item) => requestType !== "periodic" || compatibleMaintenanceKits(item, catalog).length > 0)
     .filter((item: AnyRecord) => !needle || [item.name, item.category, item.sku].some((value) => String(value || "").toLocaleLowerCase("ar").includes(needle)))
     .sort((a: AnyRecord, b: AnyRecord) => Number(Boolean(b.image_url)) - Number(Boolean(a.image_url)) || String(a.name).localeCompare(String(b.name), "ar"))
     .slice(0, Math.max(1, Math.min(30, limit)))
-    .map((item: AnyRecord): MaintenanceProduct => ({
-      id: String(item.id),
-      name: String(item.name || "").trim(),
-      category: String(item.category || "").trim(),
-      sku: String(item.sku || "").trim(),
-      image_url: safeProductImage(item.image_url || item.imageUrl),
-    }));
+    .map(publicMaintenanceProduct);
   return products.filter((item: MaintenanceProduct) => item.name);
+}
+
+export async function listCompatibleMaintenanceKits(ownerUid: string, productId: string): Promise<MaintenanceKitOption[]> {
+  const catalog = await visibleMaintenanceCatalog(ownerUid);
+  const device = catalog.find((item) => String(item.id) === String(productId || "").trim());
+  if (!device || isMaintenanceKitProduct(device)) throw httpError(400, "اختر جهازاً صالحاً من منتجات BreeXe Pro.");
+  return compatibleMaintenanceKits(device, catalog).map((match) => ({
+    ...publicMaintenanceProduct(match.product),
+    kind: match.kind,
+    compatibility_note: match.compatibility_note,
+  }));
+}
+
+export async function requireCompatibleMaintenanceKit(ownerUid: string, productId: string, kitId: string) {
+  const kits = await listCompatibleMaintenanceKits(ownerUid, productId);
+  const kit = kits.find((item) => item.id === String(kitId || "").trim());
+  if (!kit) throw httpError(400, "الطقم المحدد غير متوافق مع الجهاز. اختر طقماً من القائمة المعتمدة.");
+  return kit;
 }
 
 export async function requireMaintenanceProduct(ownerUid: string, productId: string) {
@@ -147,6 +191,7 @@ export async function requireMaintenanceProduct(ownerUid: string, productId: str
     id: item.id,
     name: String(item.name || "").trim(),
     category: String(item.category || "").trim(),
+    sku: String(item.sku || "").trim(),
     image_url: safeProductImage(item.image_url || item.imageUrl),
   };
 }

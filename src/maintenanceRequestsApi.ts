@@ -23,10 +23,16 @@ export type MaintenanceRequest = {
   city?: string;
   address?: string;
   service_type: string;
+  request_type: "repair" | "periodic";
   product_id?: string;
   product_name: string;
   product_category?: string;
   product_image_url?: string;
+  maintenance_kind?: "filter_change" | "cooling_cells" | "";
+  maintenance_kit_id?: string;
+  maintenance_kit_name?: string;
+  maintenance_kit_category?: string;
+  maintenance_kit_sku?: string;
   installation_id?: string;
   issue_description: string;
   warranty_status?: "yes" | "no" | "unknown";
@@ -69,6 +75,10 @@ export type MaintenanceRequestList = {
 
 export type MaintenanceAttachment = { id: string; kind: "image" | "video"; media_type: string; byte_size: number };
 export type MaintenanceProduct = { id: string; name: string; category: string; sku: string; image_url: string };
+export type MaintenanceKitOption = MaintenanceProduct & {
+  kind: "filter_change" | "cooling_cells";
+  compatibility_note: string;
+};
 export type MaintenanceSlot = { time: string; available: boolean; capacity: number };
 export type MaintenanceAvailability = {
   ready: boolean;
@@ -145,7 +155,9 @@ export function createPublicMaintenanceRequest(payload: {
   customer_phone: string;
   city?: string;
   address: string;
+  request_type: "repair" | "periodic";
   product_id: string;
+  maintenance_kit_id?: string;
   issue_description: string;
   warranty_status: "yes" | "no" | "unknown";
   invoice_number?: string;
@@ -167,8 +179,14 @@ export function createPublicMaintenanceRequest(payload: {
   );
 }
 
-export function getPublicMaintenanceProducts(query = "") {
-  return publicFetch<{ data: MaintenanceProduct[] }>(`/public/maintenance-products${query ? `?q=${encodeURIComponent(query)}` : ""}`);
+export function getPublicMaintenanceProducts(query = "", mode: "repair" | "periodic" = "repair") {
+  const params = new URLSearchParams({ mode });
+  if (query) params.set("q", query);
+  return publicFetch<{ data: MaintenanceProduct[] }>(`/public/maintenance-products?${params}`);
+}
+
+export function getPublicMaintenanceKits(productId: string) {
+  return publicFetch<{ data: MaintenanceKitOption[] }>(`/public/maintenance-kits?product_id=${encodeURIComponent(productId)}`);
 }
 
 export function getPublicMaintenanceAvailability() {

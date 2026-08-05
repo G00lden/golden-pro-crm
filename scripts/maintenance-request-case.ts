@@ -31,6 +31,29 @@ await adminDb.collection("products").doc("product-maintenance-1").set({
   createdAt: "2026-08-02T08:00:00.000Z",
   updatedAt: "2026-08-02T08:00:00.000Z",
 });
+await adminDb.collection("products").doc("product-periodic-ro7").set({
+  createdBy: ownerUid,
+  name: "جهاز تحلية منزلي RO 7 مراحل",
+  category: "أجهزة تحلية منزلية",
+  sku: "BX-RO7",
+  catalog_visible: true,
+  is_available: true,
+});
+await adminDb.collection("products").doc("kit-periodic-ro7").set({
+  createdBy: ownerUid,
+  name: "حزمة طقم تبديل فلاتر - إصدار الخاص",
+  category: "قطع الصيانة الدورية لأنظمة التحلية",
+  variants: ["5 مراحل", "6 مراحل", "7 مراحل"],
+  catalog_visible: true,
+  is_available: true,
+});
+await adminDb.collection("products").doc("kit-cells-breez-air").set({
+  createdBy: ownerUid,
+  name: "طقم قطع غيار خلايا تبريد المكيف الاسترالي Breez Air",
+  category: "قطع الصيانة الدورية",
+  catalog_visible: true,
+  is_available: true,
+});
 await adminDb.collection("maintenance_portal_settings").doc(ownerUid).set({
   createdBy: ownerUid,
   slot_times: ["09:00", "11:00", "14:00"],
@@ -90,6 +113,7 @@ const payload = {
   customer_phone: "050 123 4567",
   city: "الرياض",
   address: "حي الاختبار، شارع 1",
+  request_type: "repair",
   product_id: "product-maintenance-1",
   issue_description: "المكيف لا يبرد ويصدر صوتاً مرتفعاً.",
   warranty_status: "unknown",
@@ -102,6 +126,22 @@ const payload = {
 };
 
 try {
+  const periodicProducts = await jsonFetch("/public/maintenance-products?mode=periodic");
+  const periodicKits = await jsonFetch("/public/maintenance-kits?product_id=product-periodic-ro7");
+  const splitKits = await jsonFetch("/public/maintenance-kits?product_id=product-maintenance-1");
+  const periodicPayload = {
+    ...payload,
+    client_request_id: "client-periodic-test-0001",
+    request_type: "periodic",
+    product_id: "product-periodic-ro7",
+    maintenance_kit_id: "kit-periodic-ro7",
+    issue_description: "",
+  };
+  const forgedPeriodic = await jsonFetch("/public/maintenance-requests", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...periodicPayload, client_request_id: "client-periodic-forged-0001", maintenance_kit_id: "kit-cells-breez-air" }),
+  });
   const created = await jsonFetch("/public/maintenance-requests", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -186,11 +226,24 @@ try {
     body: JSON.stringify({ action: "close", note: "تم تنظيف الوحدة وإعادة تعبئة الغاز." }),
   });
   const portalAfter = await jsonFetch(`/public/maintenance-request?token=${encodeURIComponent(token)}`);
+  const periodicCreated = await jsonFetch("/public/maintenance-requests", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(periodicPayload),
+  });
   const booking = bookingId ? await adminDb.collection("bookings").doc(bookingId).get() : null;
   const customers = await adminDb.collection("customers").where("createdBy", "==", ownerUid).limit(10).get();
   const events = await adminDb.collection("maintenance_request_events").where("request_id", "==", requestId).limit(50).get();
 
   process.stdout.write(JSON.stringify({
+    periodicProductIds: periodicProducts.body.data?.map((item: { id: string }) => item.id),
+    periodicKitIds: periodicKits.body.data?.map((item: { id: string }) => item.id),
+    splitKitIds: splitKits.body.data?.map((item: { id: string }) => item.id),
+    forgedPeriodicStatus: forgedPeriodic.status,
+    forgedPeriodicError: forgedPeriodic.body.error,
+    periodicCreatedStatus: periodicCreated.status,
+    periodicRequestType: periodicCreated.body.request?.request_type,
+    periodicKitName: periodicCreated.body.request?.maintenance_kit_name,
     createdStatus: created.status,
     duplicateStatus: duplicate.status,
     duplicate: duplicate.body.duplicate,

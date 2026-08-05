@@ -19,6 +19,7 @@ import {
   claimMaintenanceAttachments,
   consumeMaintenanceVerification,
   getMaintenancePortalSettings,
+  requireCompatibleMaintenanceKit,
   requireMaintenanceProduct,
   restoreMaintenanceVerification,
 } from "./maintenancePortalExperience";
@@ -270,7 +271,9 @@ export type PublicMaintenanceRequestInput = {
   customer_phone: string;
   city?: string;
   address: string;
+  request_type: "repair" | "periodic";
   product_id: string;
+  maintenance_kit_id?: string;
   issue_description: string;
   warranty_status?: string;
   invoice_number?: string;
@@ -292,6 +295,15 @@ export async function createPublicMaintenanceRequest(
   if (!ownerUid.trim()) throw httpError(503, "استقبال طلبات الصيانة غير مهيأ بحساب مالك.");
   const phone = normalizePhone(rawInput.customer_phone);
   if (!phone.valid) throw httpError(400, "أدخل رقم جوال صحيحاً مع مفتاح الدولة عند الحاجة.");
+  if (rawInput.request_type !== "repair" && rawInput.request_type !== "periodic") {
+    throw httpError(400, "اختر صيانة عطل أو صيانة دورية.");
+  }
+  if (rawInput.request_type === "periodic" && !rawInput.maintenance_kit_id) {
+    throw httpError(400, "اختر طقم الصيانة الدوري المتوافق مع جهازك.");
+  }
+  if (rawInput.request_type === "repair" && rawInput.maintenance_kit_id) {
+    throw httpError(400, "طقم الصيانة متاح للطلبات الدورية فقط.");
+  }
   assertMaintenanceLeadTime(rawInput.preferred_date, rawInput.preferred_time);
 
   // Calling this here deliberately fails closed in production before customer
@@ -310,9 +322,12 @@ export async function createPublicMaintenanceRequest(
     return { request: record, portal_token: portalToken, duplicate: true };
   }
 
-  const [settings, product] = await Promise.all([
+  const [settings, product, maintenanceKit] = await Promise.all([
     getMaintenancePortalSettings(ownerUid),
     requireMaintenanceProduct(ownerUid, rawInput.product_id),
+    rawInput.request_type === "periodic"
+      ? requireCompatibleMaintenanceKit(ownerUid, rawInput.product_id, rawInput.maintenance_kit_id || "")
+      : Promise.resolve(null),
   ]);
   await assertMaintenanceSlotAvailable(ownerUid, rawInput.preferred_date, rawInput.preferred_time);
   const hasCoordinates = Number.isFinite(rawInput.customer_latitude) && Number.isFinite(rawInput.customer_longitude);
@@ -361,11 +376,17 @@ export async function createPublicMaintenanceRequest(
     customer_phone: customerPhone,
     city: cleanText(rawInput.city, 160),
     address: cleanText(rawInput.address, 1_000),
-    service_type: "product_maintenance",
+    service_type: rawInput.request_type === "periodic" ? "periodic_maintenance" : "repair_maintenance",
+    request_type: rawInput.request_type,
     product_id: product.id,
     product_name: product.name,
     product_category: product.category,
     product_image_url: product.image_url,
+    maintenance_kind: maintenanceKit?.kind || "",
+    maintenance_kit_id: maintenanceKit?.id || "",
+    maintenance_kit_name: maintenanceKit?.name || "",
+    maintenance_kit_category: maintenanceKit?.category || "",
+    maintenance_kit_sku: maintenanceKit?.sku || "",
     installation_id: cleanText(installation?.id, 128),
     issue_description: cleanText(rawInput.issue_description, 4_000),
     warranty_status: cleanText(rawInput.warranty_status || "unknown", 32),
@@ -510,6 +531,8 @@ export async function listMaintenanceRequests(
       request.customer_name,
       request.customer_phone,
       request.product_name,
+      request.maintenance_kit_name,
+      request.request_type,
       request.technician_name,
     ].some((value) => String(value || "").toLocaleLowerCase("ar").includes(search)));
   }
@@ -624,8 +647,14 @@ export async function assignMaintenanceRequest(
     customer_latitude: request.customer_latitude ?? null,
     customer_longitude: request.customer_longitude ?? null,
     location_url: request.location_url || "",
-    notes: [`طلب الصيانة: ${request.request_number}`, request.issue_description, cleanText(input.note, 2_000)].filter(Boolean).join("\n"),
-    parts: [],
+    notes: [
+      `طلب الصيانة: ${request.request_number}`,
+      request.request_type === "periodic" ? "نوع الطلب: صيانة دورية" : "نوع الطلب: صيانة عطل",
+      request.maintenance_kit_name ? `الطقم المعتمد: ${request.maintenance_kit_name}` : "",
+      request.issue_description,
+      cleanText(input.note, 2_000),
+    ].filter(Boolean).join("\n"),
+    parts: request.maintenance_kit_name ? [request.maintenance_kit_name] : [],
     fieldtech_require_before_photo: true,
     fieldtech_require_after_photo: true,
     fieldtech_require_signature: true,
@@ -876,10 +905,16 @@ export function publicMaintenanceRequest(record: MaintenanceRequestRecord, event
     status: record.status,
     customer_name: record.customer_name,
     service_type: record.service_type,
+    request_type: record.request_type || (record.service_type === "periodic_maintenance" ? "periodic" : "repair"),
     product_id: record.product_id,
     product_name: record.product_name,
     product_category: record.product_category || "",
     product_image_url: record.product_image_url || "",
+    maintenance_kind: record.maintenance_kind || "",
+    maintenance_kit_id: record.maintenance_kit_id || "",
+    maintenance_kit_name: record.maintenance_kit_name || "",
+    maintenance_kit_category: record.maintenance_kit_category || "",
+    maintenance_kit_sku: record.maintenance_kit_sku || "",
     issue_description: record.issue_description,
     preferred_date: record.preferred_date || null,
     preferred_time: record.preferred_time || null,

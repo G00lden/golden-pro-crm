@@ -669,3 +669,13 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Dedicated maintenance OTP was promoted to `production` only after the canary. Global outbound remained `allowlist` with `OFFICIAL_LAUNCH_APPROVED=false`; unrelated WhatsApp flows without approved templates were disabled instead of being represented as ready.
 - Recoverable pre-deploy backups are `/var/backups/golden-pro-crm/20260805-153009-3389092-7949` and `/var/backups/golden-pro-crm/20260805-153412-3390652-15675`.
 - An adversarial restart check exposed stale build metadata from `.env.production`. The live value was corrected and the deployment transaction now persists `BUILD_COMMIT` into the installed environment; all 34 deployment/backup/rollback tests passed after the fix.
+
+## 2026-08-05 - BreeXe Pro periodic maintenance kits 1.9.8 [Codex]
+
+- Removed the employee-entry link from the public customer portal without changing the protected internal login route.
+- Added a first-step choice between fault repair and periodic maintenance. Periodic requests show only devices that have a server-approved catalog match, then require the compatible BreeXe Pro filter or cooling-cell kit.
+- Compatibility is fail-closed and enforced again during request creation. Home RO stages, commercial 200/400-gallon systems, water coolers, Brafco coolers, jumbo 20-inch filters, and Breez Air cooling cells use separate matching rules; forged or cross-device kit ids are rejected before customer data is written.
+- Persisted the request type, periodic-maintenance kind, kit id/name/category/SKU, exposed them in the customer tracking page and CRM drawer, and copied the approved kit into the booking parts and FieldTech instructions.
+- Advanced SQLite to schema `11003` and added Supabase migration `20260805170000_periodic_maintenance_kits.sql`.
+- Pre-deploy verification passed: `451/451` unit tests, schema migration tests, TypeScript lint, production build, and source security audit. Isolated desktop and 390px browser QA confirmed both request types, conditional labels and requirements, no employee link, and no horizontal overflow. The lifecycle test also proved that a forged Breez Air cells kit is rejected for a 7-stage RO device while the exact filter bundle succeeds.
+- Browser QA used synthetic local state with outbound traffic disabled. No real customer record or external OTP message was created.

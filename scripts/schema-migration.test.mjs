@@ -30,7 +30,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11002/);
+    assert.match(result.stdout, /"userVersion":11003/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -52,7 +52,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11002/);
+    assert.match(backups[0], /pre-schema-11003/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -62,10 +62,10 @@ test("a previous 10307 deployment upgrades through a new backup and ledger marke
   const { directory, result } = runCase("previous-10307", true);
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11002/);
+    assert.match(result.stdout, /"userVersion":11003/);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11002/);
+    assert.match(backups[0], /pre-schema-11003/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -118,6 +118,25 @@ test("the Supabase migration mirrors the Salla order synchronization schema", ()
     "lease_token",
     "salla_order_commands_desired_hash_uidx",
     "enable row level security",
+  ]) {
+    assert.match(migration, new RegExp(required));
+  }
+});
+
+test("the Supabase maintenance migration persists periodic kit compatibility fields", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260805170000_periodic_maintenance_kits.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "request_type text",
+    "maintenance_kind text",
+    "maintenance_kit_id text",
+    "maintenance_kit_name text",
+    "maintenance_kit_category text",
+    "maintenance_kit_sku text",
+    "maintenance_requests_request_type_check",
+    "maintenance_requests_maintenance_kind_check",
   ]) {
     assert.match(migration, new RegExp(required));
   }

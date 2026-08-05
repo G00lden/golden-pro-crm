@@ -89,8 +89,14 @@ function serviceTypeLabel(value?: string) {
     plumbing: "سباكة",
     appliances: "أجهزة منزلية",
     general: "صيانة عامة",
+    repair_maintenance: "صيانة عطل",
+    periodic_maintenance: "صيانة دورية",
   };
   return labels[String(value || "")] || value || "غير محدد";
+}
+
+function requestTypeLabel(request: Pick<MaintenanceRequest, "request_type" | "service_type">) {
+  return request.request_type === "periodic" || request.service_type === "periodic_maintenance" ? "صيانة دورية" : "صيانة عطل";
 }
 
 function filterFromUrl() {
@@ -232,7 +238,7 @@ export default function MaintenanceRequestsPage({
             <button className="maintenance-request-row" type="button" onClick={() => openRequest(request.id)} key={request.id}>
               <span className="maintenance-request-row__number"><bdi>{request.request_number}</bdi><small>{formatDateTime(request.createdAt || request.created_at)}</small></span>
               <span className="maintenance-request-row__customer"><strong>{request.customer_name}</strong><small><bdi>{request.customer_phone}</bdi> · {request.city || "المدينة غير محددة"}</small></span>
-              <span className="maintenance-request-row__service"><strong>{request.product_name}</strong><small>{request.technician_name || "لم يُسند لفني"}</small></span>
+              <span className="maintenance-request-row__service"><strong>{request.product_name}</strong><small>{requestTypeLabel(request)}{request.maintenance_kit_name ? ` · ${request.maintenance_kit_name}` : ""}</small><small>{request.technician_name || "لم يُسند لفني"}</small></span>
               <span className="maintenance-request-row__status">
                 {Boolean(request.customer_change_requested) && <Badge tone="warn">تغيير موعد</Badge>}
                 <Badge tone={maintenanceRequestStatusTone(request.status)}>{maintenanceRequestStatusLabel(request.status)}</Badge>
@@ -415,14 +421,16 @@ function MaintenanceRequestDrawer({
           <div className="maintenance-drawer__body">
             <div className="maintenance-drawer__status">
               <Badge tone={maintenanceRequestStatusTone(request.status)}>{maintenanceRequestStatusLabel(request.status)}</Badge>
+              <Badge tone={request.request_type === "periodic" ? "success" : "muted"}>{requestTypeLabel(request)}</Badge>
               {Boolean(request.customer_change_requested) && <Badge tone="warn">العميل طلب تغيير الموعد</Badge>}
             </div>
 
             <section className="maintenance-detail-grid" aria-label="بيانات الطلب">
               <article><span>العميل</span><strong>{request.customer_name}</strong><a href={`tel:+${request.customer_phone}`}><Phone size={15} aria-hidden="true" /> <bdi>{request.customer_phone}</bdi></a></article>
               <article className="maintenance-admin-product">{request.product_image_url && <img src={request.product_image_url} width="60" height="60" alt="" loading="lazy" />}<span>منتج BreeXe Pro</span><strong>{request.product_name}</strong><small>{request.product_category || serviceTypeLabel(request.service_type)}</small></article>
+              {request.maintenance_kit_name && <article><span>طقم الصيانة المعتمد</span><strong>{request.maintenance_kit_name}</strong><small>{request.maintenance_kind === "cooling_cells" ? "تغيير خلايا تبريد" : "تغيير فلاتر"}</small></article>}
               <article className="wide"><span>العنوان</span><strong>{request.address || "غير محدد"}</strong><small>{request.city}</small></article>
-              <article className="wide"><span>وصف العطل</span><p>{request.issue_description}</p></article>
+              <article className="wide"><span>{request.request_type === "periodic" ? "ملاحظات الطلب" : "وصف العطل"}</span><p>{request.issue_description || "لا توجد ملاحظات إضافية"}</p></article>
               <article><span>الموعد المطلوب</span><strong><bdi>{request.preferred_date || "غير محدد"} {request.preferred_time || ""}</bdi></strong></article>
               <article><span>الموعد المعتمد</span><strong><bdi>{request.scheduled_date || "لم يحدد"} {request.scheduled_time || ""}</bdi></strong><small>{request.technician_name || "لم يسند"}</small></article>
               <article><span>التحقق والمرفقات</span><strong>{request.phone_verified_at || request.phone_verified ? "واتساب مؤكد" : "غير مؤكد"}</strong><small>{request.attachment_count || details.data?.attachments.length || 0} مرفقات</small></article>
@@ -450,7 +458,7 @@ function MaintenanceRequestDrawer({
               {request.location_url && <a className="btn muted" href={request.location_url} target="_blank" rel="noreferrer"><MapPin size={16} aria-hidden="true" /> فتح الموقع</a>}
             </div>
 
-            {!!details.data?.attachments.length && <section className="maintenance-admin-attachments" aria-label="مرفقات العميل"><h3><Paperclip size={17} /> مرفقات المشكلة</h3><div>{details.data.attachments.map((attachment) => <button type="button" key={attachment.id} onClick={() => openMaintenanceAttachment(request.id, attachment.id).catch((reason) => notify(reason instanceof Error ? reason.message : "تعذر فتح المرفق", false))}>{attachment.kind === "video" ? "مقطع فيديو" : "صورة"} · {(attachment.byte_size / 1024 / 1024).toFixed(1)}MB <ExternalLink size={14} /></button>)}</div></section>}
+            {!!details.data?.attachments.length && <section className="maintenance-admin-attachments" aria-label="مرفقات العميل"><h3><Paperclip size={17} /> {request.request_type === "periodic" ? "صور ومقاطع الجهاز" : "مرفقات العطل"}</h3><div>{details.data.attachments.map((attachment) => <button type="button" key={attachment.id} onClick={() => openMaintenanceAttachment(request.id, attachment.id).catch((reason) => notify(reason instanceof Error ? reason.message : "تعذر فتح المرفق", false))}>{attachment.kind === "video" ? "مقطع فيديو" : "صورة"} · {(attachment.byte_size / 1024 / 1024).toFixed(1)}MB <ExternalLink size={14} /></button>)}</div></section>}
 
             {canManage ? <section className="maintenance-drawer__actions" aria-labelledby="request-actions-title">
               <h3 id="request-actions-title">إدارة الطلب</h3>
