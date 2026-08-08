@@ -80,9 +80,11 @@ const files = [
   "src/pages/OutboundActions.test.ts",
   "src/pages/AdminUsers.role-policy.test.ts",
   "src/pages/InterfaceAccessibility.test.ts",
+  "src/pages/BillingWorkspace.test.ts",
   "src/pages/Invoices.payment-ledger.test.ts",
   "src/pages/Settings.store-link.test.ts",
   "src/pages/StoreOrders.salla-availability.test.ts",
+  "src/pages/TechnicianWallet.readiness.test.ts",
 ];
 
 const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...files], {

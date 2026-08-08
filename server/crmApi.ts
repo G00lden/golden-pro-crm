@@ -440,6 +440,12 @@ function normalizeQuote(row: Record<string, any>): Record<string, any> {
   };
 }
 
+function quoteHasFinancialLock(quote: Record<string, any>) {
+  return quote.status === "confirmed"
+    || Boolean(quote.confirmed_at)
+    || Boolean(quote.invoice_id);
+}
+
 function quoteStats(quotes: Array<Record<string, any>>) {
   const normalized = quotes.map(normalizeQuote);
   return {
@@ -652,7 +658,7 @@ export function registerCrmApiRoutes(app: express.Express) {
       const statusOk = !status || status === "all" || item.status === status;
       if (!statusOk) return false;
       if (!search) return true;
-      return `${item.quote_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""} ${item.title || ""}`.includes(search);
+      return `${item.quote_number || ""} ${item.invoice_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""} ${item.title || ""}`.includes(search);
     });
     res.json({ data, total: data.length, stats: quoteStats(all) });
   }));
@@ -687,6 +693,10 @@ export function registerCrmApiRoutes(app: express.Express) {
       res.status(404).json({ error: "Quote was not found." });
       return;
     }
+    if (quoteHasFinancialLock(existing)) {
+      res.status(409).json({ error: "عرض السعر مؤكد أو مرتبط بفاتورة؛ احتفظ بالسجل وأنشئ عرضًا جديدًا للتعديل." });
+      return;
+    }
     const customer = await ensureQuoteCustomer(uid, req.body || {});
     const payload = quotePayload(req.body || {}, customer, existing);
     await updateOwned("quotes", req.params.id, uid, payload);
@@ -706,6 +716,10 @@ export function registerCrmApiRoutes(app: express.Express) {
       res.status(404).json({ error: "Quote was not found." });
       return;
     }
+    if (quoteHasFinancialLock(current)) {
+      res.status(409).json({ error: "لا يمكن تغيير حالة عرض مؤكد أو مرتبط بفاتورة." });
+      return;
+    }
     const update = clean({
       status,
       follow_up_date: req.body?.follow_up_date ?? undefined,
@@ -721,7 +735,25 @@ export function registerCrmApiRoutes(app: express.Express) {
   }));
 
   app.delete("/api/quotes/:id", validateParams(crmIdParamsSchema), asyncRoute(async (req, res) => {
-    if (!(await deleteOwned("quotes", req.params.id, userId(req)))) return res.status(404).json({ error: "Quote was not found." });
+    const uid = userId(req);
+    const current = await getOwned("quotes", req.params.id, uid);
+    if (!current) return res.status(404).json({ error: "Quote was not found." });
+    const linkedInvoice = current.invoice_id
+      ? await getInvoiceLedgerRecord(uid, String(current.invoice_id))
+      : (await listInvoiceLedger(uid)).find(
+          (invoice) => invoice.quote_id === req.params.id && !invoiceIsCreditNote(invoice),
+        );
+    if (quoteHasFinancialLock(current) || linkedInvoice) {
+      res.status(409).json({
+        error: linkedInvoice
+          ? `لا يمكن حذف عرض السعر لأنه مرتبط بالفاتورة ${linkedInvoice.invoice_number || linkedInvoice.id}.`
+          : "لا يمكن حذف عرض سعر مؤكد؛ احتفظ به كسجل تجاري وحوّله إلى فاتورة أو أنشئ عرضًا جديدًا.",
+        invoice_id: linkedInvoice?.id || current.invoice_id || null,
+        invoice_number: linkedInvoice?.invoice_number || current.invoice_number || null,
+      });
+      return;
+    }
+    if (!(await deleteOwned("quotes", req.params.id, uid))) return res.status(404).json({ error: "Quote was not found." });
     res.json({ success: true });
   }));
 
@@ -1732,7 +1764,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       const statusOk = !status || status === "all" || item.status === status;
       if (!statusOk) return false;
       if (!search) return true;
-      return `${item.invoice_number || ""} ${item.source_invoice_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""}`.includes(search);
+      return `${item.invoice_number || ""} ${item.quote_number || ""} ${item.source_invoice_number || ""} ${item.customer_name || ""} ${item.customer_phone || ""}`.includes(search);
     });
     const postedDocuments = all.filter((item) => item.status !== "draft");
     const stats = {
@@ -1752,6 +1784,12 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
 
   app.post("/api/invoices", validate(invoiceCreateSchema), asyncRoute(async (req, res) => {
     const uid = userId(req);
+    if (String(req.body?.quote_id || "").trim()) {
+      res.status(400).json({
+        error: "أنشئ الفاتورة المرتبطة من مسار تحويل عرض السعر لمنع تكرار الربط أو اختلاف القيم.",
+      });
+      return;
+    }
     const items = verifiableInvoiceItems(req.body?.items);
     const customerName = String(req.body?.customer_name || "").trim();
     if (!customerName) {
@@ -2192,12 +2230,16 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
       res.status(404).json({ error: "عرض السعر غير موجود." });
       return;
     }
+    const quote = normalizeQuote(existing);
+    if (quote.status !== "confirmed") {
+      res.status(409).json({ error: "أكد عرض السعر قبل تحويله إلى فاتورة." });
+      return;
+    }
     const items = verifiableInvoiceItems(existing.items);
     if (!items) {
       res.status(400).json({ error: "لا يمكن تحويل عرض السعر: صحّح الوصف والكمية والسعر في جميع البنود أولًا." });
       return;
     }
-    const quote = normalizeQuote(existing);
     const idempotencyKey = `quote:${req.params.id}`;
     const settings = await getSettings(uid);
     const totals = invoiceTotals(
@@ -2230,6 +2272,7 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
           adjustment_scope: null,
           adjustment_reason: null,
           quote_id: req.params.id,
+          quote_number: quote.quote_number || null,
           customer_id: quote.customer_id || null,
           customer_name: quote.customer_name || "",
           customer_phone: quote.customer_phone || "",
@@ -2254,6 +2297,15 @@ async function publicInvoiceHtml(invoice: Record<string, any>) {
         return payload;
       },
     });
+    const linked = await updateOwned("quotes", req.params.id, uid, {
+      invoice_id: result.id,
+      invoice_number: result.data.invoice_number || "",
+    });
+    if (!linked) {
+      const error = new Error("تم إنشاء الفاتورة لكن تعذر تثبيت رابطها على عرض السعر؛ أعد المحاولة لإصلاح الرابط.") as Error & { status?: number };
+      error.status = 503;
+      throw error;
+    }
     res.status(result.created ? 201 : 200).json({
       id: result.id,
       invoice: normalizeInvoice(result.data),

@@ -941,6 +941,8 @@ export type QuoteInstallment = {
 export type Quote = {
   id: string;
   quote_number: string;
+  invoice_id?: string | null;
+  invoice_number?: string | null;
   customer_id?: string | null;
   customer_name: string;
   customer_phone?: string;
@@ -1028,6 +1030,7 @@ export type Invoice = {
   adjustment_reason?: string | null;
   idempotency_key?: string | null;
   quote_id?: string | null;
+  quote_number?: string | null;
   customer_id?: string | null;
   customer_name: string;
   customer_phone?: string;
@@ -2298,9 +2301,47 @@ function filterQuotes(quotes: Quote[], filter: { search?: string; status?: strin
     .filter((item) => !filter.status || filter.status === "all" || item.status === filter.status)
     .filter((item) => {
       if (!search) return true;
-      return `${item.quote_number} ${item.customer_name} ${item.customer_phone || ""} ${item.title || ""}`.includes(search);
+      return `${item.quote_number} ${item.invoice_number || ""} ${item.customer_name} ${item.customer_phone || ""} ${item.title || ""}`.includes(search);
     })
     .sort((a, b) => String(b.createdAt || b.issue_date).localeCompare(String(a.createdAt || a.issue_date)));
+}
+
+function linkQuotesToInvoices(quotes: Quote[], invoices: Invoice[]) {
+  const invoiceByQuoteId = new Map<string, Invoice>();
+  for (const invoice of invoices) {
+    const quoteId = String(invoice.quote_id || "").trim();
+    if (!quoteId || invoiceIsCreditNote(invoice) || invoiceByQuoteId.has(quoteId)) continue;
+    invoiceByQuoteId.set(quoteId, invoice);
+  }
+  return quotes.map((quote) => {
+    const linkedInvoice = invoiceByQuoteId.get(quote.id);
+    return linkedInvoice ? {
+      ...quote,
+      invoice_id: linkedInvoice.id,
+      invoice_number: linkedInvoice.invoice_number,
+    } : quote;
+  });
+}
+
+function linkInvoicesToQuotes(invoices: Invoice[], quotes: Quote[]) {
+  const quoteNumberById = new Map(quotes.map((quote) => [quote.id, quote.quote_number]));
+  return invoices.map((invoice) => ({
+    ...invoice,
+    quote_number: invoice.quote_number
+      || (invoice.quote_id ? quoteNumberById.get(invoice.quote_id) || null : null),
+  }));
+}
+
+function quoteHasFinancialLock(quote: Quote, invoices: Invoice[]) {
+  return quote.status === "confirmed"
+    || Boolean(quote.confirmed_at)
+    || Boolean(quote.invoice_id)
+    || invoices.some((invoice) => invoice.quote_id === quote.id && !invoiceIsCreditNote(invoice));
+}
+
+function assertQuoteMutable(quote: Quote, invoices: Invoice[]) {
+  if (!quoteHasFinancialLock(quote, invoices)) return;
+  throw new Error("عرض السعر مؤكد أو مرتبط بفاتورة؛ احتفظ بالسجل وأنشئ عرضًا جديدًا للتعديل.");
 }
 
 function localQuotePayload(data: QuoteInput, uid: string, existing?: Quote): Quote {
@@ -2373,7 +2414,8 @@ export const getQuotes = async (filter: { search?: string; status?: string } = {
   if (!user) return { data: [], total: 0, stats: quoteStats([]) };
   const uid = user.uid;
   if (user.local) {
-    const all = loadLocalDb(uid).quotes;
+    const localDb = loadLocalDb(uid);
+    const all = linkQuotesToInvoices(localDb.quotes, localDb.invoices);
     const data = filterQuotes(all, filter);
     return { data, total: data.length, stats: quoteStats(all) };
   }
@@ -2383,8 +2425,14 @@ export const getQuotes = async (filter: { search?: string; status?: string } = {
     if (filter.status && filter.status !== "all") params.set("status", filter.status);
     return apiFetch<QuoteListResponse>(`/api/quotes${params.toString() ? `?${params}` : ""}`);
   }
-  const snap = await getDocs(query(collection(db, "quotes"), where("createdBy", "==", uid), orderBy("createdAt", "desc"), limit(300)));
-  const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Quote);
+  const [snap, invoiceSnap] = await Promise.all([
+    getDocs(query(collection(db, "quotes"), where("createdBy", "==", uid), orderBy("createdAt", "desc"), limit(300))),
+    getDocs(query(collection(db, "invoices"), where("createdBy", "==", uid), limit(1000))),
+  ]);
+  const all = linkQuotesToInvoices(
+    snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Quote),
+    invoiceSnap.docs.map((d) => ({ id: d.id, ...d.data() }) as Invoice),
+  );
   const data = filterQuotes(all, filter);
   return { data, total: data.length, stats: quoteStats(all) };
 };
@@ -2420,6 +2468,9 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
   const user = getUserOrThrow();
   if (user.local) {
     const localDb = loadLocalDb(user.uid);
+    const existing = localDb.quotes.find((item) => item.id === id);
+    if (!existing) throw new Error("عرض السعر غير موجود.");
+    assertQuoteMutable(existing, localDb.invoices);
     localDb.quotes = localDb.quotes.map((item) => item.id === id ? localQuotePayload(data, user.uid, item) : item);
     saveLocalDb(user.uid, localDb);
     return;
@@ -2430,6 +2481,12 @@ export const updateQuote = async (id: string, data: QuoteInput) => {
       body: JSON.stringify(data),
     }).then(() => undefined);
   }
+  const [quoteSnap, linkedInvoices] = await Promise.all([
+    getDoc(doc(db, "quotes", id)),
+    getDocs(query(collection(db, "invoices"), where("createdBy", "==", user.uid), where("quote_id", "==", id), limit(1))),
+  ]);
+  if (!quoteSnap.exists()) throw new Error("عرض السعر غير موجود.");
+  assertQuoteMutable({ id, ...quoteSnap.data() } as Quote, linkedInvoices.docs.map((item) => ({ id: item.id, ...item.data() }) as Invoice));
   const items = normalizeQuoteItems(data.items);
   return wrap(
     () => updateDoc(doc(db, "quotes", id), {
@@ -2466,6 +2523,11 @@ export const setQuoteStatus = async (id: string, status: QuoteStatus, followUpDa
   const now = nowIso();
   if (user.local) {
     const localDb = loadLocalDb(user.uid);
+    const existing = localDb.quotes.find((item) => item.id === id);
+    if (!existing) throw new Error("عرض السعر غير موجود.");
+    if (quoteHasFinancialLock(existing, localDb.invoices)) {
+      throw new Error("لا يمكن تغيير حالة عرض مؤكد أو مرتبط بفاتورة.");
+    }
     localDb.quotes = localDb.quotes.map((item) =>
       item.id === id
         ? {
@@ -2487,7 +2549,12 @@ export const setQuoteStatus = async (id: string, status: QuoteStatus, followUpDa
     }).then(() => undefined);
   }
   const snap = await getDoc(doc(db, "quotes", id));
-  const prevConfirmedAt = (snap.exists() ? (snap.data() as Quote).confirmed_at : null) ?? null;
+  if (!snap.exists()) throw new Error("عرض السعر غير موجود.");
+  const current = { id, ...snap.data() } as Quote;
+  if (quoteHasFinancialLock(current, [])) {
+    throw new Error("لا يمكن تغيير حالة عرض مؤكد أو مرتبط بفاتورة.");
+  }
+  const prevConfirmedAt = current.confirmed_at ?? null;
   return wrap(
     () => updateDoc(doc(db, "quotes", id), {
       status,
@@ -2505,6 +2572,9 @@ export const deleteQuote = (id: string) => {
   const user = getUserOrThrow();
   if (user.local) {
     const localDb = loadLocalDb(user.uid);
+    const existing = localDb.quotes.find((item) => item.id === id);
+    if (!existing) throw new Error("عرض السعر غير موجود.");
+    assertQuoteMutable(existing, localDb.invoices);
     localDb.quotes = localDb.quotes.filter((item) => item.id !== id);
     saveLocalDb(user.uid, localDb);
     return Promise.resolve();
@@ -2512,7 +2582,17 @@ export const deleteQuote = (id: string) => {
   if (serverDataEnabled()) {
     return apiFetch(`/api/quotes/${id}`, { method: "DELETE" }).then(() => undefined);
   }
-  return wrap(() => deleteDoc(doc(db, "quotes", id)), OperationType.DELETE, `quotes/${id}`);
+  return Promise.all([
+    getDoc(doc(db, "quotes", id)),
+    getDocs(query(collection(db, "invoices"), where("createdBy", "==", user.uid), where("quote_id", "==", id), limit(1))),
+  ]).then(([quoteSnap, linkedInvoices]) => {
+    if (!quoteSnap.exists()) throw new Error("عرض السعر غير موجود.");
+    assertQuoteMutable(
+      { id, ...quoteSnap.data() } as Quote,
+      linkedInvoices.docs.map((item) => ({ id: item.id, ...item.data() }) as Invoice),
+    );
+    return wrap(() => deleteDoc(doc(db, "quotes", id)), OperationType.DELETE, `quotes/${id}`);
+  });
 };
 
 export const sendQuoteWhatsApp = async (quote: Quote, message: string) => {
@@ -2656,7 +2736,7 @@ function filterInvoices(invoices: Invoice[], filter: { search?: string; status?:
     .filter((item) => !filter.status || filter.status === "all" || item.status === filter.status)
     .filter((item) => {
       if (!search) return true;
-      return `${item.invoice_number} ${item.customer_name} ${item.customer_phone || ""} ${item.title || ""}`.includes(search);
+      return `${item.invoice_number} ${item.quote_number || ""} ${item.customer_name} ${item.customer_phone || ""} ${item.title || ""}`.includes(search);
     })
     .sort((a, b) => String(b.createdAt || b.issue_date).localeCompare(String(a.createdAt || a.issue_date)));
 }
@@ -2743,7 +2823,7 @@ export const getInvoices = async (filter: { search?: string; status?: string } =
   if (user.local) {
     const localDb = loadLocalDb(uid);
     const normalized = localDb.invoices.map(normalizeInvoiceRecord);
-    const all = deriveInvoiceStatuses(normalized);
+    const all = linkInvoicesToQuotes(deriveInvoiceStatuses(normalized), localDb.quotes);
     const data = filterInvoices(all, filter);
     return { data, total: data.length, stats: invoiceStats(all) };
   }
@@ -2767,6 +2847,9 @@ export const getInvoice = async (id: string): Promise<Invoice> => {
 export const createInvoice = async (data: InvoiceInput) => {
   const user = getUserOrThrow();
   const uid = user.uid;
+  if (data.quote_id) {
+    throw new Error("أنشئ الفاتورة المرتبطة من زر «تحويل إلى فاتورة» داخل عرض السعر لمنع تكرار الربط.");
+  }
   if (user.local) {
     const requestedStatus = data.status || "issued";
     if (requestedStatus !== "draft" && requestedStatus !== "issued") {
@@ -2950,47 +3033,61 @@ export const convertQuoteToInvoice = async (quoteId: string) => {
     }).then((result) => result.id);
   }
 
-  let quote: Quote | null = null;
-  const localDb = loadLocalDb(uid);
-  quote = localDb.quotes.find((q) => q.id === quoteId) || null;
-  if (!quote) throw new Error("عرض السعر غير موجود");
+  return withLocalInvoiceLedgerLock(uid, (localDb, allocateSequence) => {
+    const quote = localDb.quotes.find((item) => item.id === quoteId);
+    if (!quote) throw new Error("عرض السعر غير موجود.");
+    if (quote.status !== "confirmed") {
+      throw new Error("أكد عرض السعر قبل تحويله إلى فاتورة.");
+    }
+    const existingInvoice = localDb.invoices.find(
+      (invoice) => invoice.quote_id === quote.id && !invoiceIsCreditNote(invoice),
+    );
+    if (existingInvoice) return existingInvoice.id;
 
-  const settings = localDb.settings;
-
-  const invoiceInput: InvoiceInput = {
-    quote_id: quote.id,
-    customer_id: quote.customer_id,
-    customer_name: quote.customer_name,
-    customer_phone: quote.customer_phone,
-    customer_city: quote.customer_city,
-    customer_vat: quote.customer_vat,
-    title: quote.title || "",
-    issue_date: today(),
-    due_date: addDays(today(), 30),
-    currency: quote.currency || "SAR",
-    discount: quote.discount,
-    discount_mode: quote.discount_mode,
-    discount_value: quote.discount_value ?? quote.discount,
-    vat_percent: quote.vat_percent ?? 15,
-    additional_fee: quote.tax ?? 0,
-    payment_method: quote.payment_method || "",
-    items: quote.items.map((item) => ({
-      product_id: item.product_id || null,
-      product_sku: item.product_sku || "",
-      description: item.description,
-      quantity: item.quantity,
-      unit_price: item.unit_price,
-      total: item.total,
-      vat_excluded: item.vat_excluded !== false,
-    })),
-    notes: quote.notes,
-    terms: quote.terms,
-    seller_name: settings.seller_name || "",
-    seller_vat_number: settings.seller_vat_number || "",
-    seller_address: settings.seller_address || "",
-  };
-
-  return createInvoice(invoiceInput);
+    const invoiceInput: InvoiceInput = {
+      customer_id: quote.customer_id,
+      customer_name: quote.customer_name,
+      customer_phone: quote.customer_phone,
+      customer_city: quote.customer_city,
+      customer_vat: quote.customer_vat,
+      title: quote.title || "",
+      issue_date: today(),
+      due_date: addDays(today(), 30),
+      currency: quote.currency || "SAR",
+      discount: quote.discount,
+      discount_mode: quote.discount_mode,
+      discount_value: quote.discount_value ?? quote.discount,
+      vat_percent: quote.vat_percent ?? 15,
+      additional_fee: quote.tax ?? 0,
+      payment_method: quote.payment_method || "",
+      items: quote.items.map((item) => ({
+        product_id: item.product_id || null,
+        product_sku: item.product_sku || "",
+        description: item.description,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        total: item.total,
+        vat_excluded: item.vat_excluded !== false,
+      })),
+      notes: quote.notes,
+      terms: quote.terms,
+      seller_name: localDb.settings.seller_name || "",
+      seller_vat_number: localDb.settings.seller_vat_number || "",
+      seller_address: localDb.settings.seller_address || "",
+    };
+    const sequence = allocateSequence();
+    const issuedAt = nowIso();
+    const invoice = localInvoicePayload({ ...invoiceInput, status: "issued" }, uid, localDb.settings);
+    invoice.quote_id = quote.id;
+    invoice.quote_number = quote.quote_number;
+    invoice.invoice_number = invoiceNumber(issuedAt, sequence);
+    invoice.document_kind = "invoice";
+    invoice.sequence_no = sequence;
+    invoice.issued_at = issuedAt;
+    invoice.idempotency_key = `quote:${quote.id}`;
+    localDb.invoices.unshift(invoice);
+    return invoice.id;
+  });
 };
 
 type InvoiceWhatsAppResponse = {

@@ -256,11 +256,91 @@ test("quote conversion persists the quote tax as an additional post-VAT fee", as
   assert.equal(converted.body.invoice.additional_fee, 8);
   assert.equal(converted.body.invoice.total_with_vat, 215);
 
+  const replay = await api(`/api/quotes/${quoteId}/convert-to-invoice`, {
+    method: "POST",
+    body: JSON.stringify({
+      seller_name: "BreeXe Pro Co.",
+      seller_vat_number: "313049114100003",
+    }),
+  });
+  assert.equal(replay.response.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.id, converted.body.id);
+  assert.equal(replay.body.idempotent_replay, true);
+
+  const quoteList = await api(`/api/quotes?search=${encodeURIComponent(converted.body.invoice.invoice_number)}`);
+  assert.equal(quoteList.response.status, 200, JSON.stringify(quoteList.body));
+  assert.equal(quoteList.body.data.length, 1);
+  assert.equal(quoteList.body.data[0].invoice_id, converted.body.id);
+  assert.equal(quoteList.body.data[0].invoice_number, converted.body.invoice.invoice_number);
+
+  const invoiceList = await api(`/api/invoices?search=${encodeURIComponent("QT-ROUTE-CONVERT")}`);
+  assert.equal(invoiceList.response.status, 200, JSON.stringify(invoiceList.body));
+  assert.equal(invoiceList.body.data.length, 1);
+  assert.equal(invoiceList.body.data[0].quote_id, quoteId);
+  assert.equal(invoiceList.body.data[0].quote_number, "QT-ROUTE-CONVERT");
+
+  const blockedStatus = await api(`/api/quotes/${quoteId}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status: "confirmed" }),
+  });
+  assert.equal(blockedStatus.response.status, 409, JSON.stringify(blockedStatus.body));
+
+  const blockedEdit = await api(`/api/quotes/${quoteId}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      customer_name: "Mutated customer",
+      status: "confirmed",
+      items: [{ description: "Changed line", quantity: 1, unit_price: 1 }],
+    }),
+  });
+  assert.equal(blockedEdit.response.status, 409, JSON.stringify(blockedEdit.body));
+
+  const blockedDelete = await api(`/api/quotes/${quoteId}`, { method: "DELETE" });
+  assert.equal(blockedDelete.response.status, 409, JSON.stringify(blockedDelete.body));
+  assert.equal(blockedDelete.body.invoice_id, converted.body.id);
+
   const qr = await api(`/api/invoices/${converted.body.id}/qr`);
   assert.equal(qr.response.status, 200, JSON.stringify(qr.body));
   const fields = decodeTlv(qr.body.qr_base64);
   assert.equal(fields.get(4), "215.00");
   assert.equal(fields.get(5), "27.00");
+});
+
+test("quote lifecycle blocks unconfirmed conversion and generic invoice-link bypass", async () => {
+  const quoteId = "quote-route-unconfirmed";
+  await adminDb.collection("quotes").doc(quoteId).set({
+    createdBy: uid,
+    quote_number: "QT-ROUTE-UNCONFIRMED",
+    customer_name: "Unconfirmed quote customer",
+    status: "issued",
+    issue_date: "2026-07-08",
+    items: [{ description: "Quoted line", quantity: 1, unit_price: 100, total: 100, vat_excluded: true }],
+    vat_percent: 15,
+    currency: "SAR",
+  });
+
+  const unconfirmed = await api(`/api/quotes/${quoteId}/convert-to-invoice`, {
+    method: "POST",
+    body: JSON.stringify({
+      seller_name: "BreeXe Pro Co.",
+      seller_vat_number: "313049114100003",
+    }),
+  });
+  assert.equal(unconfirmed.response.status, 409, JSON.stringify(unconfirmed.body));
+  assert.match(String(unconfirmed.body.error), /أكد عرض السعر/);
+
+  const bypass = await api("/api/invoices", {
+    method: "POST",
+    body: JSON.stringify({
+      ...invoiceBody("Bypass customer"),
+      quote_id: quoteId,
+    }),
+  });
+  assert.equal(bypass.response.status, 400, JSON.stringify(bypass.body));
+  assert.match(String(bypass.body.error), /مسار تحويل عرض السعر/);
+
+  const deletedDraft = await api(`/api/quotes/${quoteId}`, { method: "DELETE" });
+  assert.equal(deletedDraft.response.status, 200, JSON.stringify(deletedDraft.body));
 });
 
 test("invoice save and QR routes fail closed with clear validation errors", async () => {

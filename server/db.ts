@@ -15,7 +15,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 10906;
+const TARGET_SCHEMA_VERSION = 10907;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -575,6 +575,8 @@ db.exec(`
     id TEXT PRIMARY KEY,
     owner_uid TEXT NOT NULL,
     quote_number TEXT NOT NULL,
+    invoice_id TEXT,
+    invoice_number TEXT,
     customer_id TEXT,
     customer_name TEXT NOT NULL DEFAULT '',
     customer_phone TEXT DEFAULT '',
@@ -630,6 +632,7 @@ db.exec(`
     adjustment_reason TEXT,
     idempotency_key TEXT CHECK(idempotency_key IS NULL OR TRIM(idempotency_key) <> ''),
     quote_id TEXT,
+    quote_number TEXT,
     customer_id TEXT,
     customer_name TEXT NOT NULL DEFAULT '',
     customer_phone TEXT DEFAULT '',
@@ -1567,6 +1570,8 @@ for (const col of [
   ["payment_iban", "TEXT DEFAULT ''"],
   ["payment_note", "TEXT DEFAULT ''"],
   ["installments", "TEXT DEFAULT '[]'"],
+  ["invoice_id", "TEXT"],
+  ["invoice_number", "TEXT"],
 ] as const) {
   if (!hasColumn("quotes", col[0])) {
     db.exec(`ALTER TABLE quotes ADD COLUMN ${col[0]} ${col[1]}`);
@@ -1584,6 +1589,7 @@ for (const col of [
   ["adjustment_reason", "TEXT"],
   ["idempotency_key", "TEXT CHECK(idempotency_key IS NULL OR TRIM(idempotency_key) <> '')"],
   ["quote_id", "TEXT"],
+  ["quote_number", "TEXT"],
   ["customer_id", "TEXT"],
   ["customer_name", "TEXT NOT NULL DEFAULT ''"],
   ["customer_phone", "TEXT DEFAULT ''"],
@@ -1633,6 +1639,8 @@ db.exec(`
   DROP TRIGGER IF EXISTS invoices_prevent_status_after_credit;
   DROP TRIGGER IF EXISTS invoices_prevent_credit_during_payment;
   DROP TRIGGER IF EXISTS invoices_prevent_paid_during_payment;
+  DROP TRIGGER IF EXISTS invoices_validate_quote_link_insert;
+  DROP TRIGGER IF EXISTS quotes_prevent_locked_update;
   DROP INDEX IF EXISTS idx_invoices_owner_sequence;
 `);
 
@@ -1727,13 +1735,109 @@ if (duplicateInvoiceSequence) {
   throw new Error("Invoice sequence migration aborted: duplicate owner sequence values require manual repair.");
 }
 
+const duplicateQuoteInvoice = db.prepare(`
+  SELECT owner_uid, quote_id, COUNT(*) AS count
+    FROM invoices
+   WHERE document_kind = 'invoice'
+     AND quote_id IS NOT NULL
+     AND TRIM(quote_id) <> ''
+   GROUP BY owner_uid, quote_id
+  HAVING COUNT(*) > 1
+   LIMIT 1
+`).get() as { owner_uid?: string; quote_id?: string; count?: number } | undefined;
+if (duplicateQuoteInvoice) {
+  throw new Error(
+    `Billing link migration aborted: quote ${duplicateQuoteInvoice.quote_id} for owner ${duplicateQuoteInvoice.owner_uid} has ${duplicateQuoteInvoice.count} source invoices and requires manual repair.`,
+  );
+}
+
+const conflictingQuoteNumber = db.prepare(`
+  SELECT invoice.id, invoice.quote_id, invoice.quote_number, source.quote_number AS expected_quote_number
+    FROM invoices invoice
+    JOIN quotes source
+      ON source.id = invoice.quote_id
+     AND source.owner_uid = invoice.owner_uid
+   WHERE invoice.document_kind = 'invoice'
+     AND TRIM(COALESCE(invoice.quote_number, '')) <> ''
+     AND invoice.quote_number <> source.quote_number
+   LIMIT 1
+`).get() as { id?: string; quote_id?: string } | undefined;
+if (conflictingQuoteNumber) {
+  throw new Error(
+    `Billing link migration aborted: invoice ${conflictingQuoteNumber.id} disagrees with quote ${conflictingQuoteNumber.quote_id}.`,
+  );
+}
+
+const conflictingQuoteInvoice = db.prepare(`
+  SELECT source.id, source.invoice_id, invoice.id AS expected_invoice_id
+    FROM quotes source
+    JOIN invoices invoice
+      ON invoice.quote_id = source.id
+     AND invoice.owner_uid = source.owner_uid
+     AND invoice.document_kind = 'invoice'
+   WHERE source.invoice_id IS NOT NULL
+     AND TRIM(source.invoice_id) <> ''
+     AND source.invoice_id <> invoice.id
+   LIMIT 1
+`).get() as { id?: string; invoice_id?: string; expected_invoice_id?: string } | undefined;
+if (conflictingQuoteInvoice) {
+  throw new Error(
+    `Billing link migration aborted: quote ${conflictingQuoteInvoice.id} points to invoice ${conflictingQuoteInvoice.invoice_id}, not ${conflictingQuoteInvoice.expected_invoice_id}.`,
+  );
+}
+
+db.exec(`
+  UPDATE invoices
+     SET quote_number = (
+       SELECT source.quote_number
+         FROM quotes source
+        WHERE source.id = invoices.quote_id
+          AND source.owner_uid = invoices.owner_uid
+     )
+   WHERE document_kind = 'invoice'
+     AND quote_id IS NOT NULL
+     AND TRIM(COALESCE(quote_number, '')) = ''
+     AND EXISTS (
+       SELECT 1
+         FROM quotes source
+        WHERE source.id = invoices.quote_id
+          AND source.owner_uid = invoices.owner_uid
+     );
+
+  UPDATE quotes
+     SET invoice_id = (
+           SELECT invoice.id
+             FROM invoices invoice
+            WHERE invoice.quote_id = quotes.id
+              AND invoice.owner_uid = quotes.owner_uid
+              AND invoice.document_kind = 'invoice'
+         ),
+         invoice_number = (
+           SELECT invoice.invoice_number
+             FROM invoices invoice
+            WHERE invoice.quote_id = quotes.id
+              AND invoice.owner_uid = quotes.owner_uid
+              AND invoice.document_kind = 'invoice'
+         )
+   WHERE EXISTS (
+     SELECT 1
+       FROM invoices invoice
+      WHERE invoice.quote_id = quotes.id
+        AND invoice.owner_uid = quotes.owner_uid
+        AND invoice.document_kind = 'invoice'
+   );
+`);
+
 db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_owner ON invoices(owner_uid, created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(owner_uid, status, created_at DESC)");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_number ON invoices(owner_uid, invoice_number)");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_sequence ON invoices(owner_uid, sequence_no) WHERE sequence_no IS NOT NULL");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_idempotency ON invoices(owner_uid, idempotency_key) WHERE idempotency_key IS NOT NULL");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_quote_source ON invoices(owner_uid, quote_id) WHERE document_kind = 'invoice' AND quote_id IS NOT NULL AND TRIM(quote_id) <> ''");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_one_full_credit_per_source ON invoices(owner_uid, source_invoice_id) WHERE document_kind = 'credit_note' AND adjustment_scope = 'full'");
 db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_owner_source ON invoices(owner_uid, source_invoice_id)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_owner_quote ON invoices(owner_uid, quote_id)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_quotes_owner_invoice ON quotes(owner_uid, invoice_id)");
 db.exec(`
   INSERT INTO invoice_sequences (owner_uid, series, last_value, updated_at)
   SELECT owner_uid, 'tax_documents', MAX(sequence_no), datetime('now')
@@ -1856,6 +1960,86 @@ if (schemaVersionBeforeMigration < TARGET_SCHEMA_VERSION) {
 // fresh database during startup; DROP + CREATE must never interleave.
 db.transaction(() => {
   db.exec(`
+  DROP TRIGGER IF EXISTS quotes_prevent_locked_update;
+  CREATE TRIGGER quotes_prevent_locked_update
+  BEFORE UPDATE ON quotes
+  WHEN (
+    (OLD.status = 'confirmed' OR OLD.confirmed_at IS NOT NULL OR OLD.invoice_id IS NOT NULL) AND (
+      NEW.owner_uid IS NOT OLD.owner_uid OR
+      NEW.quote_number IS NOT OLD.quote_number OR
+      NEW.customer_id IS NOT OLD.customer_id OR
+      NEW.customer_name IS NOT OLD.customer_name OR
+      NEW.customer_phone IS NOT OLD.customer_phone OR
+      NEW.customer_city IS NOT OLD.customer_city OR
+      NEW.customer_vat IS NOT OLD.customer_vat OR
+      NEW.title IS NOT OLD.title OR
+      NEW.status IS NOT OLD.status OR
+      NEW.issue_date IS NOT OLD.issue_date OR
+      NEW.valid_until IS NOT OLD.valid_until OR
+      NEW.follow_up_date IS NOT OLD.follow_up_date OR
+      NEW.subtotal IS NOT OLD.subtotal OR
+      NEW.discount IS NOT OLD.discount OR
+      NEW.discount_mode IS NOT OLD.discount_mode OR
+      NEW.discount_value IS NOT OLD.discount_value OR
+      NEW.tax IS NOT OLD.tax OR
+      NEW.vat_percent IS NOT OLD.vat_percent OR
+      NEW.vat_amount IS NOT OLD.vat_amount OR
+      NEW.total_without_vat IS NOT OLD.total_without_vat OR
+      NEW.total IS NOT OLD.total OR
+      NEW.currency IS NOT OLD.currency OR
+      NEW.payment_method IS NOT OLD.payment_method OR
+      NEW.payment_down_percent IS NOT OLD.payment_down_percent OR
+      NEW.payment_final_percent IS NOT OLD.payment_final_percent OR
+      NEW.payment_down_text IS NOT OLD.payment_down_text OR
+      NEW.payment_final_text IS NOT OLD.payment_final_text OR
+      NEW.payment_bank IS NOT OLD.payment_bank OR
+      NEW.payment_account IS NOT OLD.payment_account OR
+      NEW.payment_iban IS NOT OLD.payment_iban OR
+      NEW.payment_note IS NOT OLD.payment_note OR
+      NEW.installments IS NOT OLD.installments OR
+      NEW.items IS NOT OLD.items OR
+      NEW.notes IS NOT OLD.notes OR
+      NEW.terms IS NOT OLD.terms OR
+      NEW.confirmed_at IS NOT OLD.confirmed_at OR
+      NEW.created_at IS NOT OLD.created_at
+    )
+  ) OR (
+    (NEW.invoice_id IS NOT OLD.invoice_id OR NEW.invoice_number IS NOT OLD.invoice_number) AND NOT (
+      OLD.invoice_id IS NULL AND
+      OLD.status = 'confirmed' AND
+      NEW.invoice_id IS NOT NULL AND TRIM(NEW.invoice_id) <> '' AND
+      NEW.invoice_number IS NOT NULL AND TRIM(NEW.invoice_number) <> '' AND
+      EXISTS (
+        SELECT 1 FROM invoices linked
+        WHERE linked.id = NEW.invoice_id
+          AND linked.owner_uid = OLD.owner_uid
+          AND linked.quote_id = OLD.id
+          AND linked.invoice_number = NEW.invoice_number
+          AND linked.document_kind = 'invoice'
+      )
+    )
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'CONFIRMED_QUOTE_IMMUTABLE');
+  END;
+
+  DROP TRIGGER IF EXISTS invoices_validate_quote_link_insert;
+  CREATE TRIGGER invoices_validate_quote_link_insert
+  BEFORE INSERT ON invoices
+  WHEN NEW.document_kind = 'invoice' AND NEW.quote_id IS NOT NULL AND (
+    NEW.idempotency_key IS NOT ('quote:' || NEW.quote_id) OR
+    NOT EXISTS (
+      SELECT 1 FROM quotes source
+      WHERE source.id = NEW.quote_id
+        AND source.owner_uid = NEW.owner_uid
+        AND source.status = 'confirmed'
+        AND source.quote_number = NEW.quote_number
+    )
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'INVALID_INVOICE_QUOTE_LINK');
+  END;
+
   DROP TRIGGER IF EXISTS invoices_prevent_issued_financial_update;
   CREATE TRIGGER invoices_prevent_issued_financial_update
   BEFORE UPDATE ON invoices
@@ -1871,6 +2055,7 @@ db.transaction(() => {
     NEW.adjustment_reason IS NOT OLD.adjustment_reason OR
     NEW.idempotency_key IS NOT OLD.idempotency_key OR
     NEW.quote_id IS NOT OLD.quote_id OR
+    NEW.quote_number IS NOT OLD.quote_number OR
     NEW.customer_id IS NOT OLD.customer_id OR
     NEW.customer_name IS NOT OLD.customer_name OR
     NEW.customer_phone IS NOT OLD.customer_phone OR
@@ -1992,6 +2177,7 @@ db.transaction(() => {
   BEGIN
     SELECT RAISE(ABORT, 'INVOICE_PAYMENT_IN_PROGRESS');
   END;
+
 `);
 
 for (const col of [
@@ -2071,7 +2257,8 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10904, '1.9.4-whatsapp-bulk-reminders');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10905, '1.9.5-whatsapp-deepseek-assistant');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10906, '1.9.6-invoice-payment-ledger');
-  `);
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (10907, '1.9.7-billing-document-links');
+`);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);
 

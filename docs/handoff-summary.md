@@ -651,3 +651,14 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Kept drafts directly editable and added an issued-invoice correction-copy workflow that preserves the original tax document.
 - Advanced SQLite schema to `10906`, added a restricted Supabase mirror, and bumped the release to `1.9.6`.
 - Added backend, schema, UI contract, tenant isolation, duplicate-request, partial-payment, reversal, Tap refund, and credit-note guard tests.
+
+## 2026-08-08 - Unified billing workspace and quote lineage hardening 1.9.7 [Codex]
+
+- Consolidated the sidebar into one `الفواتير والعروض` workspace with accessible, RTL-aware invoice/quote tabs, canonical URL state, legacy `section=quotes` migration, reciprocal document links, focused deep links, responsive mobile behavior, and reduced-motion support.
+- Quote conversion now requires explicit confirmation, uses the stable `quote:<quote_id>` idempotency key, returns the existing source invoice on replay, and rejects the generic invoice API as a quote-link bypass.
+- Confirmed or linked quotes are immutable at the UI, API, SQLite trigger, and Supabase trigger layers. Invoice status remains authoritative on the invoice instead of being duplicated into a stale quote projection.
+- SQLite schema `10907` and `20260808160000_billing_document_links.sql` backfill reciprocal identifiers, reject conflicting or duplicate historical lineage, and add one-source-invoice-per-owner-and-quote unique indexes. Production startup creates its normal pre-migration backup before the fail-closed audit.
+- The technician wallet now checks FieldTech readiness before requesting financial data and shows the exact configuration gate instead of a generic `503` when the bridge is absent.
+- Refreshed vulnerable transitive package overrides; `npm audit` reports zero known vulnerabilities and the source security audit reports zero warnings.
+- Verification: TypeScript lint, production build, `463/463` unit tests, `12/12` schema tests, focused invoice concurrency/idempotency tests, and isolated browser QA at desktop and `390x844`. Browser QA recorded a `100 SAR` cash collection against an issued invoice, preserved its issued state while showing the reduced balance, migrated the legacy quote URL, traversed reciprocal links, and found no application alerts across all 15 sidebar destinations.
+- Deployment was not performed. Before release, inspect any fail-closed duplicate-lineage result, apply the canonical Supabase migration only when that provider is active, then run the locked deployment/health transaction. Tap, FieldTech, WhatsApp, and other outbound providers remain gated by their existing credentials and approval switches.

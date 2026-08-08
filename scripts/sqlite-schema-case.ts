@@ -4,7 +4,7 @@ const dbPath = process.env.DB_PATH;
 if (!dbPath) throw new Error("DB_PATH is required.");
 const scenario = process.argv[2] || "fresh";
 
-if (scenario === "legacy" || scenario === "previous-10307") {
+if (scenario === "legacy" || scenario === "previous-10307" || scenario === "duplicate-quote-invoices") {
   const legacy = new Database(dbPath);
   legacy.pragma(scenario === "previous-10307" ? "user_version = 10307" : "user_version = 10003");
   legacy.exec(`
@@ -34,6 +34,7 @@ if (scenario === "legacy" || scenario === "previous-10307") {
       id TEXT PRIMARY KEY,
       owner_uid TEXT NOT NULL,
       invoice_number TEXT NOT NULL,
+      quote_id TEXT,
       customer_name TEXT NOT NULL DEFAULT '',
       status TEXT DEFAULT 'issued',
       issue_date TEXT,
@@ -51,11 +52,11 @@ if (scenario === "legacy" || scenario === "previous-10307") {
       updated_at TEXT
     );
     INSERT INTO invoices (
-      id, owner_uid, invoice_number, customer_name, issue_date, subtotal,
+      id, owner_uid, invoice_number, quote_id, customer_name, issue_date, subtotal,
       discount, discount_mode, discount_value, vat, vat_percent, vat_amount,
       total_without_vat, total_with_vat, items, created_at, updated_at
     ) VALUES (
-      'legacy_invoice', 'owner', 'INV-20260102-042', 'Legacy invoice customer',
+      'legacy_invoice', 'owner', 'INV-20260102-042', 'legacy_quote', 'Legacy invoice customer',
       '2026-01-02', 999, 20, 'fixed', 0, 999, 15, 999, 999, 999,
       '[{"description":"Legacy line","quantity":2,"unit_price":100,"vat_excluded":true}]',
       '2026-01-02T08:30:00Z', '2026-01-03T08:30:00Z'
@@ -149,6 +150,21 @@ if (scenario === "legacy" || scenario === "previous-10307") {
     INSERT INTO store_orders (id, owner_uid, order_id, status, created_at, updated_at)
     VALUES ('legacy_store_order', 'owner', 'SALLA-LEGACY', 'paid', '2026-01-01', '2026-01-01');
   `);
+  if (scenario === "duplicate-quote-invoices") {
+    legacy.exec(`
+      INSERT INTO invoices (
+        id, owner_uid, invoice_number, quote_id, customer_name, status, issue_date,
+        subtotal, discount, discount_mode, discount_value, vat, vat_percent,
+        vat_amount, total_without_vat, total_with_vat, items, created_at, updated_at
+      )
+      SELECT 'legacy_invoice_duplicate', owner_uid, 'INV-20260102-043', quote_id,
+             customer_name, status, issue_date, subtotal, discount, discount_mode,
+             discount_value, vat, vat_percent, vat_amount, total_without_vat,
+             total_with_vat, items, created_at, updated_at
+        FROM invoices
+       WHERE id = 'legacy_invoice';
+    `);
+  }
   legacy.close();
 }
 
@@ -171,6 +187,8 @@ function indexes(table: string) {
 
 const quoteColumns = columns("quotes");
 for (const required of [
+  "invoice_id",
+  "invoice_number",
   "discount_mode",
   "discount_value",
   "customer_vat",
@@ -182,6 +200,7 @@ for (const required of [
   if (!quoteColumns.has(required)) throw new Error(`quotes.${required} is missing`);
 }
 for (const required of [
+  "quote_number",
   "discount_mode",
   "discount_value",
   "vat_percent",
@@ -208,6 +227,7 @@ const invoiceIndexes = indexes("invoices");
 for (const required of [
   "idx_invoices_owner_sequence",
   "idx_invoices_owner_idempotency",
+  "idx_invoices_owner_quote_source",
   "idx_invoices_one_full_credit_per_source",
 ]) {
   if (!invoiceIndexes.get(required)) throw new Error(`${required} must be a unique index`);
@@ -269,7 +289,7 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 10906) throw new Error(`Expected schema 10906, got ${userVersion}`);
+if (userVersion !== 10907) throw new Error(`Expected schema 10907, got ${userVersion}`);
 for (const required of ["media_type", "media_url", "order_url"]) {
   if (!columns("communication_campaigns").has(required)) {
     throw new Error(`communication_campaigns.${required} is missing`);
@@ -481,6 +501,19 @@ for (const required of ["correlation_key", "wa_customer_job_id", "wa_agent_job_i
 }
 
 if (scenario === "legacy" || scenario === "previous-10307") {
+  const legacyQuoteLink = db.prepare(`
+    SELECT source.invoice_id, source.invoice_number, invoice.quote_number
+      FROM quotes source
+      JOIN invoices invoice ON invoice.id = source.invoice_id AND invoice.owner_uid = source.owner_uid
+     WHERE source.id = 'legacy_quote'
+  `).get() as Record<string, unknown>;
+  if (
+    legacyQuoteLink.invoice_id !== "legacy_invoice"
+    || legacyQuoteLink.invoice_number !== "INV-20260102-042"
+    || legacyQuoteLink.quote_number !== "QT-LEGACY"
+  ) {
+    throw new Error(`Legacy billing links were not backfilled: ${JSON.stringify(legacyQuoteLink)}`);
+  }
   const sequenceState = db.prepare(
     "SELECT last_value FROM invoice_sequences WHERE owner_uid = 'owner' AND series = 'tax_documents'",
   ).get() as { last_value?: number } | undefined;
@@ -653,9 +686,11 @@ if (mediaCampaignMigration?.release !== "1.9.1-whatsapp-media-campaigns") throw 
 const bulkReminderMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10904").get() as { release?: string };
 const deepSeekAssistantMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10905").get() as { release?: string };
 const invoicePaymentLedgerMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10906").get() as { release?: string };
+const billingDocumentLinksMigration = db.prepare("SELECT release FROM schema_migrations WHERE version = 10907").get() as { release?: string };
 if (bulkReminderMigration?.release !== "1.9.4-whatsapp-bulk-reminders") throw new Error("WhatsApp bulk reminder migration was not updated.");
 if (deepSeekAssistantMigration?.release !== "1.9.5-whatsapp-deepseek-assistant") throw new Error("WhatsApp DeepSeek assistant migration was not updated.");
 if (invoicePaymentLedgerMigration?.release !== "1.9.6-invoice-payment-ledger") throw new Error("Invoice payment ledger migration was not updated.");
+if (billingDocumentLinksMigration?.release !== "1.9.7-billing-document-links") throw new Error("Billing document links migration was not updated.");
 
 const { createSqliteFirestoreAdapter } = await import("../server/sqliteFirestoreAdapter");
 const adapter = createSqliteFirestoreAdapter();

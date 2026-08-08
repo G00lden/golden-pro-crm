@@ -6,6 +6,7 @@ process.env.DB_PROVIDER = "sqlite";
 process.env.DB_PATH = ":memory:";
 process.env.ENABLE_DAILY_CRON = "false";
 process.env.WHATSAPP_AI_ENABLED = "true";
+process.env.WHATSAPP_COMMERCE_ENABLED = "true";
 process.env.DEEPSEEK_API_KEY = "test-only-deepseek-key";
 process.env.DEEPSEEK_MODEL = "deepseek-v4-flash";
 process.env.WHATSAPP_AI_MAX_REQUESTS_PER_PHONE_HOUR = "20";
@@ -22,11 +23,14 @@ const input = {
   phone: "966500000123",
   text: "وين وصل طلبي رقم S-123؟",
 };
-const now = new Date("2026-07-29T08:00:00.000Z");
+// Keep the verification fixture inside the production freshness window so the
+// test cannot expire merely because the calendar advanced.
+const now = new Date();
 
 test.beforeEach(() => {
   db.prepare("DELETE FROM whatsapp_ai_intents").run();
   process.env.WHATSAPP_AI_ENABLED = "true";
+  process.env.WHATSAPP_COMMERCE_ENABLED = "true";
   process.env.DEEPSEEK_API_KEY = "test-only-deepseek-key";
   process.env.DEEPSEEK_MODEL = "deepseek-v4-flash";
   process.env.WHATSAPP_AI_MAX_REQUESTS_PER_PHONE_HOUR = "20";

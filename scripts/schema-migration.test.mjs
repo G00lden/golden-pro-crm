@@ -30,7 +30,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10906/);
+    assert.match(result.stdout, /"userVersion":10907/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -52,7 +52,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10906/);
+    assert.match(backups[0], /pre-schema-10907/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -62,10 +62,26 @@ test("a previous 10307 deployment upgrades through a new backup and ledger marke
   const { directory, result } = runCase("previous-10307", true);
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":10906/);
+    assert.match(result.stdout, /"userVersion":10907/);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-10906/);
+    assert.match(backups[0], /pre-schema-10907/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("billing migration rejects ambiguous historical quote lineage", () => {
+  const { directory, result } = runCase("duplicate-quote-invoices", true);
+  try {
+    assert.notEqual(result.status, 0, "ambiguous quote lineage must stop the upgrade");
+    assert.match(
+      `${result.stderr}\n${result.stdout}`,
+      /Billing link migration aborted: quote legacy_quote for owner owner has 2 source invoices/,
+    );
+    const backups = readdirSync(path.join(directory, "backups"));
+    assert.equal(backups.length, 1);
+    assert.match(backups[0], /pre-schema-10907/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -180,6 +196,32 @@ test("the Supabase invoice payment ledger is tenant-scoped and immutable", () =>
     assert.match(migration, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
   }
   assert.doesNotMatch(migration, /grant\s+(?:all|update|delete)[\s\S]*?invoice_payment_entries\s+to\s+authenticated/i);
+});
+
+test("the Supabase billing link migration locks confirmed quotes and validates invoice lineage", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260808160000_billing_document_links.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "add column if not exists invoice_id text",
+    "add column if not exists invoice_number text",
+    "add column if not exists quote_number text",
+    "quotes_owner_invoice_idx",
+    "invoices_owner_quote_idx",
+    "invoices_owner_quote_source_uidx",
+    "DUPLICATE_QUOTE_SOURCE_INVOICES",
+    "INVOICE_QUOTE_NUMBER_CONFLICT",
+    "QUOTE_INVOICE_LINK_CONFLICT",
+    "set quote_number = source.quote_number",
+    "set invoice_id = invoice.id",
+    "CONFIRMED_QUOTE_IMMUTABLE",
+    "INVALID_QUOTE_INVOICE_LINK",
+    "INVALID_INVOICE_QUOTE_LINK",
+    "new.idempotency_key is distinct from ('quote:' || new.quote_id)",
+  ]) {
+    assert.match(migration, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
 });
 
 test("the Supabase invoice migration declares conservative line guards and no timestamp assignments", () => {
