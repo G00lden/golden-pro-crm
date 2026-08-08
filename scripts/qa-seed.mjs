@@ -233,6 +233,15 @@ export async function seedQaData(options = {}) {
     track("quote", true);
   } else track("quote", false);
 
+  if (quote.status !== "confirmed") {
+    const result = await request(`/api/quotes/${encodeURIComponent(quote.id)}/status`, {
+      method: "POST",
+      body: { status: "confirmed" },
+    });
+    quote = result.quote || { ...quote, status: "confirmed" };
+    track("quote_confirmation", true);
+  } else track("quote_confirmation", false);
+
   const invoicesResponse = await request(`/api/invoices?search=${encodeURIComponent(customer.phone)}`);
   let invoice = itemsFrom(invoicesResponse, "data").find((item) => item.quote_id === quote.id);
   if (!invoice) {

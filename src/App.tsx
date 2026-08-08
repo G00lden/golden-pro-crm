@@ -3,7 +3,6 @@ import {
   Check,
   CircleAlert,
   ClipboardList,
-  FileText,
   LogIn,
   LogOut,
   Menu,
@@ -42,8 +41,7 @@ import {
   registerWithEmail,
 } from "./firebase";
 import { AdminUsersPage } from "./pages/AdminUsers";
-import { InvoicesPage } from "./pages/Invoices";
-import { QuotesPage } from "./pages/Quotes";
+import { BillingWorkspace, notifyBillingLocationChanged } from "./pages/BillingWorkspace";
 import { CampaignsPage } from "./pages/Campaigns";
 import { ReminderDashboard } from "./components/ReminderDashboard";
 import Dashboard from "./pages/Dashboard";
@@ -101,6 +99,7 @@ const pageIds = new Set<Page>([
 function pageFromLocation(): Page {
   if (typeof window === "undefined") return "dash";
   const requested = new URL(window.location.href).searchParams.get("section");
+  if (requested === "quotes") return "invoices";
   return requested && pageIds.has(requested as Page) ? requested as Page : "dash";
 }
 
@@ -433,8 +432,7 @@ export default function App() {
   const nav = [
     { id: "dash" as Page, label: "الرئيسية", icon: ClipboardList },
     { id: "customers" as Page, label: "العملاء", icon: Users },
-    { id: "quotes" as Page, label: "عروض الأسعار", icon: FileText, badge: summary.quoteFollowUps },
-    { id: "invoices" as Page, label: "الفواتير", icon: Receipt },
+    { id: "invoices" as Page, label: "الفواتير والعروض", icon: Receipt, badge: summary.quoteFollowUps },
     { id: "odooCrm" as Page, label: "CRM Odoo", icon: ClipboardList },
     { id: "products" as Page, label: "المنتجات", icon: Package },
     { id: "installations" as Page, label: "الصيانة", icon: Wrench, badge: summary.overdue },
@@ -463,12 +461,24 @@ export default function App() {
   if (!authed) return <EmailAuthPage notify={notify} />;
 
   const openPage = (nextPage: Page) => {
-    setPage(nextPage);
+    const billingTab = nextPage === "quotes" ? "quotes" : null;
+    const destination = nextPage === "quotes" ? "invoices" : nextPage;
+    setPage(destination);
     setSidebarOpen(false);
     const url = new URL(window.location.href);
-    if (nextPage === "dash") url.searchParams.delete("section");
-    else url.searchParams.set("section", nextPage);
+    if (destination === "dash") url.searchParams.delete("section");
+    else url.searchParams.set("section", destination);
+    if (billingTab) url.searchParams.set("billingTab", billingTab);
+    else url.searchParams.delete("billingTab");
+    url.searchParams.delete("invoiceId");
+    url.searchParams.delete("quoteId");
+    if (!["callSystem", "messages", "mobileOperations"].includes(destination)) {
+      for (const key of ["callTab", "page", "pageSize", "sortBy", "sortDirection"]) {
+        url.searchParams.delete(key);
+      }
+    }
     if (url.href !== window.location.href) window.history.pushState({}, "", url);
+    notifyBillingLocationChanged();
     window.requestAnimationFrame(() => document.getElementById("main-content")?.focus());
   };
 
@@ -510,8 +520,8 @@ export default function App() {
       />
     ),
     customers: <CustomersPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
-    quotes: <QuotesPage notify={notify} refreshStats={stats.refresh} />,
-    invoices: <InvoicesPage notify={notify} refreshStats={stats.refresh} />,
+    quotes: <BillingWorkspace notify={notify} refreshStats={stats.refresh} initialTab="quotes" />,
+    invoices: <BillingWorkspace notify={notify} refreshStats={stats.refresh} />,
     odooCrm: <OdooCrmPage notify={notify} go={openPage} canManagePublicLeads={canManagePublicLeads} />,
     products: <ProductsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,
     installations: <InstallationsPage notify={notify} refreshStats={stats.refresh} setModal={setModal} />,

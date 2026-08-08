@@ -33,6 +33,8 @@ type Notifier = (message: string, ok?: boolean) => void;
 type QuotesPageProps = {
   notify: Notifier;
   refreshStats: () => Promise<void>;
+  focusQuoteId?: string;
+  onOpenInvoice?: (invoiceId: string) => void;
 };
 
 const today = () => new Date().toLocaleDateString("en-CA");
@@ -398,13 +400,19 @@ function quoteShareText(quote: api.Quote) {
   ].filter(Boolean).join("\n");
 }
 
-export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
+export function QuotesPage({
+  notify,
+  refreshStats,
+  focusQuoteId = "",
+  onOpenInvoice,
+}: QuotesPageProps) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [editing, setEditing] = useState<api.Quote | null>(null);
   const [preview, setPreview] = useState<api.Quote | null>(null);
   const [creating, setCreating] = useState(false);
   const [sendingQuoteId, setSendingQuoteId] = useState("");
+  const [convertingQuoteId, setConvertingQuoteId] = useState("");
   const quotes = useAsyncData(() => api.getQuotes({ search, status }), [search, status]);
   const stats = quotes.data?.stats || {
     total: 0,
@@ -422,6 +430,18 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
     await Promise.all([quotes.refresh(), refreshStats()]);
   };
 
+  useEffect(() => {
+    if (!focusQuoteId || !quotes.data) return;
+    window.requestAnimationFrame(() => {
+      const element = document.getElementById(`quote-card-${focusQuoteId}`);
+      element?.focus({ preventScroll: true });
+      element?.scrollIntoView({
+        block: "center",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+  }, [focusQuoteId, quotes.data]);
+
   const saveQuote = async (payload: api.QuoteInput) => {
     if (editing) {
       await api.updateQuote(editing.id, payload);
@@ -436,6 +456,11 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
   };
 
   const setQuoteStatus = async (quote: api.Quote, nextStatus: api.QuoteStatus) => {
+    if (
+      nextStatus === "confirmed"
+      && quote.status !== "confirmed"
+      && !window.confirm("بعد التأكيد يصبح عرض السعر سجلًا ثابتًا ويمكن تحويله إلى فاتورة. هل تريد المتابعة؟")
+    ) return;
     try {
       await api.setQuoteStatus(
         quote.id,
@@ -588,7 +613,12 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
       ) : quotes.data?.data.length ? (
         <div className="quotes-list">
           {quotes.data.data.map((quote) => (
-            <article className="quote-card" key={quote.id}>
+            <article
+              className={`quote-card${focusQuoteId === quote.id ? " linked-document-target" : ""}`}
+              id={`quote-card-${quote.id}`}
+              key={quote.id}
+              tabIndex={-1}
+            >
               <div className="quote-card-main">
                 <div className="quote-title-line">
                   <strong>{quote.quote_number}</strong>
@@ -600,6 +630,17 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                   <span className="badge muted"><CalendarDays size={12} /> {quote.issue_date}</span>
                   {quote.valid_until && <span className="badge muted">صالح حتى {quote.valid_until}</span>}
                   {quote.follow_up_date && <span className="badge warn">متابعة {quote.follow_up_date}</span>}
+                  {quote.invoice_id && (
+                    <button
+                      className="badge success document-link-badge"
+                      type="button"
+                      aria-label={`فتح الفاتورة المرتبطة ${quote.invoice_number || quote.invoice_id}`}
+                      onClick={() => onOpenInvoice?.(quote.invoice_id!)}
+                    >
+                      <Receipt size={12} aria-hidden="true" />
+                      الفاتورة {quote.invoice_number || quote.invoice_id}
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="quote-total-box">
@@ -607,22 +648,40 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                 <strong>{money(quote.total, quote.currency)}</strong>
               </div>
               <div className="row-actions">
-                <button className="icon-btn gold" type="button" title="تحويل إلى فاتورة" onClick={async () => {
-                  try {
-                    const id = await api.convertQuoteToInvoice(quote.id);
-                    notify("تم تحويل عرض السعر إلى فاتورة ✓");
-                    await refreshAll();
-                  } catch (err) {
-                    notify(err instanceof Error ? err.message : "فشل تحويل عرض السعر", false);
-                  }
-                }}>
-                  <Receipt size={15} />
+                <button
+                  className="icon-btn gold"
+                  type="button"
+                  title={quote.invoice_id ? "فتح الفاتورة المرتبطة" : quote.status === "confirmed" ? "تحويل إلى فاتورة" : "أكد العرض أولًا"}
+                  aria-label={quote.invoice_id ? "فتح الفاتورة المرتبطة" : quote.status === "confirmed" ? "تحويل عرض السعر إلى فاتورة" : "أكد عرض السعر قبل تحويله إلى فاتورة"}
+                  disabled={!quote.invoice_id && (quote.status !== "confirmed" || convertingQuoteId === quote.id)}
+                  aria-busy={convertingQuoteId === quote.id || undefined}
+                  onClick={async () => {
+                    if (quote.invoice_id) {
+                      onOpenInvoice?.(quote.invoice_id);
+                      return;
+                    }
+                    setConvertingQuoteId(quote.id);
+                    try {
+                      const id = await api.convertQuoteToInvoice(quote.id);
+                      notify("تم تحويل عرض السعر إلى فاتورة وربط المستندين ✓");
+                      await refreshAll();
+                      onOpenInvoice?.(id);
+                    } catch (err) {
+                      notify(err instanceof Error ? err.message : "فشل تحويل عرض السعر", false);
+                    } finally {
+                      setConvertingQuoteId("");
+                    }
+                  }}
+                >
+                  {convertingQuoteId === quote.id
+                    ? <RefreshCcw size={15} className="spin" aria-hidden="true" />
+                    : <Receipt size={15} aria-hidden="true" />}
                 </button>
-                <button className="icon-btn success" type="button" title="تأكيد" onClick={() => setQuoteStatus(quote, "confirmed")}>
-                  <CheckCircle2 size={15} />
+                <button className="icon-btn success" type="button" title="تأكيد" aria-label="تأكيد عرض السعر" disabled={quote.status === "confirmed" || Boolean(quote.invoice_id)} onClick={() => setQuoteStatus(quote, "confirmed")}>
+                  <CheckCircle2 size={15} aria-hidden="true" />
                 </button>
-                <button className="icon-btn" type="button" title="متابعة" onClick={() => setQuoteStatus(quote, "follow_up")}>
-                  <Clock3 size={15} />
+                <button className="icon-btn" type="button" title="متابعة" aria-label="وضع عرض السعر في المتابعة" disabled={quote.status === "confirmed" || Boolean(quote.invoice_id)} onClick={() => setQuoteStatus(quote, "follow_up")}>
+                  <Clock3 size={15} aria-hidden="true" />
                 </button>
                 <button className="icon-btn" type="button" title="طباعة" onClick={() => printQuote(quote)}>
                   <Printer size={15} />
@@ -645,11 +704,11 @@ export function QuotesPage({ notify, refreshStats }: QuotesPageProps) {
                     <MessageCircle size={15} />
                   </button>
                 )}
-                <button className="icon-btn" type="button" title="تعديل" onClick={() => setEditing(quote)}>
-                  <Edit3 size={15} />
+                <button className="icon-btn" type="button" title="تعديل" aria-label="تعديل عرض السعر" disabled={quote.status === "confirmed" || Boolean(quote.invoice_id)} onClick={() => setEditing(quote)}>
+                  <Edit3 size={15} aria-hidden="true" />
                 </button>
-                <button className="icon-btn danger" type="button" title="حذف" onClick={() => remove(quote)}>
-                  <Trash2 size={15} />
+                <button className="icon-btn danger" type="button" title="حذف" aria-label="حذف عرض السعر" disabled={quote.status === "confirmed" || Boolean(quote.invoice_id)} onClick={() => remove(quote)}>
+                  <Trash2 size={15} aria-hidden="true" />
                 </button>
               </div>
             </article>

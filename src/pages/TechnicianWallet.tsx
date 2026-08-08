@@ -44,7 +44,12 @@ export default function TechnicianWalletPage({
   notify: (message: string, ok?: boolean) => void;
   setModal: (modal: ModalState) => void;
 }) {
-  const financials = useData(api.getFieldTechFinancials);
+  const fieldTechStatus = useData(api.getFieldTechStatus);
+  const financials = useData(
+    api.getFieldTechFinancials,
+    [fieldTechStatus.data?.configured],
+    fieldTechStatus.data?.configured === true,
+  );
   const [selectedId, setSelectedId] = useState("");
   const [rewardValues, setRewardValues] = useState<Record<api.FieldTechRewardRule["jobType"], number>>({ تركيب: 0, صيانة: 0, توصيل: 0 });
   const [busy, setBusy] = useState("");
@@ -117,15 +122,28 @@ export default function TechnicianWalletPage({
     });
   };
 
+  const refresh = async () => {
+    await fieldTechStatus.refresh();
+    if (fieldTechStatus.data?.configured) await financials.refresh();
+  };
+
   return (
     <>
       <PageHeader
         title="محفظة الفنيين"
         subtitle="المكافآت، الرصيد المستحق، طلبات السحب، وتوثيق الصرف من مكان واحد."
-        actions={<Button tone="muted" loading={financials.loading} onClick={financials.refresh}><RefreshCcw size={16} aria-hidden="true" /> تحديث</Button>}
+        actions={<Button tone="muted" loading={fieldTechStatus.loading || financials.loading} onClick={refresh}><RefreshCcw size={16} aria-hidden="true" /> تحديث</Button>}
       />
 
-      {financials.loading && !financials.data ? <Loading /> : financials.error ? <ErrorBlock message={financials.error} retry={financials.refresh} /> : !financials.data?.technicians.length ? (
+      {fieldTechStatus.loading && !fieldTechStatus.data ? <Loading /> : fieldTechStatus.error ? (
+        <ErrorBlock message={fieldTechStatus.error} retry={fieldTechStatus.refresh} />
+      ) : !fieldTechStatus.data?.configured ? (
+        <div className="empty" role="status">
+          <WalletCards size={30} aria-hidden="true" />
+          <p>{fieldTechStatus.data?.message || "لم يتم ربط خادم تطبيق الفني بعد."}</p>
+          <small>اضبط FIELDTECH_SERVER_URL وFIELDTECH_INTEGRATION_SECRET ثم اختبر الاتصال قبل تفعيل المحفظة.</small>
+        </div>
+      ) : financials.loading && !financials.data ? <Loading /> : financials.error ? <ErrorBlock message={financials.error} retry={financials.refresh} /> : !financials.data?.technicians.length ? (
         <Empty title="لا توجد حسابات فنيين مرتبطة بالتطبيق بعد" />
       ) : <>
         <section className="cards-grid" aria-label="ملخص محفظة الفنيين">

@@ -4294,3 +4294,60 @@ img.quote-cover-logo {
   .invoice-payment-summary-card { min-height: 68px; }
   .invoice-payment-invoice { grid-template-columns: 1fr; }
 }
+
+/* Unified billing workspace: invoices remain the canonical section while
+   quotes retain a stable, deep-linkable tab for backwards compatibility. */
+.billing-workspace,
+.billing-workspace-panel {
+  min-width: 0;
+}
+
+.billing-workspace-tabs {
+  display: flex;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+}
+
+.billing-workspace-tabs button,
+.document-link-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.document-link-badge {
+  border: 1px solid var(--line);
+  font: inherit;
+  cursor: pointer;
+}
+
+.document-link-badge:hover {
+  border-color: var(--gold);
+}
+
+.document-link-badge:focus-visible,
+.linked-document-target:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  outline-offset: 3px;
+}
+
+.linked-document-target {
+  border-color: color-mix(in srgb, var(--gold) 58%, var(--line));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--gold) 15%, transparent);
+}
+
+@media (max-width: 560px) {
+  .billing-workspace-tabs {
+    width: 100%;
+  }
+
+  .billing-workspace-tabs button {
+    flex: 1 0 auto;
+    min-height: 44px;
+  }
+}

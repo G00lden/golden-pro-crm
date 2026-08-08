@@ -225,3 +225,13 @@ ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
 ALTER TABLE IF EXISTS bookings ADD COLUMN IF NOT EXISTS parts JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE IF EXISTS store_orders ADD COLUMN IF NOT EXISTS customer_city TEXT;
 ALTER TABLE IF EXISTS store_orders ADD COLUMN IF NOT EXISTS customer_address TEXT;
+
+-- Billing document lineage (mirrors 20260808160000_billing_document_links.sql).
+ALTER TABLE IF EXISTS quotes ADD COLUMN IF NOT EXISTS invoice_id TEXT;
+ALTER TABLE IF EXISTS quotes ADD COLUMN IF NOT EXISTS invoice_number TEXT;
+ALTER TABLE IF EXISTS invoices ADD COLUMN IF NOT EXISTS quote_number TEXT;
+CREATE INDEX IF NOT EXISTS quotes_owner_invoice_idx ON quotes(owner_uid, invoice_id);
+CREATE INDEX IF NOT EXISTS invoices_owner_quote_idx ON invoices(owner_uid, quote_id);
+CREATE UNIQUE INDEX IF NOT EXISTS invoices_owner_quote_source_uidx
+  ON invoices(owner_uid, quote_id)
+  WHERE document_kind = 'invoice' AND NULLIF(BTRIM(quote_id), '') IS NOT NULL;

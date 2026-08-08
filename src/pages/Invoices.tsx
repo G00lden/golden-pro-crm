@@ -44,6 +44,8 @@ type Notifier = (message: string, ok?: boolean) => void;
 type InvoicesPageProps = {
   notify: Notifier;
   refreshStats: () => Promise<void>;
+  focusInvoiceId?: string;
+  onOpenQuote?: (quoteId: string) => void;
 };
 
 const today = () => new Date().toLocaleDateString("en-CA");
@@ -726,7 +728,12 @@ function invoiceShareText(invoice: api.Invoice) {
 
 /* ── Main Page ─────────────────────────────────────────── */
 
-export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
+export function InvoicesPage({
+  notify,
+  refreshStats,
+  focusInvoiceId = "",
+  onOpenQuote,
+}: InvoicesPageProps) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [editing, setEditing] = useState<api.Invoice | null>(null);
@@ -760,6 +767,18 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
   const refreshAll = async () => {
     await Promise.all([invoices.refresh(), invoicePayments.refresh(), refreshStats()]);
   };
+
+  useEffect(() => {
+    if (!focusInvoiceId || !invoices.data) return;
+    window.requestAnimationFrame(() => {
+      const element = document.getElementById(`invoice-card-${focusInvoiceId}`);
+      element?.focus({ preventScroll: true });
+      element?.scrollIntoView({
+        block: "center",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+  }, [focusInvoiceId, invoices.data]);
 
   useEffect(() => {
     if (paymentReconciliationStartedRef.current) return;
@@ -1322,7 +1341,12 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
       ) : invoices.data?.data.length ? (
         <div className="quotes-list">
           {invoices.data.data.map((invoice) => (
-            <article className="quote-card" key={invoice.id}>
+            <article
+              className={`quote-card${focusInvoiceId === invoice.id ? " linked-document-target" : ""}`}
+              id={`invoice-card-${invoice.id}`}
+              key={invoice.id}
+              tabIndex={-1}
+            >
               <div className="quote-card-main">
                 <div className="quote-title-line">
                   <strong>{invoice.invoice_number}</strong>
@@ -1354,6 +1378,17 @@ export function InvoicesPage({ notify, refreshStats }: InvoicesPageProps) {
                   )}
                   {invoiceIsCreditNote(invoice) && invoice.source_invoice_number && (
                     <span className="badge muted">مرتبط بـ {invoice.source_invoice_number}</span>
+                  )}
+                  {invoice.quote_id && (
+                    <button
+                      className="badge muted document-link-badge"
+                      type="button"
+                      aria-label={`فتح عرض السعر المرتبط ${invoice.quote_number || invoice.quote_id}`}
+                      onClick={() => onOpenQuote?.(invoice.quote_id!)}
+                    >
+                      <FileText size={12} aria-hidden="true" />
+                      عرض السعر {invoice.quote_number || invoice.quote_id}
+                    </button>
                   )}
                   {invoice.seller_vat_number && <span className="badge muted">VAT: {invoice.seller_vat_number}</span>}
                 </div>
