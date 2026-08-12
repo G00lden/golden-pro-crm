@@ -370,3 +370,15 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Rebuilt QA APK: `fanni-fieldtech-breexe-pro-v1.0.0-debug.apk`; SHA-256 `6996F0C92BBFF40097E274C1031730CB881A3DC3827D5D251EA15A20560C4C45`.
 - Production activation still requires deploying the FieldTech server over HTTPS, setting the same 32+ character integration secret on both services, applying the Supabase migration when applicable, and signing the final APK with a company-owned release keystore.
 - Full Arabic deployment and verification steps: `docs/fieldtech-integration-runbook-ar.md`.
+
+---
+
+## 2026-08-12 - INV90 private order reconciliation and guarded GA4 measurement [Codex]
+
+- Branch: `codex/inv90-tracking`.
+- Extended Salla order ingestion with currency, subtotal, shipping, tax, discount, coupon, payment status/method group, browser attribution, item variant and Salla product ID.
+- Kept customer name, phone and raw payment method private in `store_orders`; the GA4 builder deliberately excludes PII, raw payment detail and click IDs.
+- Added guarded GA4 Measurement Protocol delivery for `purchase` and `refund`: default disabled, strict debug validation mode, real browser `client_id` required, stable Salla order number as `transaction_id`, and durable delivery state for deduplication.
+- Added a private Google Ads click-ID match record, but no Ads API upload or conversion adjustment is claimed until account credentials and a real refund test are available.
+- Added authenticated `GET /api/store/reconciliation`, SQLite columns, Supabase migration, focused tests and Arabic runbook `docs/inv90-order-measurement-runbook-ar.md`.
+- Verification at handoff: analytics tests 10/10, TypeScript lint and production build pass. Production collection remains blocked until the checkout writes real GA4 client/session IDs and a low-value end-to-end order/refund proves <=5% reconciliation variance with no duplicate purchase.

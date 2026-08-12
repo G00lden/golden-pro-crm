@@ -4,6 +4,7 @@ import path from "path";
 import type { Request } from "express";
 import { adminDb } from "./firebaseAdmin";
 import { stageAssetsFromStoreOrder } from "./assetMaintenance";
+import { deliverOrderAnalytics } from "./orderAnalytics";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
 
@@ -35,6 +36,22 @@ export type StoreWebhookItem = {
   unitPrice?: number | null;
   totalPrice?: number | null;
   currency?: string | null;
+  variant?: string | null;
+  sallaProductId?: string | null;
+  coupon?: string | null;
+};
+
+export type StoreOrderAttribution = {
+  clientId?: string;
+  sessionId?: string;
+  gclid?: string;
+  gbraid?: string;
+  wbraid?: string;
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  utmContent?: string;
+  utmTerm?: string;
 };
 
 export type StoreWebhookOrder = {
@@ -51,6 +68,16 @@ export type StoreWebhookOrder = {
   scheduledDate?: string;
   scheduledTime?: string;
   total?: number;
+  subtotal?: number;
+  shipping?: number;
+  tax?: number;
+  discount?: number;
+  currency?: string;
+  coupon?: string;
+  paymentStatus?: string;
+  paymentTypeGroup?: string;
+  paymentMethodRaw?: string;
+  attribution?: StoreOrderAttribution;
   items: StoreWebhookItem[];
 };
 
@@ -61,6 +88,9 @@ type ImportedOrderItem = {
   unit_price?: number | null;
   total_price?: number | null;
   currency?: string | null;
+  variant?: string | null;
+  salla_product_id?: string | null;
+  coupon?: string | null;
   tags?: string[];
   order_type: StoreItemType;
   detected_type?: StoreItemType | null;
@@ -318,6 +348,63 @@ function tagsFrom(value: unknown): string[] {
   return [firstText(record.name, record.title, record.value, record.slug)].filter(Boolean);
 }
 
+function paymentTypeGroup(value: unknown) {
+  const raw = firstText(value).toLocaleLowerCase("en-US");
+  if (!raw) return "Other";
+  if (raw.includes("apple") || raw.includes("ابل") || raw.includes("آبل")) return "Apple Pay";
+  if (raw.includes("mada") || raw.includes("مدى")) return "Mada";
+  if (raw.includes("tamara") || raw.includes("تمارا")) return "Tamara";
+  if (raw.includes("tabby") || raw.includes("تابي")) return "Tabby";
+  if (raw.includes("stc")) return "STC Pay";
+  if (raw.includes("cod") || raw.includes("cash") || raw.includes("عند الاستلام") || raw.includes("نقد")) return "COD";
+  if (raw.includes("bank") || raw.includes("transfer") || raw.includes("تحويل")) return "Bank Transfer";
+  if (raw.includes("visa") || raw.includes("master") || raw.includes("card") || raw.includes("بطاق")) return "Card";
+  return "Other";
+}
+
+function firstCoupon(...values: unknown[]) {
+  for (const value of values) {
+    const direct = firstText(value);
+    if (direct) return direct;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const record = asRecord(item);
+        const found = firstText(record.code, record.coupon, record.name, record.value);
+        if (found) return found;
+      }
+    }
+    const record = asRecord(value);
+    const found = firstText(record.code, record.coupon, record.name, record.value);
+    if (found) return found;
+  }
+  return "";
+}
+
+function compactAttribution(values: StoreOrderAttribution): StoreOrderAttribution | undefined {
+  const entries = Object.entries(values)
+    .map(([key, value]) => [key, truncate(String(value || "").trim(), 500)] as const)
+    .filter(([, value]) => Boolean(value));
+  return entries.length ? Object.fromEntries(entries) as StoreOrderAttribution : undefined;
+}
+
+function parseAttribution(order: Record<string, unknown>, body: Record<string, unknown>, data: Record<string, unknown>) {
+  const metadata = asRecord(order.metadata || order.meta || order.tracking || order.attribution);
+  const analytics = asRecord(order.analytics || metadata.analytics);
+  const utm = asRecord(order.utm || metadata.utm || order.attribution);
+  return compactAttribution({
+    clientId: firstText(order.client_id, order.ga_client_id, analytics.client_id, metadata.client_id, metadata.ga_client_id),
+    sessionId: firstText(order.session_id, order.ga_session_id, analytics.session_id, metadata.session_id, metadata.ga_session_id),
+    gclid: firstText(order.gclid, metadata.gclid, utm.gclid, body.gclid, data.gclid),
+    gbraid: firstText(order.gbraid, metadata.gbraid, utm.gbraid, body.gbraid, data.gbraid),
+    wbraid: firstText(order.wbraid, metadata.wbraid, utm.wbraid, body.wbraid, data.wbraid),
+    utmSource: firstText(order.utm_source, metadata.utm_source, utm.utm_source, utm.source),
+    utmMedium: firstText(order.utm_medium, metadata.utm_medium, utm.utm_medium, utm.medium),
+    utmCampaign: firstText(order.utm_campaign, metadata.utm_campaign, utm.utm_campaign, utm.campaign),
+    utmContent: firstText(order.utm_content, metadata.utm_content, utm.utm_content, utm.content),
+    utmTerm: firstText(order.utm_term, metadata.utm_term, utm.utm_term, utm.term),
+  });
+}
+
 function dateOnly(value: unknown, fallback = new Date()) {
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const parsed =
@@ -414,6 +501,7 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
 
   const items = rawItems.map((item, index) => {
     const product = asRecord(item.product);
+    const variant = asRecord(item.variant);
     const name = firstText(item.name, item.title, item.product_name, product.name) || "منتج متجر";
     const sku =
       firstText(item.sku, item.SKU, item.product_sku, product.sku, product.SKU) ||
@@ -461,6 +549,9 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
       unitPrice: unitPrice ?? null,
       totalPrice: totalPrice ?? null,
       currency: truncate(firstText(item.currency, product.currency, at(item, "price.currency"), "SAR"), 12),
+      variant: truncate(firstText(item.variant_name, variant.name, variant.value, item.option_name, item.options), 120) || null,
+      sallaProductId: truncate(firstText(item.product_id, product.id, product.product_id, product.uuid), 100) || null,
+      coupon: truncate(firstCoupon(item.coupon, item.coupons, at(item, "amounts.coupon")), 100) || null,
       maintenanceMonths,
       orderType: classifyStoreItem(sku, tags, explicitType),
       tags: tags.map((tag) => truncate(tag, 80)),
@@ -477,6 +568,9 @@ function parseItems(order: Record<string, unknown>, provider: string, orderId: s
     unitPrice: null,
     totalPrice: null,
     currency: "SAR",
+    variant: null,
+    sallaProductId: null,
+    coupon: null,
     maintenanceMonths: Math.max(1, defaultMaintenanceMonths),
     orderType: classifyStoreItem(fallbackSku, [], ""),
     tags: [],
@@ -490,6 +584,14 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
   const customer = asRecord(order.customer || order.client || order.user || body.customer || data.customer);
   const shipping = asRecord(order.shipping || order.shipping_address || order.delivery || body.shipping);
   const billing = asRecord(order.billing || order.billing_address || body.billing);
+  const amounts = asRecord(order.amounts);
+  const amountTotal = asRecord(amounts.total);
+  const amountSubtotal = asRecord(amounts.sub_total || amounts.subtotal);
+  const amountShipping = asRecord(amounts.shipping_cost || amounts.shipping);
+  const amountTax = asRecord(amounts.tax);
+  const amountDiscount = asRecord(amounts.discounts || amounts.discount);
+  const payment = asRecord(order.payment || order.payment_method || order.gateway);
+  const paymentMethod = asRecord(order.payment_method);
 
   const provider = truncate(
     firstText(req.get("x-store-provider"), body.provider, body.source, order.provider) || "salla",
@@ -504,7 +606,7 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
       hash(rawBody.toString("utf8"), 24),
     80,
   );
-  const orderNumber = truncate(firstText(order.number, order.order_number, order.reference, orderId), 80);
+  const orderNumber = truncate(firstText(order.reference_id, order.number, order.order_number, order.reference, orderId), 80);
   const eventId = truncate(
     firstText(req.get("x-store-event-id"), body.event_id, body.id, data.event_id) ||
       `${provider}:${eventType}:${orderId}`,
@@ -567,7 +669,17 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
     orderDate,
     scheduledDate: scheduledDateRaw ? dateOnly(scheduledDateRaw) : undefined,
     scheduledTime,
-    total: optionalNumberValue(order.total, order.total_price, order.amount, at(order, "amounts.total.amount")),
+    total: optionalNumberValue(order.total, order.total_price, order.amount, amounts.total, amountTotal.amount),
+    subtotal: optionalNumberValue(order.subtotal, order.sub_total, amounts.sub_total, amountSubtotal.amount),
+    shipping: optionalNumberValue(order.shipping_cost, order.delivery_cost, amounts.shipping_cost, amountShipping.amount, shipping.cost),
+    tax: optionalNumberValue(order.tax, order.tax_amount, amounts.tax, amountTax.amount),
+    discount: optionalNumberValue(order.discount, order.discount_amount, amounts.discounts, amountDiscount.amount),
+    currency: truncate(firstText(order.currency, amountTotal.currency, amountSubtotal.currency, "SAR"), 12).toUpperCase(),
+    coupon: truncate(firstCoupon(order.coupon, order.coupons, order.coupon_code, amounts.coupon), 100),
+    paymentStatus: truncate(firstText(order.payment_status, payment.status, payment.state, body.payment_status), 80),
+    paymentMethodRaw: truncate(firstText(paymentMethod.name, paymentMethod.slug, order.payment_method, payment.name, payment.gateway, order.gateway), 120),
+    paymentTypeGroup: paymentTypeGroup(firstText(paymentMethod.name, paymentMethod.slug, order.payment_method, payment.name, payment.gateway, order.gateway)),
+    attribution: parseAttribution(order, body, data),
     items: parseItems(order, provider, orderId),
   };
 }
@@ -775,6 +887,9 @@ function hydrateImportedOrderItem(item: any): ImportedOrderItem {
     unit_price: optionalNumberValue(item?.unit_price) ?? null,
     total_price: optionalNumberValue(item?.total_price) ?? null,
     currency: item?.currency || null,
+    variant: item?.variant || null,
+    salla_product_id: item?.salla_product_id || null,
+    coupon: item?.coupon || null,
     tags: Array.isArray(item?.tags) ? item.tags.map((tag: unknown) => String(tag || "").trim()).filter(Boolean) : [],
     order_type: effectiveType,
     detected_type: isStoreItemType(item?.detected_type) ? item.detected_type : effectiveType,
@@ -795,6 +910,9 @@ function importedItemBase(item: StoreWebhookItem) {
     unit_price: item.unitPrice ?? null,
     total_price: item.totalPrice ?? (item.unitPrice !== undefined && item.unitPrice !== null ? item.unitPrice * item.quantity : null),
     currency: item.currency || "SAR",
+    variant: item.variant || null,
+    salla_product_id: item.sallaProductId || null,
+    coupon: item.coupon || null,
     tags: item.tags || [],
   };
 }
@@ -888,6 +1006,14 @@ function mergeImportedItemsWithExisting(nextItems: ImportedOrderItem[], existing
 
 function uniqueValues(values: unknown[]) {
   return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function mergeAttribution(existing: unknown, incoming: StoreOrderAttribution | undefined) {
+  const previous = asRecord(existing);
+  const next = Object.fromEntries(
+    Object.entries(incoming || {}).filter(([, value]) => Boolean(String(value || "").trim())),
+  );
+  return { ...previous, ...next };
 }
 
 async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<ImportedOrderResult> {
@@ -1131,6 +1257,16 @@ async function importStoreOrder(uid: string, order: StoreWebhookOrder): Promise<
     scheduled_time: order.scheduledTime || null,
     order_date: order.orderDate,
     total: order.total ?? null,
+    subtotal: order.subtotal ?? existingOrder.subtotal ?? null,
+    shipping: order.shipping ?? existingOrder.shipping ?? null,
+    tax: order.tax ?? existingOrder.tax ?? null,
+    discount: order.discount ?? existingOrder.discount ?? null,
+    currency: order.currency || existingOrder.currency || "SAR",
+    coupon: order.coupon || existingOrder.coupon || null,
+    payment_status: order.paymentStatus || existingOrder.payment_status || null,
+    payment_type_group: order.paymentTypeGroup || existingOrder.payment_type_group || null,
+    payment_method: order.paymentMethodRaw || existingOrder.payment_method || null,
+    attribution: mergeAttribution(existingOrder.attribution, order.attribution),
     imported_at: existingOrder.imported_at || now,
     last_event_at: now,
     updatedAt: now,
@@ -1479,6 +1615,16 @@ function localImportStoreOrder(data: LocalStoreDb, uid: string, order: StoreWebh
     scheduled_time: order.scheduledTime || null,
     order_date: order.orderDate,
     total: order.total ?? null,
+    subtotal: order.subtotal ?? existingOrder.subtotal ?? null,
+    shipping: order.shipping ?? existingOrder.shipping ?? null,
+    tax: order.tax ?? existingOrder.tax ?? null,
+    discount: order.discount ?? existingOrder.discount ?? null,
+    currency: order.currency || existingOrder.currency || "SAR",
+    coupon: order.coupon || existingOrder.coupon || null,
+    payment_status: order.paymentStatus || existingOrder.payment_status || null,
+    payment_type_group: order.paymentTypeGroup || existingOrder.payment_type_group || null,
+    payment_method: order.paymentMethodRaw || existingOrder.payment_method || null,
+    attribution: mergeAttribution(existingOrder.attribution, order.attribution),
     imported_at: existingOrder.imported_at || now,
     last_event_at: now,
     updatedAt: now,
@@ -1831,6 +1977,73 @@ export async function getStoreOrdersForUser(currentUid: string, type?: string) {
   return orders.filter((order: any) => Array.isArray(order.order_types) && order.order_types.includes(type));
 }
 
+export async function getStoreReconciliationForUser(
+  currentUid: string,
+  range: { from?: string; to?: string } = {},
+) {
+  const rows = await getStoreOrdersForUser(currentUid, "all");
+  const orders = (Array.isArray(rows) ? rows : []).filter((order: any) => {
+    const date = String(order.order_date || order.imported_at || "").slice(0, 10);
+    if (range.from && date && date < range.from) return false;
+    if (range.to && date && date > range.to) return false;
+    return true;
+  }).map((order: any) => {
+    const analytics = asRecord(order.analytics);
+    const purchase = asRecord(analytics.purchase);
+    const googleAds = asRecord(analytics.google_ads);
+    return {
+      order_id: order.order_id,
+      order_number: order.order_number,
+      order_date: order.order_date,
+      status: order.status,
+      customer_name: order.customer_name,
+      payment_method: order.payment_method,
+      payment_type_group: order.payment_type_group,
+      payment_status: order.payment_status,
+      currency: order.currency || "SAR",
+      total: optionalNumberValue(order.total) ?? null,
+      subtotal: optionalNumberValue(order.subtotal) ?? null,
+      shipping: optionalNumberValue(order.shipping) ?? null,
+      tax: optionalNumberValue(order.tax) ?? null,
+      discount: optionalNumberValue(order.discount) ?? null,
+      coupon: order.coupon || null,
+      attribution: order.attribution || {},
+      ga4_status: purchase.status || "not_attempted",
+      ga4_transaction_id: purchase.transaction_id || null,
+      google_ads_status: googleAds.status || "not_matched",
+      google_ads_transaction_id: googleAds.transaction_id || null,
+      items: Array.isArray(order.items) ? order.items.map((item: any) => ({
+        sku: item.sku,
+        salla_product_id: item.salla_product_id || null,
+        name: item.name,
+        variant: item.variant || null,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        total_price: item.total_price,
+      })) : [],
+    };
+  });
+
+  const money = (value: unknown) => optionalNumberValue(value) ?? 0;
+  const sallaValue = orders.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
+  const ga4Rows = orders.filter((order) => order.ga4_status === "sent");
+  const ga4Value = ga4Rows.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
+  return {
+    success: true,
+    private: true,
+    range: { from: range.from || null, to: range.to || null },
+    summary: {
+      order_count: orders.length,
+      salla_merchandise_value: sallaValue,
+      ga4_sent_order_count: ga4Rows.length,
+      ga4_sent_merchandise_value: ga4Value,
+      google_ads_matched_order_count: orders.filter((order) => order.google_ads_status !== "not_matched").length,
+      blocked_missing_client_id_count: orders.filter((order) => order.ga4_status === "blocked_missing_client_id").length,
+    },
+    orders,
+  };
+}
+
 export async function getStoreOrderForUser(currentUid: string, orderDocId: string) {
   if (localStoreFallbackEnabled()) return localStoreOrder(currentUid, orderDocId);
 
@@ -2112,11 +2325,16 @@ export async function processStoreWebhook(req: RawBodyRequest) {
   }, { merge: true });
 
   try {
-      const imported = await importStoreOrderForUser(ownerUid, order, {
+    const imported = await importStoreOrderForUser(ownerUid, order, {
         source: "salla",
         provider: order.provider,
         event_type: order.eventType,
       });
+    const orderDocId = getStoreOrderDocId(ownerUid, order.provider, order.orderId);
+    const analytics = await deliverOrderAnalytics(ownerUid, orderDocId, order).catch((analyticsError) => ({
+      status: "failed" as const,
+      error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
+    }));
     const processedAt = new Date().toISOString();
     await eventRef.set({
       createdBy: ownerUid,
@@ -2142,6 +2360,7 @@ export async function processStoreWebhook(req: RawBodyRequest) {
       order_id: order.orderId,
       order_number: order.orderNumber,
       imported,
+      analytics,
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

@@ -251,6 +251,8 @@ const jsonColumns = new Set([
   "image_urls",
   "variants",
   "parts",
+  "attribution",
+  "analytics",
 ]);
 
 function mapToColumn(key: string): string {

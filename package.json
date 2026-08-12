@@ -17,6 +17,7 @@
     "test:assets": "node --import tsx --test server/assetMaintenance.test.ts",
     "test:products": "node --import tsx --test server/productCatalog.test.ts",
     "test:fieldtech": "node --import tsx --test server/fieldtechIntegration.test.ts",
+    "test:analytics": "node --import tsx --test server/orderAnalyticsPayload.test.ts server/orderAnalytics.test.ts server/storeWebhookAnalytics.test.ts",
     "sync:salla-products": "node --import tsx scripts/sync-salla-products.ts",
     "doctor": "node scripts/doctor.mjs",
     "doctor:prod": "node scripts/doctor.mjs --production",

@@ -6,6 +6,7 @@ import {
   getStoreWebhookDiagnostics,
   getStoreOrdersForUser,
   getStoreOrderForUser,
+  getStoreReconciliationForUser,
   classifyStoreOrderItem,
   assignStoreOrderTechnician,
   linkStoreOrderInstallation,
@@ -104,6 +105,18 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
     asyncRoute(async (req, res) => {
       const userReq = req as AuthedRequest;
       res.json(await getStoreOrdersForUser(userReq.user.uid, String(req.query.type || "all")));
+    }),
+  );
+
+  app.get(
+    "/api/store/reconciliation",
+    requireFirebaseUser,
+    asyncRoute(async (req, res) => {
+      const userReq = req as AuthedRequest;
+      res.json(await getStoreReconciliationForUser(userReq.user.uid, {
+        from: String(req.query.from || "") || undefined,
+        to: String(req.query.to || "") || undefined,
+      }));
     }),
   );
 

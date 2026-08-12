@@ -10,6 +10,7 @@ import {
   type StoreItemType,
   type StoreWebhookOrder,
 } from "./storeWebhook";
+import { deliverOrderAnalytics } from "./orderAnalytics";
 import {
   buildProductDuplicateGroups,
   chooseCanonicalProduct,
@@ -684,6 +685,51 @@ function mapSallaProduct(remoteProduct: Record<string, any>, syncedAt: string) {
   };
 }
 
+function sallaPaymentTypeGroup(value: unknown) {
+  const raw = firstText(value).toLocaleLowerCase("en-US");
+  if (!raw) return "Other";
+  if (raw.includes("apple") || raw.includes("ابل") || raw.includes("آبل")) return "Apple Pay";
+  if (raw.includes("mada") || raw.includes("مدى")) return "Mada";
+  if (raw.includes("tamara") || raw.includes("تمارا")) return "Tamara";
+  if (raw.includes("tabby") || raw.includes("تابي")) return "Tabby";
+  if (raw.includes("stc")) return "STC Pay";
+  if (raw.includes("cod") || raw.includes("cash") || raw.includes("عند الاستلام") || raw.includes("نقد")) return "COD";
+  if (raw.includes("bank") || raw.includes("transfer") || raw.includes("تحويل")) return "Bank Transfer";
+  if (raw.includes("visa") || raw.includes("master") || raw.includes("card") || raw.includes("بطاق")) return "Card";
+  return "Other";
+}
+
+function sallaCoupon(value: unknown) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = firstText(asRecord(item).code, asRecord(item).name, asRecord(item).value);
+      if (found) return found;
+    }
+  }
+  const record = asRecord(value);
+  return firstText(value, record.code, record.name, record.value);
+}
+
+function sallaAttribution(remoteOrder: Record<string, any>) {
+  const metadata = asRecord(remoteOrder.metadata || remoteOrder.meta || remoteOrder.tracking || remoteOrder.attribution);
+  const analytics = asRecord(remoteOrder.analytics || metadata.analytics);
+  const utm = asRecord(remoteOrder.utm || metadata.utm || remoteOrder.attribution);
+  const attribution = {
+    clientId: firstText(remoteOrder.client_id, remoteOrder.ga_client_id, analytics.client_id, metadata.client_id, metadata.ga_client_id),
+    sessionId: firstText(remoteOrder.session_id, remoteOrder.ga_session_id, analytics.session_id, metadata.session_id, metadata.ga_session_id),
+    gclid: firstText(remoteOrder.gclid, metadata.gclid, utm.gclid),
+    gbraid: firstText(remoteOrder.gbraid, metadata.gbraid, utm.gbraid),
+    wbraid: firstText(remoteOrder.wbraid, metadata.wbraid, utm.wbraid),
+    utmSource: firstText(remoteOrder.utm_source, metadata.utm_source, utm.utm_source, utm.source),
+    utmMedium: firstText(remoteOrder.utm_medium, metadata.utm_medium, utm.utm_medium, utm.medium),
+    utmCampaign: firstText(remoteOrder.utm_campaign, metadata.utm_campaign, utm.utm_campaign, utm.campaign),
+    utmContent: firstText(remoteOrder.utm_content, metadata.utm_content, utm.utm_content, utm.content),
+    utmTerm: firstText(remoteOrder.utm_term, metadata.utm_term, utm.utm_term, utm.term),
+  };
+  const compact = Object.fromEntries(Object.entries(attribution).filter(([, value]) => Boolean(value)));
+  return Object.keys(compact).length ? compact : undefined;
+}
+
 async function relinkDirectProductReferences(
   uid: string,
   fromId: string,
@@ -793,6 +839,7 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
     asRecord(remoteOrder.details).items,
   ).map((item, index) => {
     const product = asRecord(item.product);
+    const variant = asRecord(item.variant);
     const itemPrice = asRecord(item.price);
     const itemAmounts = asRecord(item.amounts);
     const itemTotal = asRecord(item.total);
@@ -827,6 +874,9 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       unitPrice: unitPrice ?? null,
       totalPrice: totalPrice ?? null,
       currency: truncate(firstText(item.currency, itemPrice.currency, itemAmounts.currency, product.currency, productPrice.currency, "SAR"), 12),
+      variant: truncate(firstText(item.variant_name, variant.name, variant.value, item.option_name), 120) || null,
+      sallaProductId: truncate(firstText(item.product_id, product.id, product.product_id, product.uuid), 100) || null,
+      coupon: truncate(sallaCoupon(item.coupon || item.coupons || itemAmounts.coupon), 100) || null,
       maintenanceMonths: Math.max(1, Number.isFinite(maintenanceMonths) ? maintenanceMonths : 3),
       orderType: classifyItemType(sku, tags, explicitType),
       tags,
@@ -854,6 +904,21 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
   const orderId = firstText(remoteOrder.id, remoteOrder.order_id, remoteOrder.reference_id);
   if (!orderId) return null;
   const amounts = asRecord(remoteOrder.amounts);
+  const amountTotal = asRecord(amounts.total);
+  const amountSubtotal = asRecord(amounts.sub_total || amounts.subtotal);
+  const amountShipping = asRecord(amounts.shipping_cost || amounts.shipping);
+  const amountTax = asRecord(amounts.tax);
+  const amountDiscount = asRecord(amounts.discounts || amounts.discount);
+  const payment = asRecord(remoteOrder.payment || remoteOrder.payment_method || remoteOrder.gateway);
+  const paymentMethod = asRecord(remoteOrder.payment_method);
+  const paymentMethodRaw = truncate(firstText(
+    paymentMethod.name,
+    paymentMethod.slug,
+    remoteOrder.payment_method,
+    payment.name,
+    payment.gateway,
+    remoteOrder.gateway,
+  ), 120);
 
   return {
     provider: "salla",
@@ -894,6 +959,16 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       amounts.total,
       asRecord(amounts.total).amount,
     ),
+    subtotal: optionalNumberValue(remoteOrder.subtotal, remoteOrder.sub_total, amounts.sub_total, amountSubtotal.amount),
+    shipping: optionalNumberValue(remoteOrder.shipping_cost, remoteOrder.delivery_cost, amounts.shipping_cost, amountShipping.amount, shipping.cost),
+    tax: optionalNumberValue(remoteOrder.tax, remoteOrder.tax_amount, amounts.tax, amountTax.amount),
+    discount: optionalNumberValue(remoteOrder.discount, remoteOrder.discount_amount, amounts.discounts, amountDiscount.amount),
+    currency: truncate(firstText(remoteOrder.currency, amountTotal.currency, amountSubtotal.currency, "SAR"), 12).toUpperCase(),
+    coupon: truncate(sallaCoupon(remoteOrder.coupon || remoteOrder.coupons || remoteOrder.coupon_code || amounts.coupon), 100),
+    paymentStatus: truncate(firstText(remoteOrder.payment_status, payment.status, payment.state), 80),
+    paymentTypeGroup: sallaPaymentTypeGroup(paymentMethodRaw),
+    paymentMethodRaw,
+    attribution: sallaAttribution(remoteOrder),
     items: items.length ? items : [{
       name: "Salla order",
       sku: `SALLA-${orderId}`,
@@ -901,6 +976,9 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
       unitPrice: null,
       totalPrice: null,
       currency: "SAR",
+      variant: null,
+      sallaProductId: null,
+      coupon: null,
       maintenanceMonths: 3,
       orderType: "needs_review",
       tags: [],
@@ -1183,11 +1261,28 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
   // Salla pushes order.* lifecycle events to the app webhook URL. Forward
   // them through the shared store-webhook normalizer so they land in
   // store_orders alongside the records Salla sync imports later.
-  if (event === "order.created" || event === "order.updated" || event === "order.refunded" || event === "order.cancelled") {
+  if (
+    event === "order.created" ||
+    event === "order.updated" ||
+    event === "order.status.updated" ||
+    event === "order.products.updated" ||
+    event === "order.payment.updated" ||
+    event === "order.coupon.updated" ||
+    event === "order.total.price.updated" ||
+    event === "order.refunded" ||
+    event === "order.cancelled"
+  ) {
     try {
       const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body ?? ""));
       const order = normalizeStorePayload(req, rawBody);
       const imported = await importStoreOrderForUser(uid, order);
+      // Analytics is fail-open: the private CRM order must remain imported even
+      // when GA4 is disabled, lacks browser attribution, or is temporarily down.
+      const orderDocId = getStoreOrderDocId(uid, order.provider, order.orderId);
+      const analytics = await deliverOrderAnalytics(uid, orderDocId, order).catch((analyticsError) => ({
+        status: "failed" as const,
+        error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
+      }));
       return {
         success: true,
         event,
@@ -1195,6 +1290,7 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
         order_id: order.orderId,
         order_number: order.orderNumber,
         imported,
+        analytics,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
