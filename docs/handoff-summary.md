@@ -679,3 +679,14 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Advanced SQLite to schema `11003` and added Supabase migration `20260805170000_periodic_maintenance_kits.sql`.
 - Pre-deploy verification passed: `451/451` unit tests, schema migration tests, TypeScript lint, production build, and source security audit. Isolated desktop and 390px browser QA confirmed both request types, conditional labels and requirements, no employee link, and no horizontal overflow. The lifecycle test also proved that a forged Breez Air cells kit is rejected for a 7-stage RO device while the exact filter bundle succeeds.
 - Browser QA used synthetic local state with outbound traffic disabled. No real customer record or external OTP message was created.
+---
+
+## 2026-08-12 - INV90 private order reconciliation and guarded GA4 measurement [Codex]
+
+- Branch: `codex/inv90-tracking`.
+- Extended Salla order ingestion with currency, subtotal, shipping, tax, discount, coupon, payment status/method group, browser attribution, item variant and Salla product ID.
+- Kept customer name, phone and raw payment method private in `store_orders`; the GA4 builder deliberately excludes PII, raw payment detail and click IDs.
+- Added guarded GA4 Measurement Protocol delivery for `purchase` and `refund`: default disabled, strict debug validation mode, real browser `client_id` required, stable Salla order number as `transaction_id`, and durable delivery state for deduplication.
+- Added a private Google Ads click-ID match record, but no Ads API upload or conversion adjustment is claimed until account credentials and a real refund test are available.
+- Added authenticated `GET /api/store/reconciliation`, SQLite columns, Supabase migration, focused tests and Arabic runbook `docs/inv90-order-measurement-runbook-ar.md`.
+- Verification at handoff: analytics tests 10/10, TypeScript lint and production build pass. Production collection remains blocked until the checkout writes real GA4 client/session IDs and a low-value end-to-end order/refund proves <=5% reconciliation variance with no duplicate purchase.

@@ -371,6 +371,8 @@ const jsonColumns = new Set([
   "parts",
   "slot_times",
   "closed_weekdays",
+  "attribution",
+  "analytics",
 ]);
 
 function mapToColumn(key: string): string {
