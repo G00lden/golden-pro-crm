@@ -9,14 +9,20 @@
 - لا يخترع `client_id`. إذا لم تنقل واجهة المتجر `client_id` الحقيقي من جلسة الشراء إلى الطلب، يسجل `blocked_missing_client_id` ولا يرسل الحدث.
 - يحتفظ بسجل مطابقة Google Ads خاص عندما يصل أحد `gclid` أو `gbraid` أو `wbraid`. الحالة تبقى `pending_configuration` أو `pending_adjustment`؛ هذا الفرع لا يدّعي رفع تحويل أو تعديل قيمة إلى Google Ads API.
 
-## الحقول المطلوبة من واجهة سلة
+## ملتقط واجهة سلة
 
-يجب أن تكتب App Function/Checkout extension، بعد موافقة القياس، الحقول التالية في metadata الطلب قبل اكتماله:
+- ملف الإنتاج هو `https://crm.breexe-pro.com/inv90-tracker.js` ويضاف في بوابة شركاء سلة كـApp Snippet.
+- يسجل نفسه عبر `Salla.analytics.registerTracker` ويستجيب فقط لحدث `Order Completed` الرسمي.
+- لا يقرأ أو يرسل الاسم أو الهاتف أو البريد أو طريقة الدفع. لا يبدأ الالتقاط إلا عند وجود كوكي `_ga`، ثم يرسل الحقول التالية إلى `POST /api/storefront/order-attribution`:
 
 ```json
 {
-  "ga_client_id": "123456789.987654321",
-  "ga_session_id": "1723456789",
+  "order_id": "123456789",
+  "checkout_id": "...",
+  "total": 199,
+  "currency": "SAR",
+  "client_id": "123456789.987654321",
+  "session_id": "1723456789",
   "gclid": "...",
   "gbraid": "...",
   "wbraid": "...",
@@ -26,7 +32,7 @@
 }
 ```
 
-لا ترسل الاسم أو الهاتف أو البريد أو مرجع الدفع إلى GA4. البريد والهاتف المجزآن لـEnhanced Conversions يحتاجان مسارًا منفصلًا وموافقة وسياسة واضحة.
+المسار يقبل فقط أصل المتجر المسموح، ويحتاج `STORE_WEBHOOK_OWNER_UID`، ويرفض الربط ما لم يكن رقم الطلب موجودًا فعلًا في سجل CRM وكانت قيمة الطلب وعملته مطابقتين للسجل الموثوق. يعيد الملتقط المحاولة بتأخير متزايد إذا سبق حدث المتصفح وصول Webhook سلة. لا ترسل الاسم أو الهاتف أو البريد أو مرجع الدفع إلى GA4. البريد والهاتف المجزآن لـEnhanced Conversions يحتاجان مسارًا منفصلًا وموافقة وسياسة واضحة.
 
 ## أوضاع GA4 الآمنة
 
@@ -34,6 +40,7 @@
 GA4_MEASUREMENT_MODE=disabled
 GA4_MEASUREMENT_ID=G-XXXXXXXXXX
 GA4_API_SECRET=secret_from_ga4
+STORE_ATTRIBUTION_ALLOWED_ORIGINS=https://goldenksa.store
 ```
 
 1. ابدأ بـ`disabled`: حفظ خاص فقط، ولا اتصال بـGoogle.

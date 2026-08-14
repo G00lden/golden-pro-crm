@@ -35,7 +35,7 @@
     "sync:salla-products:dev": "node --import tsx scripts/sync-salla-products.ts",
     "test:gateway-pairing": "node --import tsx --test server/gatewayPairing.test.ts",
     "test:fieldtech": "node --import tsx --test server/fieldtechIntegration.test.ts",
-    "test:analytics": "node --import tsx --test --test-concurrency=1 server/orderAnalyticsPayload.test.ts server/orderAnalytics.test.ts server/storeWebhookAnalytics.test.ts",
+    "test:analytics": "node --import tsx --test --test-concurrency=1 server/orderAnalyticsPayload.test.ts server/orderAnalytics.test.ts server/storeWebhookAnalytics.test.ts server/storefrontAttribution.test.ts",
     "doctor": "node scripts/doctor.mjs",
     "doctor:prod": "node scripts/doctor.mjs --production",
     "env:prod": "node scripts/create-production-env.mjs",
@@ -108,6 +108,8 @@
   "overrides": {
     "protobufjs": "7.6.5",
     "brace-expansion": "2.1.4",
+    "dompurify": "3.4.13",
+    "nanoid": "3.3.18",
     "postcss": "8.5.25",
     "tsx": {
       "esbuild": "0.28.1"

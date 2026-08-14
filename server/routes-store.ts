@@ -1,4 +1,4 @@
-import type { Express, Request, Response, NextFunction } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { appendFileSync } from "fs";
 import path from "path";
 import {
@@ -15,6 +15,12 @@ import { requireFirebaseUser, type AuthedRequest } from "./auth";
 import { validate, storeWebhookSchema } from "./validation";
 import { storeOrderRealtimeListenerCount, subscribeStoreOrderChanges } from "./storeOrderRealtime";
 import { getStoreOrderPageForUser, normalizeStoreOrderRemoteFields } from "./storeOrderQuery";
+import {
+  attachStorefrontOrderAttribution,
+  normalizeStorefrontOrderAttribution,
+  resolveStorefrontAttributionOwnerUid,
+  storefrontAttributionOriginAllowed,
+} from "./storefrontAttribution";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -64,6 +70,41 @@ export interface StoreRouteOptions {
 
 export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
   const { webhookRateLimit } = options;
+
+  const allowStorefrontOrigin = (req: Request, res: Response, next: NextFunction) => {
+    const origin = req.get("origin") || "";
+    if (!storefrontAttributionOriginAllowed(origin)) {
+      res.status(403).json({ error: "Storefront origin is not allowed." });
+      return;
+    }
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    next();
+  };
+
+  app.options("/api/storefront/order-attribution", allowStorefrontOrigin, (_req, res) => {
+    res.status(204).end();
+  });
+
+  app.post(
+    "/api/storefront/order-attribution",
+    webhookRateLimit,
+    allowStorefrontOrigin,
+    express.text({ type: "text/plain", limit: "16kb" }),
+    asyncRoute(async (req, res) => {
+      const ownerUid = resolveStorefrontAttributionOwnerUid();
+      if (!ownerUid) {
+        res.status(503).json({ error: "Storefront attribution is not configured." });
+        return;
+      }
+      const input = normalizeStorefrontOrderAttribution(req.body);
+      const result = await attachStorefrontOrderAttribution(ownerUid, input);
+      res.setHeader("Cache-Control", "no-store");
+      res.status(200).json(result);
+    }),
+  );
 
   app.post(
     "/api/store/webhook",

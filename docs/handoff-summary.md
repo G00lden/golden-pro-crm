@@ -690,3 +690,13 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Added a private Google Ads click-ID match record, but no Ads API upload or conversion adjustment is claimed until account credentials and a real refund test are available.
 - Added authenticated `GET /api/store/reconciliation`, SQLite columns, Supabase migration, focused tests and Arabic runbook `docs/inv90-order-measurement-runbook-ar.md`.
 - Verification at handoff: analytics tests 10/10, TypeScript lint and production build pass. Production collection remains blocked until the checkout writes real GA4 client/session IDs and a low-value end-to-end order/refund proves <=5% reconciliation variance with no duplicate purchase.
+
+## 2026-08-14 - INV90 production-aligned storefront attribution [Codex]
+
+- Rebased the guarded INV90 measurement work onto the actual live production lineage `codex/maintenance-customer-experience` instead of the stale default branch, preserving release `2.0.2` and the current Salla realtime pipeline.
+- Added the privacy-minimised Salla Device Mode tracker at `/inv90-tracker.js`. It listens only for the official `Order Completed` event and sends no customer name, phone, email, payment reference, or raw payment method.
+- Added a rate-limited, exact-origin storefront attribution endpoint. It accepts attribution only after the Salla webhook has created the authoritative owner-scoped order and the order number, positive total, and `SAR` currency all match; arbitrary pending records are never persisted.
+- The tracker requires a consented GA browser client ID, preserves Google click IDs and UTMs only in session storage, retries boundedly when the browser event precedes the webhook, and keeps GA4 purchase deduplication on the unique Salla transaction ID.
+- Supply-chain overrides moved `nanoid` to `3.3.18` and `dompurify` to `3.4.13`; a full `npm audit` now reports zero known vulnerabilities.
+- Verification passed: `467/467` unit tests, `14/14` analytics tests, TypeScript lint, production build, JavaScript syntax, diff whitespace, and source security audit with zero secret findings.
+- Production remains intentionally unpublished until an independent PR review completes, the GA4 Measurement Protocol secret and Salla App Snippet are configured, and a real low-value order plus refund proves one purchase, SKU/value parity, and no PII leakage before any Google Ads campaign is enabled.
