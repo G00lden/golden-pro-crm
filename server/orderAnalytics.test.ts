@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sendGa4OrderEvent, type Ga4MeasurementConfig } from "./orderAnalytics";
+import { deliverOrderAnalytics, sendGa4OrderEvent, type Ga4MeasurementConfig } from "./orderAnalytics";
 import type { AnalyticsOrder } from "./orderAnalyticsPayload";
 
 const sample: AnalyticsOrder = {
@@ -58,4 +58,113 @@ test("surfaces strict validation messages without claiming delivery", async () =
   }), { status: 200, headers: { "content-type": "application/json" } }));
   assert.equal(result.status, "validation_failed");
   assert.equal(result.validation_messages?.length, 1);
+});
+
+function fakeOrderRef(initial: Record<string, unknown> = {}) {
+  let record: Record<string, unknown> = {
+    createdBy: "owner-a",
+    analytics: {},
+    analytics_reservation_token: null,
+    analytics_reservation_key: null,
+    analytics_reservation_at: null,
+    ...initial,
+  };
+  return {
+    get: async () => ({
+      exists: true,
+      data: () => structuredClone(record),
+    }),
+    compareAndSet: async (expected: Record<string, unknown>, patch: Record<string, unknown>) => {
+      const matches = Object.entries(expected).every(([key, value]) => (
+        value === null || value === undefined
+          ? record[key] === null || record[key] === undefined
+          : record[key] === value
+      ));
+      if (!matches) return false;
+      record = { ...record, ...structuredClone(patch) };
+      return true;
+    },
+    data: () => structuredClone(record),
+  };
+}
+
+const collect: Ga4MeasurementConfig = { ...configured, mode: "collect" };
+
+test("atomically permits only one concurrent purchase delivery", async () => {
+  const ref = fakeOrderRef();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response(null, { status: 204 });
+  };
+  const results = await Promise.all([
+    deliverOrderAnalytics("owner-a", "order-1", sample, collect, fetchImpl, ref),
+    deliverOrderAnalytics("owner-a", "order-1", sample, collect, fetchImpl, ref),
+  ]);
+
+  assert.equal(calls, 1);
+  assert.deepEqual(results.map((result) => result.status).sort(), ["ignored", "sent"]);
+  assert.equal((ref.data().analytics as any).purchase.status, "sent");
+});
+
+test("deduplicates a full refund across cancelled and refunded webhooks", async () => {
+  const ref = fakeOrderRef();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  };
+  const cancelled = await deliverOrderAnalytics(
+    "owner-a",
+    "order-1",
+    { ...sample, eventType: "order.cancelled", eventId: "cancel-1" },
+    collect,
+    fetchImpl,
+    ref,
+  );
+  const refunded = await deliverOrderAnalytics(
+    "owner-a",
+    "order-1",
+    { ...sample, eventType: "order.refunded", eventId: "refund-1" },
+    collect,
+    fetchImpl,
+    ref,
+  );
+
+  assert.equal(cancelled.status, "sent");
+  assert.equal(refunded.status, "ignored");
+  assert.equal(calls, 1);
+  assert.equal((ref.data().analytics as any).refund_full.status, "sent");
+});
+
+test("allows a validated event to be collected after mode switches to collect", async () => {
+  const ref = fakeOrderRef();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return calls === 1
+      ? new Response(JSON.stringify({ validationMessages: [] }), { status: 200 })
+      : new Response(null, { status: 204 });
+  };
+
+  const validation = await deliverOrderAnalytics("owner-a", "order-1", sample, configured, fetchImpl, ref);
+  const delivery = await deliverOrderAnalytics("owner-a", "order-1", sample, collect, fetchImpl, ref);
+  assert.equal(validation.status, "validated");
+  assert.equal(delivery.status, "sent");
+  assert.equal(calls, 2);
+});
+
+test("fails closed after an ambiguous network delivery error", async () => {
+  const ref = fakeOrderRef();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    throw new Error("socket closed after upload");
+  };
+  const first = await deliverOrderAnalytics("owner-a", "order-1", sample, collect, fetchImpl, ref);
+  const second = await deliverOrderAnalytics("owner-a", "order-1", sample, collect, fetchImpl, ref);
+  assert.equal(first.status, "delivery_unknown");
+  assert.equal(second.status, "ignored");
+  assert.equal(calls, 1);
 });

@@ -182,6 +182,24 @@ if (scenario === "previous-11003") {
   previous.close();
 }
 
+if (scenario === "previous-11004") {
+  const previous = new Database(dbPath);
+  previous.pragma("user_version = 11004");
+  previous.exec(`
+    CREATE TABLE store_orders (
+      id TEXT PRIMARY KEY,
+      owner_uid TEXT NOT NULL,
+      order_id TEXT,
+      order_date TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    INSERT INTO store_orders (id, owner_uid, order_id, order_date)
+    VALUES ('inv90-order', 'owner', 'SALLA-INV90', '2026-08-12');
+  `);
+  previous.close();
+}
+
 const { default: db } = await import("../server/db");
 
 function columns(table: string) {
@@ -264,7 +282,21 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 11004) throw new Error(`Expected schema 11004, got ${userVersion}`);
+if (userVersion !== 11005) throw new Error(`Expected schema 11005, got ${userVersion}`);
+for (const required of [
+  "analytics_reservation_token",
+  "analytics_reservation_key",
+  "analytics_reservation_at",
+]) {
+  if (!columns("store_orders").has(required)) throw new Error(`store_orders.${required} is missing`);
+}
+if (!indexes("store_orders").has("idx_store_orders_owner_order_date")) {
+  throw new Error("idx_store_orders_owner_order_date is missing");
+}
+if (scenario === "previous-11004") {
+  const order = db.prepare("SELECT order_id FROM store_orders WHERE id = 'inv90-order'").get() as { order_id?: string };
+  if (order.order_id !== "SALLA-INV90") throw new Error("The prior INV90 order was not preserved.");
+}
 const attachmentTable = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_request_attachments'").get() as { sql?: string };
 if (!attachmentTable.sql?.includes("'document'")) throw new Error("Maintenance invoice document kind is missing.");
 if (scenario === "previous-11003") {

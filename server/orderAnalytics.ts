@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { adminDb } from "./firebaseAdmin";
+import { compareAndSetDocument } from "./atomicDocumentUpdate";
 import {
   buildGa4CommerceEvent,
   buildGa4MeasurementBody,
@@ -24,6 +26,7 @@ export type AnalyticsDeliveryResult = {
     | "validated"
     | "validation_failed"
     | "sent"
+    | "delivery_unknown"
     | "failed";
   event_name?: "purchase" | "refund";
   transaction_id?: string;
@@ -107,22 +110,26 @@ export async function sendGa4OrderEvent(
 
     return { status: "sent", ...base, http_status: response.status };
   } catch (error) {
-    return { status: "failed", ...base, error: safeError(error) };
+    // A network failure can happen after Google accepted the request. Treat it
+    // as terminal and require manual reconciliation instead of risking a
+    // duplicate purchase or refund on an automatic retry.
+    return { status: "delivery_unknown", ...base, error: safeError(error) };
   }
 }
 
 function deliveryKey(result: AnalyticsDeliveryResult, order: AnalyticsOrder) {
   if (result.event_name === "refund") {
-    const suffix = String(order.eventId || "refund").replace(/[^A-Za-z0-9_-]/g, "_").slice(-80);
-    return `refund_${suffix}`;
+    return "refund_full";
   }
   return "purchase";
 }
 
-function isTerminalDelivery(value: unknown) {
+function isTerminalDelivery(value: unknown, mode: Ga4MeasurementMode) {
   if (!value || typeof value !== "object") return false;
   const status = String((value as Record<string, unknown>).status || "");
-  return status === "sent" || status === "validated";
+  return status === "sent"
+    || status === "delivery_unknown"
+    || (status === "validated" && mode === "validate");
 }
 
 function numberOrUndefined(value: unknown) {
@@ -170,10 +177,17 @@ export async function deliverOrderAnalytics(
   order: AnalyticsOrder,
   config: Ga4MeasurementConfig = ga4MeasurementConfigFromEnv(),
   fetchImpl: typeof fetch = fetch,
+  orderRefOverride?: unknown,
 ) {
-  const orderRef = adminDb.collection("store_orders").doc(orderDocId);
-  const orderDoc = await orderRef.get();
+  const orderRef = orderRefOverride || adminDb.collection("store_orders").doc(orderDocId);
+  const typedOrderRef = orderRef as {
+    get: () => Promise<{ exists: boolean; data: () => Record<string, any> }>;
+  };
+  const orderDoc = await typedOrderRef.get();
   const saved = orderDoc.exists ? orderDoc.data() || {} : {};
+  if (!orderDoc.exists || String(saved.createdBy || saved.owner_uid || "") !== uid) {
+    return { status: "ignored" as const };
+  }
   const analytics = saved.analytics && typeof saved.analytics === "object"
     ? { ...(saved.analytics as Record<string, unknown>) }
     : {};
@@ -184,7 +198,7 @@ export async function deliverOrderAnalytics(
   const key = preview.name === "purchase"
     ? "purchase"
     : deliveryKey({ status: "ignored", event_name: preview.name }, effectiveOrder);
-  if (isTerminalDelivery(analytics[key])) {
+  if (isTerminalDelivery(analytics[key], config.mode)) {
     return {
       status: "ignored" as const,
       duplicate: true,
@@ -193,11 +207,49 @@ export async function deliverOrderAnalytics(
     };
   }
 
+  const currentReservation = String(saved.analytics_reservation_token || "");
+  if (currentReservation) {
+    return {
+      status: "ignored" as const,
+      duplicate: true,
+      in_flight: true,
+      event_name: preview.name,
+      transaction_id: String(preview.params.transaction_id || ""),
+    };
+  }
+
+  const reservationToken = randomUUID();
+  const reservedAt = new Date().toISOString();
+  const reserved = await compareAndSetDocument(
+    orderRef,
+    { analytics_reservation_token: saved.analytics_reservation_token ?? null },
+    {
+      analytics_reservation_token: reservationToken,
+      analytics_reservation_key: key,
+      analytics_reservation_at: reservedAt,
+      updatedAt: reservedAt,
+    },
+  );
+  if (!reserved) {
+    return {
+      status: "ignored" as const,
+      duplicate: true,
+      in_flight: true,
+      event_name: preview.name,
+      transaction_id: String(preview.params.transaction_id || ""),
+    };
+  }
+
   const result = await sendGa4OrderEvent(effectiveOrder, config, fetchImpl);
   const now = new Date().toISOString();
   const googleAdsMatch = buildGoogleAdsMatchRecord(effectiveOrder);
+  const latestDoc = await typedOrderRef.get();
+  const latestSaved = latestDoc.exists ? latestDoc.data() || {} : {};
+  const latestAnalytics = latestSaved.analytics && typeof latestSaved.analytics === "object"
+    ? { ...(latestSaved.analytics as Record<string, unknown>) }
+    : {};
   const nextAnalytics: Record<string, unknown> = {
-    ...analytics,
+    ...latestAnalytics,
     [deliveryKey(result, effectiveOrder)]: {
       ...result,
       attempted_at: now,
@@ -212,6 +264,22 @@ export async function deliverOrderAnalytics(
     };
   }
 
-  await orderRef.set({ analytics: nextAnalytics, updatedAt: now }, { merge: true });
+  const finalized = await compareAndSetDocument(
+    orderRef,
+    {
+      analytics_reservation_token: reservationToken,
+      analytics_reservation_key: key,
+    },
+    {
+      analytics: nextAnalytics,
+      analytics_reservation_token: null,
+      analytics_reservation_key: null,
+      analytics_reservation_at: null,
+      updatedAt: now,
+    },
+  );
+  if (!finalized) {
+    throw new Error("Analytics delivery completed but its reservation could not be finalized.");
+  }
   return result;
 }

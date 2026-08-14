@@ -28,7 +28,7 @@
       var value = decodeURIComponent(pair.slice(1).join("="));
       var legacy = value.match(/^GS\d+\.\d+\.(\d+)/);
       if (legacy) return legacy[1];
-      var current = value.match(/(?:^|\$)s(\d{6,20})(?:\$|$)/);
+      var current = value.match(/(?:^|[.$])s(\d{6,20})(?:[.$]|$)/);
       if (current) return current[1];
     }
     return "";

@@ -69,6 +69,22 @@ test("Supabase adapter stops after the first short page", async () => {
   });
 });
 
+test("Supabase adapter applies caller offsets to bounded queries", async () => {
+  await withMockedSupabase(2_000, async (calls) => {
+    const snapshot = await createSupabaseFirestoreAdapter()
+      .collection("customers")
+      .orderBy("name")
+      .offset(500)
+      .limit(250)
+      .get();
+
+    assert.equal(snapshot.size, 250);
+    assert.equal(calls[0].searchParams.get("offset"), "500");
+    assert.equal(calls[0].searchParams.get("limit"), "250");
+    assert.equal(calls[0].searchParams.get("order"), "name.asc,id.asc");
+  });
+});
+
 test("Supabase adapter allocates invoice counters through the atomic RPC", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.SUPABASE_URL;

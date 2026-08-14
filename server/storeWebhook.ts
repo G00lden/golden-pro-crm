@@ -2818,11 +2818,45 @@ export async function getStoreOrdersForUser(currentUid: string, type?: string) {
   return orders.filter((order: any) => Array.isArray(order.order_types) && order.order_types.includes(type));
 }
 
+async function getStoreOrdersForReconciliation(
+  currentUid: string,
+  range: { from?: string; to?: string },
+) {
+  ensureLocalWebhookOwner(currentUid);
+  if (localStoreFallbackEnabled()) {
+    return localStoreOrders(currentUid, "all");
+  }
+
+  const pageSize = 500;
+  const maximumRows = 50_000;
+  let query: any = adminDb
+    .collection("store_orders")
+    .where("createdBy", "==", currentUid);
+  if (range.from) query = query.where("order_date", ">=", range.from);
+  if (range.to) query = query.where("order_date", "<=", range.to);
+  query = query.orderBy(range.from || range.to ? "order_date" : "imported_at", "asc");
+
+  const orders: any[] = [];
+  for (let offset = 0; offset < maximumRows; offset += pageSize) {
+    const snap = await query.offset(offset).limit(pageSize).get();
+    orders.push(...snap.docs.map((doc: any) => {
+      const data = doc.data() || {};
+      return {
+        id: doc.id,
+        ...data,
+        items: Array.isArray(data.items) ? data.items.map(hydrateImportedOrderItem) : [],
+      };
+    }));
+    if (snap.size < pageSize) return orders;
+  }
+  throw httpError(422, "Reconciliation exceeds the 50,000-order safety limit. Narrow the date range.");
+}
+
 export async function getStoreReconciliationForUser(
   currentUid: string,
   range: { from?: string; to?: string } = {},
 ) {
-  const rows = await getStoreOrdersForUser(currentUid, "all");
+  const rows = await getStoreOrdersForReconciliation(currentUid, range);
   const orders = (Array.isArray(rows) ? rows : []).filter((order: any) => {
     const date = String(order.order_date || order.imported_at || "").slice(0, 10);
     if (range.from && date && date < range.from) return false;

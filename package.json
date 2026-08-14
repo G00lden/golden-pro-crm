@@ -35,7 +35,7 @@
     "sync:salla-products:dev": "node --import tsx scripts/sync-salla-products.ts",
     "test:gateway-pairing": "node --import tsx --test server/gatewayPairing.test.ts",
     "test:fieldtech": "node --import tsx --test server/fieldtechIntegration.test.ts",
-    "test:analytics": "node --import tsx --test --test-concurrency=1 server/orderAnalyticsPayload.test.ts server/orderAnalytics.test.ts server/storeWebhookAnalytics.test.ts server/storefrontAttribution.test.ts",
+    "test:analytics": "node --import tsx --test --test-concurrency=1 server/orderAnalyticsPayload.test.ts server/orderAnalytics.test.ts server/storeWebhookAnalytics.test.ts server/storefrontAttribution.test.ts public/inv90-tracker.test.mjs",
     "doctor": "node scripts/doctor.mjs",
     "doctor:prod": "node scripts/doctor.mjs --production",
     "env:prod": "node scripts/create-production-env.mjs",

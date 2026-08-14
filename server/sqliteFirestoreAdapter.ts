@@ -539,6 +539,7 @@ class SqliteCollectionRef {
   private filters: Filter[] = [];
   private sorts: Sort[] = [];
   private maxRows?: number;
+  private startOffset = 0;
 
   constructor(public table: string) {}
 
@@ -579,6 +580,12 @@ class SqliteCollectionRef {
     return next;
   }
 
+  offset(count: number) {
+    const next = this.clone();
+    next.startOffset = Math.max(0, Math.trunc(count || 0));
+    return next;
+  }
+
   async get() {
     let sql = `SELECT * FROM "${this.table}"`;
     const params: unknown[] = [];
@@ -603,8 +610,13 @@ class SqliteCollectionRef {
       sql += ` WHERE ${conditions}`;
     }
 
-    if (this.sorts.length > 0) {
-      const orderClauses = this.sorts.map((s) => {
+    const primaryKey = primaryKeyByTable[this.table] || "id";
+    const effectiveSorts = [...this.sorts];
+    if (this.startOffset && !effectiveSorts.some((sort) => mapToColumn(sort.field) === primaryKey)) {
+      effectiveSorts.push({ field: primaryKey, direction: "asc" });
+    }
+    if (effectiveSorts.length > 0) {
+      const orderClauses = effectiveSorts.map((s) => {
         // Mirror the WHERE-clause alias mapping (full map) — otherwise
         // orderBy("customerId") emits ORDER BY "customerId" (no such column).
         const col = mapToColumn(s.field);
@@ -618,10 +630,10 @@ class SqliteCollectionRef {
 
     if (this.maxRows) {
       sql += ` LIMIT ${this.maxRows}`;
+      if (this.startOffset) sql += ` OFFSET ${this.startOffset}`;
     }
 
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-    const primaryKey = primaryKeyByTable[this.table] || "id";
     return new SqliteQuerySnapshot(
       rows.map((row) => new SqliteDocSnapshot(this.table, String(row[primaryKey]), row)),
     );
@@ -632,6 +644,7 @@ class SqliteCollectionRef {
     next.filters = [...this.filters];
     next.sorts = [...this.sorts];
     next.maxRows = this.maxRows;
+    next.startOffset = this.startOffset;
     return next;
   }
 }
