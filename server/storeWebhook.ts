@@ -2869,6 +2869,7 @@ export async function getStoreReconciliationForUser(
   }).map((order: any) => {
     const analytics = asRecord(order.analytics);
     const purchase = asRecord(analytics.purchase);
+    const refund = asRecord(analytics.refund_full);
     const googleAds = asRecord(analytics.google_ads);
     return {
       order_id: order.order_id,
@@ -2888,10 +2889,14 @@ export async function getStoreReconciliationForUser(
       coupon: order.coupon || null,
       attribution: order.attribution || {},
       ga4_status: purchase.status || "not_attempted",
+      ga4_purchase_status: purchase.status || "not_attempted",
       ga4_transaction_id: purchase.transaction_id || null,
+      ga4_refund_status: refund.status || "not_attempted",
+      ga4_refund_transaction_id: refund.transaction_id || null,
       ga4_manual_reconciliation_required: Boolean(
         order.analytics_delivery_reconciliation_required
-        || purchase.manual_reconciliation_required,
+        || purchase.manual_reconciliation_required
+        || refund.manual_reconciliation_required,
       ),
       google_ads_status: googleAds.status || "not_matched",
       google_ads_transaction_id: googleAds.transaction_id || null,
@@ -2911,6 +2916,8 @@ export async function getStoreReconciliationForUser(
   const sallaValue = orders.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
   const ga4Rows = orders.filter((order) => order.ga4_status === "sent");
   const ga4Value = ga4Rows.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
+  const ga4RefundRows = orders.filter((order) => order.ga4_refund_status === "sent");
+  const ga4RefundValue = ga4RefundRows.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
   return {
     success: true,
     private: true,
@@ -2920,8 +2927,13 @@ export async function getStoreReconciliationForUser(
       salla_merchandise_value: sallaValue,
       ga4_sent_order_count: ga4Rows.length,
       ga4_sent_merchandise_value: ga4Value,
+      ga4_refund_sent_order_count: ga4RefundRows.length,
+      ga4_refund_sent_merchandise_value: ga4RefundValue,
       google_ads_matched_order_count: orders.filter((order) => order.google_ads_status !== "not_matched").length,
-      blocked_missing_client_id_count: orders.filter((order) => order.ga4_status === "blocked_missing_client_id").length,
+      blocked_missing_client_id_count: orders.filter((order) => (
+        order.ga4_status === "blocked_missing_client_id"
+        || order.ga4_refund_status === "blocked_missing_client_id"
+      )).length,
       ga4_manual_reconciliation_count: orders.filter((order) => order.ga4_manual_reconciliation_required).length,
     },
     orders,
@@ -3232,11 +3244,16 @@ export async function processStoreWebhook(req: RawBodyRequest) {
     });
     const orderDocId = getStoreOrderDocId(ownerUid, order.provider, order.orderId);
     const analytics = await deliverOrderAnalytics(ownerUid, orderDocId, order);
-    if (analytics.status === "retry_pending" || analytics.status === "failed") {
+    const refundNeedsAttribution = analytics.status === "blocked_missing_client_id"
+      && ["order.cancelled", "order.canceled", "order.refunded"]
+        .includes(order.eventType.toLocaleLowerCase("en-US"));
+    if (analytics.status === "retry_pending" || analytics.status === "failed" || refundNeedsAttribution) {
       throw httpError(
         503,
         analytics.status === "retry_pending"
           ? "Order analytics delivery is already in progress; retry this webhook."
+          : refundNeedsAttribution
+            ? "Refund analytics is waiting for the signed storefront attribution; retry this webhook."
           : `Order analytics delivery failed; retry this webhook. ${analytics.error || ""}`.trim(),
       );
     }

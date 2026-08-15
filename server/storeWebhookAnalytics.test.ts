@@ -126,3 +126,95 @@ test("local webhook fallback accepts checkout-bearing payloads without persisten
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("generic refund webhook retries missing attribution and reconciliation exposes the refund", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "crm-refund-reconciliation-"));
+  const moduleUrl = pathToFileURL(path.resolve("server/storeWebhook.ts")).href;
+  const firebaseUrl = pathToFileURL(path.resolve("server/firebaseAdmin.ts")).href;
+  const tsxLoader = import.meta.resolve("tsx");
+  const source = `
+    const { getStoreOrderDocId, getStoreReconciliationForUser, processStoreWebhook } = await import(${JSON.stringify(moduleUrl)});
+    const { adminDb } = await import(${JSON.stringify(firebaseUrl)});
+    const ownerUid = "owner-refund-generic";
+    const orderId = "refund-generic-1";
+    const body = {
+      event: "order.refunded",
+      event_id: "event-refund-generic-1",
+      data: {
+        id: orderId,
+        reference_id: "ORD-REFUND-GENERIC-1",
+        created_at: "2026-08-15T09:00:00.000Z",
+        status: { name: "refunded", slug: "refunded" },
+        customer: { name: "Private Customer", mobile_code: "+966", mobile: "500000000" },
+        amounts: {
+          total: { amount: 224, currency: "SAR" },
+          sub_total: { amount: 199, currency: "SAR" },
+          shipping_cost: { amount: 25, currency: "SAR" },
+        },
+        items: [{ name: "Filter kit", sku: "BP-000392", quantity: 1, price: { amount: 199, currency: "SAR" } }],
+      },
+    };
+    const rawBody = Buffer.from(JSON.stringify(body));
+    const req = {
+      body,
+      rawBody,
+      get(name) {
+        const key = String(name).toLowerCase();
+        if (key === "x-golden-webhook-secret") return "generic-webhook-secret";
+        if (key === "x-store-provider") return "salla";
+        return undefined;
+      },
+    };
+    let firstStatus = null;
+    try {
+      await processStoreWebhook(req);
+    } catch (error) {
+      firstStatus = Number(error && error.status);
+    }
+    const orderDocId = getStoreOrderDocId(ownerUid, "salla", orderId);
+    await adminDb.collection("store_orders").doc(orderDocId).set({
+      attribution: { clientId: "123456789.987654321", gclid: "generic-refund-click" },
+    }, { merge: true });
+    let gaCalls = 0;
+    globalThis.fetch = async (input) => {
+      if (new URL(String(input)).hostname !== "www.google-analytics.com") throw new Error("Unexpected request");
+      gaCalls += 1;
+      return new Response(null, { status: 204 });
+    };
+    const retried = await processStoreWebhook(req);
+    const report = await getStoreReconciliationForUser(ownerUid);
+    const row = report.orders.find((item) => item.order_id === orderId);
+    process.stdout.write(JSON.stringify({ firstStatus, gaCalls, retried, row, summary: report.summary }));
+  `;
+
+  try {
+    const env = { ...process.env };
+    env.NODE_ENV = "test";
+    env.DATA_PROVIDER = "sqlite";
+    env.DB_PROVIDER = "sqlite";
+    env.DB_PATH = path.join(directory, "crm.db");
+    env.STORE_WEBHOOK_OWNER_UID = "owner-refund-generic";
+    env.STORE_WEBHOOK_SECRET = "generic-webhook-secret";
+    env.STORE_WEBHOOK_LOCAL_FALLBACK = "false";
+    env.GA4_MEASUREMENT_MODE = "collect";
+    env.GA4_MEASUREMENT_ID = "G-TEST123456";
+    env.GA4_API_SECRET = "test-ga4-secret";
+    const output = execFileSync(
+      process.execPath,
+      ["--import", tsxLoader, "--input-type=module", "--eval", source],
+      { cwd: directory, env, encoding: "utf8" },
+    );
+    const result = JSON.parse(output);
+    assert.equal(result.firstStatus, 503);
+    assert.equal(result.gaCalls, 1);
+    assert.equal(result.retried.analytics.status, "sent");
+    assert.equal(result.row.ga4_status, "not_attempted");
+    assert.equal(result.row.ga4_refund_status, "sent");
+    assert.equal(result.row.ga4_refund_transaction_id, "ORD-REFUND-GENERIC-1");
+    assert.equal(result.summary.ga4_refund_sent_order_count, 1);
+    assert.equal(result.summary.ga4_refund_sent_merchandise_value, 199);
+    assert.equal(result.summary.blocked_missing_client_id_count, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

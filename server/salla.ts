@@ -2552,13 +2552,51 @@ function signedWebhookHasCompleteOrder(remoteOrder: Record<string, any>) {
   );
 }
 
+function sallaAnalyticsEventIsRefund(eventType: string) {
+  return ["order.cancelled", "order.canceled", "order.refunded"]
+    .includes(eventType.toLocaleLowerCase("en-US"));
+}
+
 function sallaAnalyticsNeedsRetry(eventType: string, status: string) {
   if (status === "retry_pending" || status === "failed") return true;
-  return status === "blocked_missing_client_id" && [
-    "order.cancelled",
-    "order.canceled",
-    "order.refunded",
-  ].includes(eventType.toLocaleLowerCase("en-US"));
+  return status === "blocked_missing_client_id" && sallaAnalyticsEventIsRefund(eventType);
+}
+
+async function deliverSavedSallaOrderAnalytics(
+  currentUid: string,
+  orderDocId: string,
+  current: Record<string, any>,
+  remoteOrderId: string,
+  eventType: string,
+  eventId: string,
+  status: { name?: string; slug?: string },
+) {
+  const analytics = await deliverOrderAnalytics(currentUid, orderDocId, {
+    eventType,
+    eventId,
+    orderId: remoteOrderId,
+    orderNumber: firstText(current.order_number, current.orderNumber, remoteOrderId),
+    status: status.name || status.slug || firstText(current.status, "new"),
+    paymentStatus: firstText(current.payment_status, current.paymentStatus) || undefined,
+    paymentTypeGroup: firstText(current.payment_type_group, current.paymentTypeGroup) || undefined,
+    currency: firstText(current.currency, "SAR"),
+    items: [],
+  }).catch((analyticsError) => ({
+    status: "failed" as const,
+    error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
+  }));
+  if (sallaAnalyticsNeedsRetry(eventType, analytics.status)) {
+    const error = new Error(
+      analytics.status === "retry_pending"
+        ? "Order analytics delivery is already in progress; retry this Salla webhook."
+        : analytics.status === "blocked_missing_client_id"
+          ? "Refund analytics is waiting for the signed storefront attribution; retry this Salla webhook."
+          : `Order analytics delivery failed; retry this Salla webhook. ${"error" in analytics ? analytics.error || "" : ""}`.trim(),
+    ) as Error & { status?: number };
+    error.status = 503;
+    throw error;
+  }
+  return analytics;
 }
 
 async function applySignedSallaOrderPatch(
@@ -2584,7 +2622,18 @@ async function applySignedSallaOrderPatch(
   const occurredMs = Date.parse(occurredAt);
   const currentMs = Date.parse(String(current.remote_updated_at || current.remoteUpdatedAt || current.last_event_at || ""));
   if (Number.isFinite(occurredMs) && Number.isFinite(currentMs) && occurredMs < currentMs) {
-    return { orderDocId, existed: true, stale: true };
+    const analytics = sallaAnalyticsEventIsRefund(eventType)
+      ? await deliverSavedSallaOrderAnalytics(
+          currentUid,
+          orderDocId,
+          current,
+          remoteOrderId,
+          eventType,
+          eventId,
+          sallaRemoteStatus(remoteOrder),
+        )
+      : { status: "not_applicable" as const };
+    return { orderDocId, existed: true, stale: true, analytics };
   }
 
   const status = sallaRemoteStatus(remoteOrder);
@@ -2607,31 +2656,15 @@ async function applySignedSallaOrderPatch(
     if (attempt < 2) return applySignedSallaOrderPatch(currentUid, remoteOrderId, remoteOrder, eventType, eventId, occurredAt, attempt + 1);
     throw new Error(`Salla order ${orderDocId} changed concurrently while applying webhook status.`);
   }
-  const analytics = await deliverOrderAnalytics(currentUid, orderDocId, {
+  const analytics = await deliverSavedSallaOrderAnalytics(
+    currentUid,
+    orderDocId,
+    current,
+    remoteOrderId,
     eventType,
     eventId,
-    orderId: remoteOrderId,
-    orderNumber: firstText(current.order_number, current.orderNumber, remoteOrderId),
-    status: status.name || status.slug || firstText(current.status, "new"),
-    paymentStatus: firstText(current.payment_status, current.paymentStatus) || undefined,
-    paymentTypeGroup: firstText(current.payment_type_group, current.paymentTypeGroup) || undefined,
-    currency: firstText(current.currency, "SAR"),
-    items: [],
-  }).catch((analyticsError) => ({
-    status: "failed" as const,
-    error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
-  }));
-  if (sallaAnalyticsNeedsRetry(eventType, analytics.status)) {
-    const error = new Error(
-      analytics.status === "retry_pending"
-        ? "Order analytics delivery is already in progress; retry this Salla webhook."
-        : analytics.status === "blocked_missing_client_id"
-          ? "Refund analytics is waiting for the signed storefront attribution; retry this Salla webhook."
-        : `Order analytics delivery failed; retry this Salla webhook. ${"error" in analytics ? analytics.error || "" : ""}`.trim(),
-    ) as Error & { status?: number };
-    error.status = 503;
-    throw error;
-  }
+    status,
+  );
   publishStoreOrderChange(currentUid, {
     type: eventType === "order.created" || eventType === "order.deleted" ? eventType : "order.updated",
     orderId: orderDocId,
