@@ -60,14 +60,84 @@
     return value ? String(value).slice(0, 100) : "";
   }
 
+  function eventScopeId(payload) {
+    var properties = eventProperties(payload);
+    var value = checkoutIdFor(payload) || properties.cart_id || properties.cartId;
+    return value ? String(value).slice(0, 100) : "";
+  }
+
+  function safeMoney(value) {
+    if (value === null || value === undefined || value === "") return undefined;
+    var amount = Number(value);
+    return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * 100) / 100 : undefined;
+  }
+
+  function ga4Items(payload) {
+    var properties = eventProperties(payload);
+    var products = Array.isArray(properties.products) ? properties.products : [];
+    return products.slice(0, 200).map(function (product) {
+      if (!product || typeof product !== "object") return null;
+      var itemId = product.product_id || product.id || product.sku;
+      var itemName = product.name || product.product_name;
+      if (!itemId && !itemName) return null;
+      var item = {};
+      if (itemId) item.item_id = String(itemId).slice(0, 100);
+      if (itemName) item.item_name = String(itemName).slice(0, 200);
+      var price = safeMoney(product.price);
+      var quantity = Number(product.quantity);
+      if (price !== undefined) item.price = price;
+      if (Number.isFinite(quantity) && quantity > 0) item.quantity = Math.round(quantity);
+      return item;
+    }).filter(Boolean);
+  }
+
+  function ga4CheckoutParams(payload) {
+    var properties = eventProperties(payload);
+    var params = {};
+    var value = safeMoney(properties.value !== undefined ? properties.value : (properties.revenue !== undefined ? properties.revenue : properties.total));
+    var currency = String(properties.currency || "").trim().toUpperCase();
+    var items = ga4Items(payload);
+    if (value !== undefined) params.value = value;
+    if (/^[A-Z]{3}$/.test(currency)) params.currency = currency;
+    if (items.length) params.items = items;
+    return params;
+  }
+
+  function queueGa4Event(eventName, payload) {
+    if (!gaClientId()) return false;
+    var scopeId = eventScopeId(payload);
+    if (!scopeId) return false;
+    var sentKey = "ga4_" + eventName + "_" + scopeId;
+    if (safeSessionGet(sentKey) === "1") return true;
+    var params = ga4CheckoutParams(payload);
+    if (typeof window.gtag === "function") {
+      window.gtag("event", eventName, params);
+    } else if (window.dataLayer && typeof window.dataLayer.push === "function") {
+      (function () { window.dataLayer.push(arguments); })("event", eventName, params);
+    } else {
+      return false;
+    }
+    safeSessionSet(sentKey, "1");
+    return true;
+  }
+
   function captureCampaign() {
     if (!gaClientId()) return false;
     var params = new URLSearchParams(window.location.search || "");
+    var values = {};
     ["gclid", "gbraid", "wbraid", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"]
-      .forEach(function (key) {
-        var value = (params.get(key) || "").trim().slice(0, 200);
-        if (value) safeSessionSet(key, value);
-      });
+      .forEach(function (key) { values[key] = (params.get(key) || "").trim().slice(0, 200); });
+    var source = String(values.utm_source || "").toLowerCase();
+    var medium = String(values.utm_medium || "").toLowerCase().replace(/[ -]+/g, "_");
+    if (source === "tiktok" || source === "tiktok.com" || source === "tik_tok") {
+      values.utm_source = "tiktok";
+      if (medium === "paid" || medium === "paid_social" || medium === "paidsocial" || medium === "cpc") {
+        values.utm_medium = "paid";
+      }
+    }
+    Object.keys(values).forEach(function (key) {
+      if (values[key]) safeSessionSet(key, values[key]);
+    });
     return true;
   }
 
@@ -226,6 +296,8 @@
         var checkoutId = checkoutIdFor(payload);
         if (eventName === "Checkout Step Viewed" || eventName === "Checkout Step Completed" || eventName === "Payment Info Entered") {
           if (checkoutId) claimForCheckout(checkoutId).catch(function () { /* retry on the next checkout event */ });
+          if (eventName === "Checkout Step Completed") queueGa4Event("add_shipping_info", payload);
+          if (eventName === "Payment Info Entered") queueGa4Event("add_payment_info", payload);
           return;
         }
         if (eventName !== "Order Completed" || !checkoutId) return;
