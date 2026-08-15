@@ -229,6 +229,7 @@ test("renews an expired stored claim before order completion", async () => {
 test("accepts wrapped Salla checkout and order payloads", async () => {
   const source = await readFile(new URL("./inv90-tracker.js", import.meta.url), "utf8");
   const storage = new Map();
+  const ga4Calls = [];
   let tracker;
   let claimed;
   let posted;
@@ -240,6 +241,7 @@ test("accepts wrapped Salla checkout and order payloads", async () => {
       removeItem: (key) => storage.delete(key),
     },
     crypto: { getRandomValues: (bytes) => bytes.fill(11) },
+    gtag: (...args) => ga4Calls.push(args),
     fetch: async (url, init) => {
       if (String(url).endsWith("/attribution-claim")) {
         claimed = JSON.parse(String(init.body));
@@ -283,11 +285,22 @@ test("accepts wrapped Salla checkout and order payloads", async () => {
     },
   };
   tracker.track("Checkout Step Completed", checkoutPayload);
+  tracker.track("Checkout Step Completed", checkoutPayload);
+  tracker.track("Payment Info Entered", checkoutPayload);
+  tracker.track("Payment Info Entered", checkoutPayload);
   await new Promise((resolve) => setTimeout(resolve, 0));
 
+  assert.equal(ga4Calls.length, 2);
+  assert.equal(ga4Calls[0][0], "event");
+  assert.equal(ga4Calls[0][1], "add_shipping_info");
+  assert.equal(ga4Calls[0][2].value, 418);
+  assert.equal(ga4Calls[0][2].currency, "SAR");
+  assert.equal(ga4Calls[0][2].items.length, 2);
+  assert.equal(ga4Calls[0][2].items[0].item_id, "SKU-1");
+  assert.equal(ga4Calls[1][1], "add_payment_info");
   assert.equal(claimed.checkout_id, "checkout-wrapped");
   assert.equal(claimed.utm_source, "tiktok");
-  assert.equal(claimed.utm_medium, "paid_social");
+  assert.equal(claimed.utm_medium, "paid");
 
   tracker.track("Order Completed", {
     type: "track",
@@ -302,4 +315,44 @@ test("accepts wrapped Salla checkout and order payloads", async () => {
   assert.equal(posted.order_id, "SALLA-WRAPPED");
   assert.equal(posted.checkout_id, "checkout-wrapped");
   assert.equal(posted.total, 418);
+});
+
+test("does not emit checkout events without a consented GA client cookie", async () => {
+  const source = await readFile(new URL("./inv90-tracker.js", import.meta.url), "utf8");
+  const storage = new Map();
+  const dataLayer = [];
+  let tracker;
+  const window = {
+    location: { search: "?utm_source=tiktok&utm_medium=paid" },
+    dataLayer,
+    sessionStorage: {
+      getItem: (key) => storage.get(key) || null,
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
+    fetch: async () => new Response(null, { status: 500 }),
+    setTimeout,
+    clearInterval: () => {},
+    setInterval: () => 1,
+    Salla: {
+      onReady: (callback) => callback(),
+      analytics: { registerTracker: (value) => { tracker = value; } },
+    },
+  };
+  vm.runInNewContext(source, {
+    window,
+    document: { cookie: "" },
+    URLSearchParams,
+    Response,
+    Number,
+    JSON,
+    decodeURIComponent,
+  });
+
+  tracker.track("Payment Info Entered", {
+    properties: { cart_id: "cart-no-consent", value: 199, currency: "SAR" },
+  });
+
+  assert.equal(dataLayer.length, 0);
+  assert.equal(storage.size, 0);
 });

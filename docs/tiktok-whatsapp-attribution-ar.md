@@ -17,8 +17,15 @@
 الرابط الإعلاني المقترح:
 
 ```text
-https://crm.breexe-pro.com/landing-ac?utm_source=tiktok&utm_medium=paid&utm_campaign=ac_whatsapp_2026
+https://crm.breexe-pro.com/landing-ac?utm_source=tiktok&utm_medium=paid&utm_id=__CAMPAIGN_ID__&utm_campaign=__CAMPAIGN_NAME__&utm_content=__AID__
 ```
+
+هذا هو القالب الموحّد لكل روابط TikTok في Golden Pro. يجب أن تبقى القيمتان
+`utm_source=tiktok` و`utm_medium=paid` ثابتتين وبأحرف صغيرة حتى يطابق استيراد
+تكلفة TikTok داخل GA4 الزيارات نفسها. يستخدم `utm_id` رقم الحملة، و`utm_campaign`
+اسم الحملة، و`utm_content` رقم مجموعة الإعلانات عبر وحدات الماكرو الرسمية في
+TikTok. لا تجمع بين Auto-attach وهذا القالب يدويًا كي لا تتكرر معاملات UTM في
+الرابط؛ اختر أحدهما، ثم افحص المعاينة قبل حفظ الإعلان.
 
 يضيف تيكتوك معرف النقرة تلقائياً. بعد موافقة الزائر، ينشئ الموقع مرجعاً عشوائياً قصيراً ويضعه في رسالة واتساب على سطر مستقل. عند وصول الرسالة يُطابق المرجع، ويُحوّل الهاتف إلى بصمة أحادية الاتجاه قبل وضع الحدث في طابور الإرسال.
 
