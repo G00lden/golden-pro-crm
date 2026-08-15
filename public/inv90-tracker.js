@@ -48,6 +48,18 @@
     try { window.sessionStorage.removeItem(storagePrefix + key); } catch (_) { /* no-op */ }
   }
 
+  function eventProperties(payload) {
+    if (!payload || typeof payload !== "object") return {};
+    if (payload.properties && typeof payload.properties === "object") return payload.properties;
+    return payload;
+  }
+
+  function checkoutIdFor(payload) {
+    var properties = eventProperties(payload);
+    var value = properties.checkout_id || properties.checkoutId || payload && (payload.checkout_id || payload.checkoutId);
+    return value ? String(value).slice(0, 100) : "";
+  }
+
   function captureCampaign() {
     if (!gaClientId()) return false;
     var params = new URLSearchParams(window.location.search || "");
@@ -158,12 +170,15 @@
   }
 
   function payloadForOrder(payload, claimToken) {
-    var total = payload && Number(payload.total);
-    var currency = payload && String(payload.currency || "").trim().toUpperCase();
-    if (!payload || !payload.order_id || !payload.checkout_id || !claimToken || !Number.isFinite(total) || total <= 0 || currency !== "SAR") return null;
+    var properties = eventProperties(payload);
+    var orderId = properties.order_id || properties.orderId || payload && (payload.order_id || payload.orderId);
+    var checkoutId = checkoutIdFor(payload);
+    var total = Number(properties.total);
+    var currency = String(properties.currency || "").trim().toUpperCase();
+    if (!orderId || !checkoutId || !claimToken || !Number.isFinite(total) || total <= 0 || currency !== "SAR") return null;
     return {
-      order_id: String(payload.order_id).slice(0, 80),
-      checkout_id: String(payload.checkout_id).slice(0, 100),
+      order_id: String(orderId).slice(0, 80),
+      checkout_id: checkoutId,
       claim_token: claimToken,
       total: Math.round(total * 100) / 100,
       currency: currency
@@ -208,7 +223,7 @@
     window.Salla.analytics.registerTracker({
       name: "GoldenProINV90",
       track: function (eventName, payload) {
-        var checkoutId = payload && payload.checkout_id;
+        var checkoutId = checkoutIdFor(payload);
         if (eventName === "Checkout Step Viewed" || eventName === "Checkout Step Completed" || eventName === "Payment Info Entered") {
           if (checkoutId) claimForCheckout(checkoutId).catch(function () { /* retry on the next checkout event */ });
           return;
