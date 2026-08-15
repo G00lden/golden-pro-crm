@@ -2824,7 +2824,6 @@ export async function getStoreOrdersForUser(currentUid: string, type?: string) {
 
 async function getStoreOrdersForReconciliation(
   currentUid: string,
-  range: { from?: string; to?: string },
 ) {
   ensureLocalWebhookOwner(currentUid);
   if (localStoreFallbackEnabled()) {
@@ -2835,10 +2834,8 @@ async function getStoreOrdersForReconciliation(
   const maximumRows = 50_000;
   let query: any = adminDb
     .collection("store_orders")
-    .where("createdBy", "==", currentUid);
-  if (range.from) query = query.where("order_date", ">=", range.from);
-  if (range.to) query = query.where("order_date", "<=", range.to);
-  query = query.orderBy(range.from || range.to ? "order_date" : "imported_at", "asc");
+    .where("createdBy", "==", currentUid)
+    .orderBy("imported_at", "asc");
 
   const orders: any[] = [];
   for (let offset = 0; offset < maximumRows; offset += pageSize) {
@@ -2853,75 +2850,91 @@ async function getStoreOrdersForReconciliation(
     }));
     if (snap.size < pageSize) return orders;
   }
-  throw httpError(422, "Reconciliation exceeds the 50,000-order safety limit. Narrow the date range.");
+  throw httpError(422, "Reconciliation exceeds the 50,000-order safety limit. Archive older orders before retrying.");
+}
+
+function reconciliationDateInRange(value: unknown, range: { from?: string; to?: string }) {
+  const date = String(value || "").slice(0, 10);
+  if (!date) return !range.from && !range.to;
+  if (range.from && date < range.from) return false;
+  if (range.to && date > range.to) return false;
+  return true;
+}
+
+function mapReconciliationOrder(order: any) {
+  const analytics = asRecord(order.analytics);
+  const purchase = asRecord(analytics.purchase);
+  const refund = asRecord(analytics.refund_full);
+  const googleAds = asRecord(analytics.google_ads);
+  return {
+    order_id: order.order_id,
+    order_number: order.order_number,
+    order_date: order.order_date,
+    status: order.status,
+    customer_name: order.customer_name,
+    payment_method: order.payment_method,
+    payment_type_group: order.payment_type_group,
+    payment_status: order.payment_status,
+    currency: order.currency || "SAR",
+    total: optionalNumberValue(order.total) ?? null,
+    subtotal: optionalNumberValue(order.subtotal) ?? null,
+    shipping: optionalNumberValue(order.shipping) ?? null,
+    tax: optionalNumberValue(order.tax) ?? null,
+    discount: optionalNumberValue(order.discount) ?? null,
+    coupon: order.coupon || null,
+    attribution: order.attribution || {},
+    ga4_status: purchase.status || "not_attempted",
+    ga4_purchase_status: purchase.status || "not_attempted",
+    ga4_purchase_at: purchase.attempted_at || purchase.detected_at || null,
+    ga4_transaction_id: purchase.transaction_id || null,
+    ga4_refund_status: refund.status || "not_attempted",
+    ga4_refund_at: refund.attempted_at || refund.detected_at || null,
+    ga4_refund_transaction_id: refund.transaction_id || null,
+    ga4_manual_reconciliation_required: Boolean(
+      order.analytics_delivery_reconciliation_required
+      || purchase.manual_reconciliation_required
+      || refund.manual_reconciliation_required,
+    ),
+    google_ads_status: googleAds.status || "not_matched",
+    google_ads_transaction_id: googleAds.transaction_id || null,
+    items: Array.isArray(order.items) ? order.items.map((item: any) => ({
+      sku: item.sku,
+      salla_product_id: item.salla_product_id || null,
+      name: item.name,
+      variant: item.variant || null,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      total_price: item.total_price,
+    })) : [],
+  };
 }
 
 export async function getStoreReconciliationForUser(
   currentUid: string,
   range: { from?: string; to?: string } = {},
 ) {
-  const rows = await getStoreOrdersForReconciliation(currentUid, range);
-  const orders = (Array.isArray(rows) ? rows : []).filter((order: any) => {
-    const date = String(order.order_date || order.imported_at || "").slice(0, 10);
-    if (range.from && date && date < range.from) return false;
-    if (range.to && date && date > range.to) return false;
-    return true;
-  }).map((order: any) => {
-    const analytics = asRecord(order.analytics);
-    const purchase = asRecord(analytics.purchase);
-    const refund = asRecord(analytics.refund_full);
-    const googleAds = asRecord(analytics.google_ads);
-    return {
-      order_id: order.order_id,
-      order_number: order.order_number,
-      order_date: order.order_date,
-      status: order.status,
-      customer_name: order.customer_name,
-      payment_method: order.payment_method,
-      payment_type_group: order.payment_type_group,
-      payment_status: order.payment_status,
-      currency: order.currency || "SAR",
-      total: optionalNumberValue(order.total) ?? null,
-      subtotal: optionalNumberValue(order.subtotal) ?? null,
-      shipping: optionalNumberValue(order.shipping) ?? null,
-      tax: optionalNumberValue(order.tax) ?? null,
-      discount: optionalNumberValue(order.discount) ?? null,
-      coupon: order.coupon || null,
-      attribution: order.attribution || {},
-      ga4_status: purchase.status || "not_attempted",
-      ga4_purchase_status: purchase.status || "not_attempted",
-      ga4_transaction_id: purchase.transaction_id || null,
-      ga4_refund_status: refund.status || "not_attempted",
-      ga4_refund_transaction_id: refund.transaction_id || null,
-      ga4_manual_reconciliation_required: Boolean(
-        order.analytics_delivery_reconciliation_required
-        || purchase.manual_reconciliation_required
-        || refund.manual_reconciliation_required,
-      ),
-      google_ads_status: googleAds.status || "not_matched",
-      google_ads_transaction_id: googleAds.transaction_id || null,
-      items: Array.isArray(order.items) ? order.items.map((item: any) => ({
-        sku: item.sku,
-        salla_product_id: item.salla_product_id || null,
-        name: item.name,
-        variant: item.variant || null,
-        quantity: item.quantity,
-        unit_price: item.unit_price,
-        total_price: item.total_price,
-      })) : [],
-    };
-  });
+  const rows = await getStoreOrdersForReconciliation(currentUid);
+  const mapped = (Array.isArray(rows) ? rows : []).map(mapReconciliationOrder);
+  const orders = mapped.filter((order) => reconciliationDateInRange(order.order_date, range));
+  const refunds = mapped.filter((order) => (
+    order.ga4_refund_status !== "not_attempted"
+    && reconciliationDateInRange(order.ga4_refund_at, range)
+  ));
 
   const money = (value: unknown) => optionalNumberValue(value) ?? 0;
   const sallaValue = orders.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
   const ga4Rows = orders.filter((order) => order.ga4_status === "sent");
   const ga4Value = ga4Rows.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
-  const ga4RefundRows = orders.filter((order) => order.ga4_refund_status === "sent");
+  const ga4RefundRows = refunds.filter((order) => order.ga4_refund_status === "sent");
   const ga4RefundValue = ga4RefundRows.reduce((sum, order) => sum + money(order.subtotal ?? order.total), 0);
+  const operationalRows = [...new Map(
+    [...orders, ...refunds].map((order) => [String(order.order_id || order.order_number), order]),
+  ).values()];
   return {
     success: true,
     private: true,
     range: { from: range.from || null, to: range.to || null },
+    refund_range: { from: range.from || null, to: range.to || null },
     summary: {
       order_count: orders.length,
       salla_merchandise_value: sallaValue,
@@ -2930,13 +2943,14 @@ export async function getStoreReconciliationForUser(
       ga4_refund_sent_order_count: ga4RefundRows.length,
       ga4_refund_sent_merchandise_value: ga4RefundValue,
       google_ads_matched_order_count: orders.filter((order) => order.google_ads_status !== "not_matched").length,
-      blocked_missing_client_id_count: orders.filter((order) => (
+      blocked_missing_client_id_count: operationalRows.filter((order) => (
         order.ga4_status === "blocked_missing_client_id"
         || order.ga4_refund_status === "blocked_missing_client_id"
       )).length,
-      ga4_manual_reconciliation_count: orders.filter((order) => order.ga4_manual_reconciliation_required).length,
+      ga4_manual_reconciliation_count: operationalRows.filter((order) => order.ga4_manual_reconciliation_required).length,
     },
     orders,
+    refunds,
   };
 }
 

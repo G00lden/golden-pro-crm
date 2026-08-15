@@ -143,7 +143,7 @@ test("generic refund webhook retries missing attribution and reconciliation expo
       data: {
         id: orderId,
         reference_id: "ORD-REFUND-GENERIC-1",
-        created_at: "2026-08-15T09:00:00.000Z",
+        created_at: "2025-01-15T09:00:00.000Z",
         status: { name: "refunded", slug: "refunded" },
         customer: { name: "Private Customer", mobile_code: "+966", mobile: "500000000" },
         amounts: {
@@ -182,9 +182,19 @@ test("generic refund webhook retries missing attribution and reconciliation expo
       return new Response(null, { status: 204 });
     };
     const retried = await processStoreWebhook(req);
-    const report = await getStoreReconciliationForUser(ownerUid);
-    const row = report.orders.find((item) => item.order_id === orderId);
-    process.stdout.write(JSON.stringify({ firstStatus, gaCalls, retried, row, summary: report.summary }));
+    const today = new Date().toISOString().slice(0, 10);
+    const report = await getStoreReconciliationForUser(ownerUid, { from: today, to: today });
+    const row = report.refunds.find((item) => item.order_id === orderId);
+    process.stdout.write(JSON.stringify({
+      firstStatus,
+      gaCalls,
+      retried,
+      row,
+      purchaseOrderCount: report.orders.length,
+      refundRange: report.refund_range,
+      today,
+      summary: report.summary,
+    }));
   `;
 
   try {
@@ -211,6 +221,9 @@ test("generic refund webhook retries missing attribution and reconciliation expo
     assert.equal(result.row.ga4_status, "not_attempted");
     assert.equal(result.row.ga4_refund_status, "sent");
     assert.equal(result.row.ga4_refund_transaction_id, "ORD-REFUND-GENERIC-1");
+    assert.equal(result.row.ga4_refund_at.slice(0, 10), result.today);
+    assert.equal(result.purchaseOrderCount, 0);
+    assert.deepEqual(result.refundRange, { from: result.today, to: result.today });
     assert.equal(result.summary.ga4_refund_sent_order_count, 1);
     assert.equal(result.summary.ga4_refund_sent_merchandise_value, 199);
     assert.equal(result.summary.blocked_missing_client_id_count, 0);
