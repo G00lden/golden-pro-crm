@@ -100,7 +100,13 @@ const baseUrl = `http://127.0.0.1:${address.port}`;
 
 async function jsonFetch(path: string, init?: RequestInit) {
   const response = await fetch(`${baseUrl}${path}`, init);
-  const body = await response.json();
+  const text = await response.text();
+  let body: any;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`${path} returned non-JSON HTTP ${response.status}: ${text.slice(0, 160)}`);
+  }
   return { status: response.status, body };
 }
 
@@ -159,6 +165,9 @@ try {
     .limit(10)
     .get();
   const requestId = requestSnapshot.docs[0]?.id || "";
+  if (!requestId) {
+    throw new Error(`Maintenance request was not persisted. HTTP ${created.status}: ${JSON.stringify(created.body)}`);
+  }
 
   const portalBefore = await jsonFetch(`/public/maintenance-request?token=${encodeURIComponent(token)}`);
   const invalidPortal = await jsonFetch("/public/maintenance-request?token=invalid.invalid");

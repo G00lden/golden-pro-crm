@@ -36,6 +36,7 @@ const {
 const { adminDb } = await import("./firebaseAdmin");
 const db = (await import("./db")).default;
 const { getStoreOrderDocId } = await import("./storeWebhook");
+const { attachStorefrontOrderAttribution, issueStorefrontAttributionClaim, StorefrontAttributionError } = await import("./storefrontAttribution");
 const originalFetch = globalThis.fetch;
 
 function jsonResponse(body: unknown, status = 200) {
@@ -325,6 +326,318 @@ test("signed order.created payload imports immediately when Salla detail API ret
   assert.equal(stored.items[0].quantity, 2);
   const bookings = await adminDb.collection("bookings").where("createdBy", "==", uid).get();
   assert.equal(bookings.docs.some((doc) => doc.data().store_order_id === orderId), false, "an unscheduled order must not invent a technician appointment");
+});
+
+test("Salla app webhook closes the signed checkout claim before browser attribution retries", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid);
+  const checkoutId = "checkout-app-webhook-6101";
+  const orderId = "6101";
+  const envKeys = ["STORE_ATTRIBUTION_SIGNING_SECRET", "GA4_MEASUREMENT_MODE", "GA4_MEASUREMENT_ID", "GA4_API_SECRET"] as const;
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.STORE_ATTRIBUTION_SIGNING_SECRET = "test-attribution-signing-secret-0123456789abcdef";
+  process.env.GA4_MEASUREMENT_MODE = "collect";
+  process.env.GA4_MEASUREMENT_ID = "G-TEST123456";
+  process.env.GA4_API_SECRET = "test-ga4-secret";
+
+  try {
+    const claim = await issueStorefrontAttributionClaim(uid, {
+      checkoutId,
+      claimNonce: "0123456789abcdefghijklmnopqrstuvwx",
+      attribution: { clientId: "123456789.987654321", gclid: "test-click-6101" },
+    });
+    const attributionInput = {
+      orderId,
+      checkoutId,
+      claimToken: claim.claim_token,
+      total: 100,
+      currency: "SAR",
+    };
+    await assert.rejects(
+      () => attachStorefrontOrderAttribution(uid, attributionInput),
+      (error: unknown) => error instanceof StorefrontAttributionError && error.status === 404,
+    );
+
+    let gaCalls = 0;
+    const authoritative = { ...remoteOrder(orderId), checkout_id: checkoutId };
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.google-analytics.com") {
+        gaCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith(`/orders/${orderId}`)) return jsonResponse({ data: authoritative });
+      throw new Error(`Unexpected request ${url}`);
+    }) as typeof fetch;
+    const body = {
+      event: "order.created",
+      event_id: "evt-checkout-6101",
+      merchant: "merchant-a",
+      created_at: "2026-08-15T09:00:00.000Z",
+      data: { id: orderId, checkout_id: checkoutId },
+    };
+    await handleSallaAppWebhook(webhookRequest(body) as never);
+
+    const storedId = getStoreOrderDocId(uid, "salla", orderId);
+    const stored = (await adminDb.collection("store_orders").doc(storedId).get()).data() || {};
+    assert.equal(stored.checkout_id, checkoutId);
+    const attached = await attachStorefrontOrderAttribution(uid, attributionInput);
+    assert.equal(attached.analytics_status, "sent");
+    assert.equal(gaCalls, 1);
+    const claims = await adminDb.collection("storefront_attribution_claims")
+      .where("checkout_id", "==", checkoutId)
+      .limit(1)
+      .get();
+    assert.equal(claims.docs[0]?.data().authoritative_order_id, orderId);
+    assert.equal(claims.docs[0]?.data().status, "consumed");
+  } finally {
+    for (const key of envKeys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
+});
+
+test("retryable GA4 failure keeps the signed Salla event retryable until delivery succeeds", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid);
+  const orderId = "6201";
+  const envKeys = ["GA4_MEASUREMENT_MODE", "GA4_MEASUREMENT_ID", "GA4_API_SECRET"] as const;
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.GA4_MEASUREMENT_MODE = "collect";
+  process.env.GA4_MEASUREMENT_ID = "G-TEST123456";
+  process.env.GA4_API_SECRET = "test-ga4-secret";
+
+  try {
+    let gaCalls = 0;
+    let detailReads = 0;
+    const authoritative = {
+      ...remoteOrder(orderId),
+      metadata: { ga_client_id: "123456789.987654321" },
+    };
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.google-analytics.com") {
+        gaCalls += 1;
+        return new Response(null, { status: gaCalls === 1 ? 503 : 204 });
+      }
+      if (url.pathname.endsWith(`/orders/${orderId}`)) {
+        detailReads += 1;
+        return jsonResponse({ data: authoritative });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }) as typeof fetch;
+    const body = {
+      event: "order.created",
+      event_id: "evt-ga-retry-6201",
+      merchant: "merchant-a",
+      created_at: "2026-08-15T09:05:00.000Z",
+      data: { id: orderId },
+    };
+
+    await assert.rejects(
+      () => handleSallaAppWebhook(webhookRequest(body) as never),
+      (error: unknown) => Number((error as { status?: unknown })?.status) === 503,
+    );
+    const failedInbox = await adminDb.collection("salla_order_inbox")
+      .where("ownerUid", "==", uid)
+      .where("remoteOrderId", "==", orderId)
+      .limit(1)
+      .get();
+    assert.equal(failedInbox.docs[0]?.data().status, "failed");
+
+    const retried = await handleSallaAppWebhook(webhookRequest(body) as never);
+    const duplicate = await handleSallaAppWebhook(webhookRequest(body) as never);
+    assert.equal(retried.duplicate, false);
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(gaCalls, 2);
+    assert.equal(detailReads, 2);
+    const storedId = getStoreOrderDocId(uid, "salla", orderId);
+    const stored = (await adminDb.collection("store_orders").doc(storedId).get()).data() || {};
+    assert.equal(stored.analytics.purchase.status, "sent");
+    assert.equal(failedInbox.docs[0]?.ref ? (await failedInbox.docs[0].ref.get()).data()?.status : null, "processed");
+  } finally {
+    for (const key of envKeys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
+});
+
+test("renews an unclosed storefront claim inside the browser expiry buffer without changing its attribution", async () => {
+  const uid = "test-owner";
+  const checkoutId = "checkout-renew-6301";
+  const envKeys = ["STORE_ATTRIBUTION_SIGNING_SECRET", "STORE_ATTRIBUTION_CLAIM_TTL_SECONDS"] as const;
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.STORE_ATTRIBUTION_SIGNING_SECRET = "test-attribution-signing-secret-0123456789abcdef";
+  process.env.STORE_ATTRIBUTION_CLAIM_TTL_SECONDS = "300";
+  const input = {
+    checkoutId,
+    claimNonce: "0123456789abcdefghijklmnopqrstuvwx",
+    attribution: { clientId: "123456789.987654321", gclid: "test-click-renew" },
+  };
+
+  try {
+    const original = await issueStorefrontAttributionClaim(uid, input);
+    const claims = await adminDb.collection("storefront_attribution_claims")
+      .where("checkout_id", "==", checkoutId)
+      .limit(1)
+      .get();
+    const claimRef = claims.docs[0]?.ref;
+    assert.ok(claimRef);
+    await claimRef.set({ expires_at: new Date(Date.now() + 20_000).toISOString() }, { merge: true });
+
+    const renewed = await issueStorefrontAttributionClaim(uid, input);
+    assert.notEqual(renewed.claim_token, original.claim_token);
+    assert.ok(Date.parse(renewed.expires_at) > Date.now());
+    const saved = (await claimRef.get()).data() || {};
+    assert.equal(saved.status, "issued");
+    assert.equal(saved.attribution.gclid, "test-click-renew");
+    assert.equal(saved.expires_at, renewed.expires_at);
+  } finally {
+    for (const key of envKeys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
+});
+
+test("signed refund fallback delivers analytics when the Salla detail API is unavailable", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid);
+  const orderId = "6401";
+  const localId = await seedLocalOrder(uid, orderId);
+  await adminDb.collection("store_orders").doc(localId).set({
+    order_number: `REF-${orderId}`,
+    status: "paid",
+    currency: "SAR",
+    total: 199,
+    subtotal: 199,
+    items: [{
+      name: "INV90 replacement kit",
+      sku: "BP-000392",
+      quantity: 1,
+      unit_price: 199,
+      total_price: 199,
+      currency: "SAR",
+    }],
+  }, { merge: true });
+  const envKeys = ["GA4_MEASUREMENT_MODE", "GA4_MEASUREMENT_ID", "GA4_API_SECRET"] as const;
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.GA4_MEASUREMENT_MODE = "collect";
+  process.env.GA4_MEASUREMENT_ID = "G-TEST123456";
+  process.env.GA4_API_SECRET = "test-ga4-secret";
+
+  try {
+    let gaCalls = 0;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.google-analytics.com") {
+        gaCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith(`/orders/${orderId}`)) return jsonResponse({ error: "temporary" }, 503);
+      throw new Error(`Unexpected request ${url}`);
+    }) as typeof fetch;
+    const body = {
+      event: "order.refunded",
+      event_id: "evt-refund-fallback-6401",
+      merchant: "merchant-a",
+      created_at: "2026-08-15T09:15:00.000Z",
+      data: { id: orderId, status: { name: "refunded", slug: "refunded" } },
+    };
+
+    await assert.rejects(
+      () => handleSallaAppWebhook(webhookRequest(body) as never),
+      (error: unknown) => Number((error as { status?: unknown })?.status) === 503,
+    );
+    assert.equal(gaCalls, 0);
+    const failedInbox = await adminDb.collection("salla_order_inbox")
+      .where("ownerUid", "==", uid)
+      .where("remoteOrderId", "==", orderId)
+      .limit(1)
+      .get();
+    assert.equal(failedInbox.docs[0]?.data().status, "failed");
+
+    await adminDb.collection("store_orders").doc(localId).set({
+      attribution: { clientId: "123456789.987654321", gclid: "test-click-refund" },
+    }, { merge: true });
+    const result = await handleSallaAppWebhook(webhookRequest(body) as never);
+    assert.equal(result.duplicate, false);
+    assert.equal(gaCalls, 1);
+    const stored = (await adminDb.collection("store_orders").doc(localId).get()).data() || {};
+    assert.deepEqual(Object.keys(stored.analytics || {}).sort(), ["google_ads", "refund_full"]);
+    assert.equal(stored.analytics.refund_full.status, "sent");
+    assert.equal(failedInbox.docs[0]?.ref ? (await failedInbox.docs[0].ref.get()).data()?.status : null, "processed");
+  } finally {
+    for (const key of envKeys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
+});
+
+test("a stale signed refund leaves the newer CRM status intact but still delivers the refund", async () => {
+  const uid = "test-owner";
+  await linkOwner(uid);
+  const orderId = "6451";
+  const localId = await seedLocalOrder(uid, orderId);
+  await adminDb.collection("store_orders").doc(localId).set({
+    order_number: `REF-${orderId}`,
+    status: "completed",
+    remote_updated_at: "2026-08-15T10:00:00.000Z",
+    currency: "SAR",
+    total: 199,
+    subtotal: 199,
+    attribution: { clientId: "123456789.987654321", gclid: "test-click-stale-refund" },
+    items: [{
+      name: "INV90 replacement kit",
+      sku: "BP-000392",
+      quantity: 1,
+      unit_price: 199,
+      total_price: 199,
+      currency: "SAR",
+    }],
+  }, { merge: true });
+  const envKeys = ["GA4_MEASUREMENT_MODE", "GA4_MEASUREMENT_ID", "GA4_API_SECRET"] as const;
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.GA4_MEASUREMENT_MODE = "collect";
+  process.env.GA4_MEASUREMENT_ID = "G-TEST123456";
+  process.env.GA4_API_SECRET = "test-ga4-secret";
+
+  try {
+    let gaCalls = 0;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.google-analytics.com") {
+        gaCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith(`/orders/${orderId}`)) return jsonResponse({ error: "temporary" }, 503);
+      throw new Error(`Unexpected request ${url}`);
+    }) as typeof fetch;
+    const body = {
+      event: "order.refunded",
+      event_id: "evt-stale-refund-6451",
+      merchant: "merchant-a",
+      created_at: "2026-08-15T09:00:00.000Z",
+      data: { id: orderId, status: { name: "refunded", slug: "refunded" } },
+    };
+
+    const result = await handleSallaAppWebhook(webhookRequest(body) as never);
+    assert.ok("stale" in result.result);
+    assert.equal(result.result.stale, true);
+    assert.equal(gaCalls, 1);
+    const stored = (await adminDb.collection("store_orders").doc(localId).get()).data() || {};
+    assert.equal(stored.status, "completed");
+    assert.equal(stored.remote_updated_at, "2026-08-15T10:00:00.000Z");
+    assert.equal(stored.analytics.refund_full.status, "sent");
+  } finally {
+    for (const key of envKeys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
 });
 
 test("shipment documents normalize labels and tracking for a CRM-owned Salla order", async () => {

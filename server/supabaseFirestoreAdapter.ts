@@ -27,6 +27,7 @@ const collectionPrefixes: Record<string, string> = {
   reminders: "rem",
   store_orders: "store",
   store_webhook_events: "swe",
+  storefront_attribution_claims: "sac",
   salla_order_inbox: "soi",
   salla_order_commands: "soc",
   technician_notifications: "tn",
@@ -425,6 +426,8 @@ class SupabaseCollectionRef {
   private filters: Filter[] = [];
   private sorts: Sort[] = [];
   private maxRows?: number;
+  private startOffset = 0;
+  private offsetRequested = false;
 
   constructor(public table: string) {}
 
@@ -453,6 +456,13 @@ class SupabaseCollectionRef {
   limit(count: number) {
     const next = this.clone();
     next.maxRows = count;
+    return next;
+  }
+
+  offset(count: number) {
+    const next = this.clone();
+    next.startOffset = Math.max(0, Math.trunc(count || 0));
+    next.offsetRequested = true;
     return next;
   }
 
@@ -491,14 +501,23 @@ class SupabaseCollectionRef {
         const batchSize = Math.min(POSTGREST_PAGE_SIZE, requestedRows - rows.length);
         const params = new URLSearchParams(baseParams);
         params.set("limit", String(batchSize));
-        params.set("offset", String(rows.length));
+        params.set("offset", String(this.startOffset + rows.length));
         const batch = await request<Record<string, unknown>[]>(this.table, params);
         rows.push(...batch);
         if (batch.length < batchSize) break;
       }
     } else {
       const params = new URLSearchParams(baseParams);
+      if (this.offsetRequested) {
+        const order = params.get("order");
+        if (!order) {
+          params.set("order", `${primaryKey}.asc`);
+        } else if (!order.split(",").some((entry) => entry.startsWith(`${primaryKey}.`))) {
+          params.set("order", `${order},${primaryKey}.asc`);
+        }
+      }
       if (requestedRows) params.set("limit", String(requestedRows));
+      if (this.startOffset) params.set("offset", String(this.startOffset));
       rows = await request<Record<string, unknown>[]>(this.table, params);
     }
 
@@ -512,6 +531,8 @@ class SupabaseCollectionRef {
     next.filters = [...this.filters];
     next.sorts = [...this.sorts];
     next.maxRows = this.maxRows;
+    next.startOffset = this.startOffset;
+    next.offsetRequested = this.offsetRequested;
     return next;
   }
 }

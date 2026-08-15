@@ -19,6 +19,7 @@ test("customer request flows through CRM assignment, booking, technician executi
         DB_PATH: path.join(directory, "crm.db"),
         NODE_ENV: "test",
         MAINTENANCE_PORTAL_SECRET: "test-only-maintenance-portal-secret-32-characters",
+        MAINTENANCE_MIN_LEAD_HOURS: "0",
       },
       encoding: "utf8",
     });

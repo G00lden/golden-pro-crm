@@ -37,6 +37,8 @@ const sensitiveInheritedKeys = [
   "SALLA_REDIRECT_URI",
   "STORE_WEBHOOK_SECRET",
   "STORE_WEBHOOK_OWNER_UID",
+  "STORE_ATTRIBUTION_SIGNING_SECRET",
+  "GA4_API_SECRET",
   "WHATSAPP_CLOUD_API_TOKEN",
   "WHATSAPP_ACCESS_TOKEN",
   "WHATSAPP_CLOUD_PHONE_NUMBER_ID",
@@ -636,6 +638,8 @@ try {
     assert.match(env, /WHATSAPP_CLOUD_TEMPLATE_NAME=\s*$/m);
     assert.match(env, /STORE_WEBHOOK_SECRET=\s*$/m);
     assert.match(env, /STORE_WEBHOOK_OWNER_UID=\s*$/m);
+    assert.match(env, /STORE_ATTRIBUTION_SIGNING_SECRET=\s*$/m);
+    assert.match(env, /GA4_API_SECRET=\s*$/m);
   });
 
   await check("firestore errors are user-safe", async () => {

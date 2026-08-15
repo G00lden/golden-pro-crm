@@ -143,6 +143,14 @@
         { "fieldPath": "createdBy", "order": "ASCENDING" },
         { "fieldPath": "imported_at", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "store_orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "createdBy", "order": "ASCENDING" },
+        { "fieldPath": "order_date", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

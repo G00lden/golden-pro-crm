@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "data", "golden-crm.db");
-const TARGET_SCHEMA_VERSION = 11004;
+const TARGET_SCHEMA_VERSION = 11006;
 const databaseExistedBeforeStartup = fs.existsSync(DB_PATH);
 
 // Ensure data directory exists
@@ -110,6 +110,7 @@ for (const col of [
   ["journey_status", "TEXT DEFAULT 'received'"],
   ["current_step", "TEXT"],
   ["order_id", "TEXT"],
+  ["checkout_id", "TEXT"],
   ["order_number", "TEXT"],
   ["order_date", "TEXT"],
   ["order_created_at", "TEXT"],
@@ -117,6 +118,24 @@ for (const col of [
   ["scheduled_date", "TEXT"],
   ["scheduled_time", "TEXT"],
   ["total", "NUMERIC"],
+  ["subtotal", "NUMERIC"],
+  ["shipping", "NUMERIC"],
+  ["tax", "NUMERIC"],
+  ["discount", "NUMERIC"],
+  ["currency", "TEXT DEFAULT 'SAR'"],
+  ["coupon", "TEXT"],
+  ["payment_status", "TEXT"],
+  ["payment_type_group", "TEXT"],
+  ["payment_method", "TEXT"],
+  ["attribution", "TEXT DEFAULT '{}'"],
+  ["analytics", "TEXT DEFAULT '{}'"],
+  ["analytics_reservation_token", "TEXT"],
+  ["analytics_reservation_key", "TEXT"],
+  ["analytics_reservation_at", "TEXT"],
+  ["analytics_reservation_mode", "TEXT"],
+  ["analytics_delivery_reconciliation_required", "INTEGER DEFAULT 0"],
+  ["attribution_claim_id", "TEXT"],
+  ["attribution_claimed_at", "TEXT"],
   ["provider", "TEXT DEFAULT 'salla'"],
   ["source", "TEXT DEFAULT 'salla'"],
   ["event_type", "TEXT"],
@@ -180,6 +199,7 @@ for (const col of [
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_imported ON store_orders(imported_at)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_owner_created ON store_orders(owner_uid, order_created_at DESC)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_owner_status_created ON store_orders(owner_uid, remote_status_slug, order_created_at DESC)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_store_orders_owner_order_date ON store_orders(owner_uid, order_date ASC)");
 
 // Durable Salla order synchronization queues. The inbox makes incoming events
 // replayable; commands provide an idempotent outbox for changes sent to Salla.
@@ -581,6 +601,25 @@ db.exec(`
     processed INTEGER DEFAULT 0,
     error TEXT,
     created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS storefront_attribution_claims (
+    id TEXT PRIMARY KEY,
+    owner_uid TEXT NOT NULL,
+    provider TEXT DEFAULT 'salla',
+    checkout_id TEXT NOT NULL,
+    claim_nonce_hash TEXT,
+    claim_token_hash TEXT,
+    attribution_hash TEXT,
+    attribution TEXT DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'issued',
+    authoritative_order_id TEXT,
+    order_id TEXT,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS technician_notifications (
@@ -1549,6 +1588,8 @@ for (const col of [
   }
 }
 db.exec("CREATE INDEX IF NOT EXISTS idx_store_webhook_events_owner_received ON store_webhook_events(owner_uid, received_at DESC)");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_storefront_attribution_claims_owner_checkout ON storefront_attribution_claims(owner_uid, checkout_id)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_storefront_attribution_claims_expiry ON storefront_attribution_claims(expires_at)");
 
 for (const col of [
   ["completed_at", "TEXT"],
@@ -2253,6 +2294,8 @@ db.exec(`
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11002, '1.9.7-maintenance-customer-experience');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11003, '1.9.8-periodic-maintenance-kits');
   INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11004, '1.9.9-maintenance-wizard-invoice-files');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11005, '2.0.2-inv90-order-measurement');
+  INSERT OR IGNORE INTO schema_migrations (version, release) VALUES (11006, '2.0.2-signed-storefront-attribution');
   `);
 }).immediate();
 db.pragma(`user_version = ${TARGET_SCHEMA_VERSION}`);

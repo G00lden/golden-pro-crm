@@ -153,6 +153,20 @@ async function main() {
       ok("STORE_WEBHOOK_OWNER_UID مضبوط");
     }
 
+    if (String(env.STORE_ATTRIBUTION_SIGNING_SECRET || "").length < 32) {
+      fail("STORE_ATTRIBUTION_SIGNING_SECRET must be a unique server-only secret of at least 32 characters");
+    } else {
+      ok(`Storefront attribution signing secret is configured (${masked(env.STORE_ATTRIBUTION_SIGNING_SECRET)})`);
+    }
+    const ga4Mode = String(env.GA4_MEASUREMENT_MODE || "disabled").trim().toLowerCase();
+    if (!["disabled", "validate", "collect"].includes(ga4Mode)) {
+      fail("GA4_MEASUREMENT_MODE must be disabled, validate, or collect");
+    } else if (ga4Mode !== "disabled" && (!env.GA4_MEASUREMENT_ID || !env.GA4_API_SECRET)) {
+      fail("GA4_MEASUREMENT_ID and GA4_API_SECRET are required when Measurement Protocol is enabled");
+    } else {
+      ok(`GA4 Measurement Protocol mode: ${ga4Mode}`);
+    }
+
     const maintenanceOwner = env.MAINTENANCE_REQUEST_OWNER_UID || env.PUBLIC_LEADS_OWNER_UID || env.STORE_WEBHOOK_OWNER_UID;
     if (!maintenanceOwner) fail("MAINTENANCE_REQUEST_OWNER_UID مطلوب لربط طلبات الصيانة بمساحة CRM");
     else ok("مالك مساحة طلبات الصيانة مضبوط");

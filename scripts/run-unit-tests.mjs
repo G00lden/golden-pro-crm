@@ -72,6 +72,7 @@ const files = [
   "server/storeOrderQuery.test.ts",
   "server/storeOrderRealtime.test.ts",
   "server/supabaseFirestoreAdapter.test.ts",
+  "server/sqliteFirestoreAdapter.pagination.test.ts",
   "src/dataProvider.test.ts",
   "src/filterUrlState.test.ts",
   "src/publicContact.test.ts",
