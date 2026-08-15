@@ -27,6 +27,7 @@ const collectionPrefixes: Record<string, string> = {
   reminders: "rem",
   store_orders: "store",
   store_webhook_events: "swe",
+  storefront_attribution_claims: "sac",
   salla_order_inbox: "soi",
   salla_order_commands: "soc",
   technician_notifications: "tn",

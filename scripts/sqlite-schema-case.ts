@@ -282,13 +282,33 @@ for (const required of [
 }
 
 const userVersion = Number(db.pragma("user_version", { simple: true }));
-if (userVersion !== 11005) throw new Error(`Expected schema 11005, got ${userVersion}`);
+if (userVersion !== 11006) throw new Error(`Expected schema 11006, got ${userVersion}`);
 for (const required of [
+  "checkout_id",
   "analytics_reservation_token",
   "analytics_reservation_key",
   "analytics_reservation_at",
+  "analytics_reservation_mode",
+  "attribution_claim_id",
+  "attribution_claimed_at",
 ]) {
   if (!columns("store_orders").has(required)) throw new Error(`store_orders.${required} is missing`);
+}
+for (const required of [
+  "owner_uid",
+  "checkout_id",
+  "claim_nonce_hash",
+  "claim_token_hash",
+  "attribution",
+  "status",
+  "expires_at",
+]) {
+  if (!columns("storefront_attribution_claims").has(required)) {
+    throw new Error(`storefront_attribution_claims.${required} is missing`);
+  }
+}
+if (!indexes("storefront_attribution_claims").get("idx_storefront_attribution_claims_owner_checkout")) {
+  throw new Error("idx_storefront_attribution_claims_owner_checkout must be unique");
 }
 if (!indexes("store_orders").has("idx_store_orders_owner_order_date")) {
   throw new Error("idx_store_orders_owner_order_date is missing");

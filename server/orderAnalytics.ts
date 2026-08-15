@@ -27,13 +27,18 @@ export type AnalyticsDeliveryResult = {
     | "validation_failed"
     | "sent"
     | "delivery_unknown"
+    | "retry_pending"
     | "failed";
+  mode?: Ga4MeasurementMode;
   event_name?: "purchase" | "refund";
   transaction_id?: string;
   validation_messages?: unknown[];
   http_status?: number;
   error?: string;
+  retry_after_ms?: number;
 };
+
+const DEFAULT_ANALYTICS_RESERVATION_TTL_MS = 5 * 60 * 1_000;
 
 function configuredMode(value: unknown): Ga4MeasurementMode {
   const normalized = String(value || "disabled").trim().toLocaleLowerCase("en-US");
@@ -69,7 +74,7 @@ export async function sendGa4OrderEvent(
   const event = buildGa4CommerceEvent(order);
   if (!event) return { status: "ignored" };
   const transactionId = String(event.params.transaction_id || "");
-  const base = { event_name: event.name, transaction_id: transactionId } as const;
+  const base = { event_name: event.name, transaction_id: transactionId, mode: config.mode } as const;
 
   if (config.mode === "disabled") return { status: "disabled", ...base };
   if (!config.measurementId || !config.apiSecret) return { status: "blocked_missing_config", ...base };
@@ -110,9 +115,9 @@ export async function sendGa4OrderEvent(
 
     return { status: "sent", ...base, http_status: response.status };
   } catch (error) {
-    // A network failure can happen after Google accepted the request. Treat it
-    // as terminal and require manual reconciliation instead of risking a
-    // duplicate purchase or refund on an automatic retry.
+    // A network failure can happen after Google accepted the request. The
+    // attempted mode is persisted so a debug/validate failure cannot suppress
+    // a later production collect attempt.
     return { status: "delivery_unknown", ...base, error: safeError(error) };
   }
 }
@@ -126,10 +131,24 @@ function deliveryKey(result: AnalyticsDeliveryResult, order: AnalyticsOrder) {
 
 function isTerminalDelivery(value: unknown, mode: Ga4MeasurementMode) {
   if (!value || typeof value !== "object") return false;
-  const status = String((value as Record<string, unknown>).status || "");
+  const record = value as Record<string, unknown>;
+  const status = String(record.status || "");
+  const attemptedMode = configuredMode(record.mode);
   return status === "sent"
-    || status === "delivery_unknown"
+    || (status === "delivery_unknown" && attemptedMode === "collect")
     || (status === "validated" && mode === "validate");
+}
+
+function analyticsReservationTtlMs() {
+  const configured = Number(process.env.ANALYTICS_RESERVATION_TTL_MS);
+  return Number.isFinite(configured) && configured >= 10_000
+    ? configured
+    : DEFAULT_ANALYTICS_RESERVATION_TTL_MS;
+}
+
+function reservationIsStale(value: unknown, nowMs = Date.now()) {
+  const reservedAtMs = Date.parse(String(value || ""));
+  return !Number.isFinite(reservedAtMs) || nowMs - reservedAtMs >= analyticsReservationTtlMs();
 }
 
 function numberOrUndefined(value: unknown) {
@@ -208,35 +227,43 @@ export async function deliverOrderAnalytics(
   }
 
   const currentReservation = String(saved.analytics_reservation_token || "");
-  if (currentReservation) {
+  if (currentReservation && !reservationIsStale(saved.analytics_reservation_at)) {
     return {
-      status: "ignored" as const,
-      duplicate: true,
+      status: "retry_pending" as const,
       in_flight: true,
       event_name: preview.name,
       transaction_id: String(preview.params.transaction_id || ""),
+      retry_after_ms: analyticsReservationTtlMs(),
     };
   }
 
   const reservationToken = randomUUID();
   const reservedAt = new Date().toISOString();
+  const reservationExpected = currentReservation
+    ? {
+        analytics_reservation_token: saved.analytics_reservation_token,
+        analytics_reservation_key: saved.analytics_reservation_key ?? null,
+        analytics_reservation_at: saved.analytics_reservation_at ?? null,
+      }
+    : { analytics_reservation_token: saved.analytics_reservation_token ?? null };
   const reserved = await compareAndSetDocument(
     orderRef,
-    { analytics_reservation_token: saved.analytics_reservation_token ?? null },
+    reservationExpected,
     {
       analytics_reservation_token: reservationToken,
       analytics_reservation_key: key,
       analytics_reservation_at: reservedAt,
+      analytics_reservation_mode: config.mode,
       updatedAt: reservedAt,
     },
   );
   if (!reserved) {
     return {
-      status: "ignored" as const,
-      duplicate: true,
+      status: "retry_pending" as const,
       in_flight: true,
       event_name: preview.name,
       transaction_id: String(preview.params.transaction_id || ""),
+      retry_after_ms: analyticsReservationTtlMs(),
     };
   }
 
@@ -275,6 +302,7 @@ export async function deliverOrderAnalytics(
       analytics_reservation_token: null,
       analytics_reservation_key: null,
       analytics_reservation_at: null,
+      analytics_reservation_mode: null,
       updatedAt: now,
     },
   );

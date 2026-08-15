@@ -1,5 +1,17 @@
 # تشغيل مطابقة طلبات INV90 بين سلة وGA4 وGoogle Ads
 
+## تحديث أمني: مطالبة تتبع موقّعة
+
+لا يقبل الخادم بيانات النقرة مباشرة مع رقم طلب مكتمل. أثناء خطوات الدفع يرسل الملحق `checkout_id` ومعرّفات القياس المسموح بها إلى `POST /api/storefront/attribution-claim` مع رمز عشوائي بطول 192 بت. يحفظ الخادم المطالبة مرة واحدة ويعيد رمزًا قصير العمر موقّعًا بـHMAC؛ ويبقى سر التوقيع على الخادم فقط.
+
+عند `Order Completed` يرسل المتصفح إلى `POST /api/storefront/order-attribution` رقم الطلب و`checkout_id` والقيمة والعملة والرمز الموقّع فقط. لا يتم الربط إلا بعد أن يصل Webhook سلة الموثّق ويحفظ `checkout_id` نفسه على الطلب، ولا يمكن استبدال مطالبة مرتبطة سابقًا. إذا وصل Webhook قبل إنشاء المطالبة يُغلق المعرّف دون مطالبة، منعًا لإصدار رمز بعد معرفة تفاصيل الطلب.
+
+```dotenv
+STORE_ATTRIBUTION_SIGNING_SECRET=server_only_random_secret_at_least_32_characters
+STORE_ATTRIBUTION_CLAIM_TTL_SECONDS=14400
+ANALYTICS_RESERVATION_TTL_MS=300000
+```
+
 ## النتيجة التي ينفذها هذا الفرع
 
 - يستقبل مسار سلة الحالي `POST /api/integrations/salla/webhook` أحداث الطلب والدفعة والإلغاء والاسترجاع.
@@ -12,15 +24,13 @@
 ## ملتقط واجهة سلة
 
 - ملف الإنتاج هو `https://crm.breexe-pro.com/inv90-tracker.js` ويضاف في بوابة شركاء سلة كـApp Snippet.
-- يسجل نفسه عبر `Salla.analytics.registerTracker` ويستجيب فقط لحدث `Order Completed` الرسمي.
-- لا يقرأ أو يرسل الاسم أو الهاتف أو البريد أو طريقة الدفع. لا يبدأ الالتقاط إلا عند وجود كوكي `_ga`، ثم يرسل الحقول التالية إلى `POST /api/storefront/order-attribution`:
+- يسجل نفسه عبر `Salla.analytics.registerTracker`. ينشئ المطالبة عند `Checkout Step Viewed` أو `Checkout Step Completed` أو `Payment Info Entered`، ثم يستخدمها عند `Order Completed`.
+- لا يقرأ أو يرسل الاسم أو الهاتف أو البريد أو طريقة الدفع. لا يبدأ الالتقاط إلا عند وجود كوكي `_ga`. طلب إنشاء المطالبة إلى `POST /api/storefront/attribution-claim` هو:
 
 ```json
 {
-  "order_id": "123456789",
   "checkout_id": "...",
-  "total": 199,
-  "currency": "SAR",
+  "claim_nonce": "192-bit-random-value",
   "client_id": "123456789.987654321",
   "session_id": "1723456789",
   "gclid": "...",
@@ -29,6 +39,18 @@
   "utm_source": "google",
   "utm_medium": "cpc",
   "utm_campaign": "SA_INV90_..."
+}
+```
+
+وبعد توقيع المطالبة يرسل حدث اكتمال الطلب الحقول الآتية فقط:
+
+```json
+{
+  "order_id": "123456789",
+  "checkout_id": "...",
+  "claim_token": "signed-payload.signature",
+  "total": 199,
+  "currency": "SAR"
 }
 ```
 

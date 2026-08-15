@@ -67,6 +67,7 @@ function fakeOrderRef(initial: Record<string, unknown> = {}) {
     analytics_reservation_token: null,
     analytics_reservation_key: null,
     analytics_reservation_at: null,
+    analytics_reservation_mode: null,
     ...initial,
   };
   return {
@@ -104,8 +105,51 @@ test("atomically permits only one concurrent purchase delivery", async () => {
   ]);
 
   assert.equal(calls, 1);
-  assert.deepEqual(results.map((result) => result.status).sort(), ["ignored", "sent"]);
+  assert.deepEqual(results.map((result) => result.status).sort(), ["retry_pending", "sent"]);
   assert.equal((ref.data().analytics as any).purchase.status, "sent");
+});
+
+test("keeps a refund retryable while a purchase lease is active", async () => {
+  const ref = fakeOrderRef();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    await blocked;
+    return new Response(null, { status: 204 });
+  };
+  const purchase = deliverOrderAnalytics("owner-a", "order-1", sample, collect, fetchImpl, ref);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const refund = await deliverOrderAnalytics(
+    "owner-a",
+    "order-1",
+    { ...sample, eventType: "order.refunded", eventId: "refund-concurrent" },
+    collect,
+    fetchImpl,
+    ref,
+  );
+  assert.equal(refund.status, "retry_pending");
+  release();
+  assert.equal((await purchase).status, "sent");
+  assert.equal(calls, 1);
+});
+
+test("reclaims a stale analytics lease instead of suppressing delivery forever", async () => {
+  const ref = fakeOrderRef({
+    analytics_reservation_token: "abandoned-token",
+    analytics_reservation_key: "purchase",
+    analytics_reservation_at: "2020-01-01T00:00:00.000Z",
+    analytics_reservation_mode: "collect",
+  });
+  let calls = 0;
+  const result = await deliverOrderAnalytics("owner-a", "order-1", sample, collect, async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  }, ref);
+  assert.equal(result.status, "sent");
+  assert.equal(calls, 1);
+  assert.equal(ref.data().analytics_reservation_token, null);
 });
 
 test("deduplicates a full refund across cancelled and refunded webhooks", async () => {
@@ -167,4 +211,20 @@ test("fails closed after an ambiguous network delivery error", async () => {
   assert.equal(first.status, "delivery_unknown");
   assert.equal(second.status, "ignored");
   assert.equal(calls, 1);
+});
+
+test("does not let an ambiguous validate request suppress later collect delivery", async () => {
+  const ref = fakeOrderRef();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("debug endpoint connection reset");
+    return new Response(null, { status: 204 });
+  };
+  const validation = await deliverOrderAnalytics("owner-a", "order-1", sample, configured, fetchImpl, ref);
+  const delivery = await deliverOrderAnalytics("owner-a", "order-1", sample, collect, fetchImpl, ref);
+  assert.equal(validation.status, "delivery_unknown");
+  assert.equal(delivery.status, "sent");
+  assert.equal(calls, 2);
+  assert.equal((ref.data().analytics as any).purchase.mode, "collect");
 });

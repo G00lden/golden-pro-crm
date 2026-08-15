@@ -17,6 +17,8 @@ import { storeOrderRealtimeListenerCount, subscribeStoreOrderChanges } from "./s
 import { getStoreOrderPageForUser, normalizeStoreOrderRemoteFields } from "./storeOrderQuery";
 import {
   attachStorefrontOrderAttribution,
+  issueStorefrontAttributionClaim,
+  normalizeStorefrontAttributionClaim,
   normalizeStorefrontOrderAttribution,
   resolveStorefrontAttributionOwnerUid,
   storefrontAttributionOriginAllowed,
@@ -87,6 +89,28 @@ export function registerStoreRoutes(app: Express, options: StoreRouteOptions) {
   app.options("/api/storefront/order-attribution", allowStorefrontOrigin, (_req, res) => {
     res.status(204).end();
   });
+
+  app.options("/api/storefront/attribution-claim", allowStorefrontOrigin, (_req, res) => {
+    res.status(204).end();
+  });
+
+  app.post(
+    "/api/storefront/attribution-claim",
+    webhookRateLimit,
+    allowStorefrontOrigin,
+    express.text({ type: "text/plain", limit: "16kb" }),
+    asyncRoute(async (req, res) => {
+      const ownerUid = resolveStorefrontAttributionOwnerUid();
+      if (!ownerUid) {
+        res.status(503).json({ error: "Storefront attribution is not configured." });
+        return;
+      }
+      const input = normalizeStorefrontAttributionClaim(req.body);
+      const result = await issueStorefrontAttributionClaim(ownerUid, input);
+      res.setHeader("Cache-Control", "no-store");
+      res.status(201).json(result);
+    }),
+  );
 
   app.post(
     "/api/storefront/order-attribution",

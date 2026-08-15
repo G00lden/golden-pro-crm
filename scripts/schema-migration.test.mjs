@@ -30,7 +30,7 @@ test("a fresh database receives the complete current schema", () => {
   const { directory, result } = runCase("fresh");
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11005/);
+    assert.match(result.stdout, /"userVersion":11006/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -52,7 +52,7 @@ test("production upgrade creates a pre-migration backup", () => {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11005/);
+    assert.match(backups[0], /pre-schema-11006/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -62,10 +62,10 @@ test("a previous 10307 deployment upgrades through a new backup and ledger marke
   const { directory, result } = runCase("previous-10307", true);
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11005/);
+    assert.match(result.stdout, /"userVersion":11006/);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11005/);
+    assert.match(backups[0], /pre-schema-11006/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -127,10 +127,10 @@ test("a previous 11003 deployment preserves attachments while enabling invoice d
   const { directory, result } = runCase("previous-11003", true);
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11005/);
+    assert.match(result.stdout, /"userVersion":11006/);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11005/);
+    assert.match(backups[0], /pre-schema-11006/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -151,14 +151,33 @@ test("the Supabase INV90 migration includes atomic analytics delivery and reconc
   }
 });
 
+test("the Supabase storefront attribution migration requires signed checkout claims", () => {
+  const migration = readFileSync(
+    path.join(root, "supabase", "migrations", "20260815113000_storefront_attribution_claims.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "checkout_id text",
+    "analytics_reservation_mode text",
+    "attribution_claim_id text",
+    "storefront_attribution_claims",
+    "claim_nonce_hash text",
+    "claim_token_hash text",
+    "attribution jsonb",
+    "enable row level security",
+  ]) {
+    assert.match(migration, new RegExp(required));
+  }
+});
+
 test("a previous 11004 deployment adds atomic analytics reservations with a backup", () => {
   const { directory, result } = runCase("previous-11004", true);
   try {
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /"userVersion":11005/);
+    assert.match(result.stdout, /"userVersion":11006/);
     const backups = readdirSync(path.join(directory, "backups"));
     assert.equal(backups.length, 1);
-    assert.match(backups[0], /pre-schema-11005/);
+    assert.match(backups[0], /pre-schema-11006/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

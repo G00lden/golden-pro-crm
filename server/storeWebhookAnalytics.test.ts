@@ -8,6 +8,7 @@ test("normalizes private payment, attribution and SKU fields from a Salla order"
     event_id: "event-123",
     data: {
       id: 123,
+      checkout_id: "checkout-123",
       reference_id: "ORD-123",
       status: { name: "جاري التجهيز" },
       payment_status: "paid",
@@ -46,6 +47,8 @@ test("normalizes private payment, attribution and SKU fields from a Salla order"
 
   const normalized = normalizeStorePayload(req, Buffer.from(JSON.stringify(body)));
   assert.equal(normalized.orderNumber, "ORD-123");
+  assert.equal(normalized.checkoutId, "checkout-123");
+  assert.equal(normalized.projectionExtras?.checkout_id, "checkout-123");
   assert.equal(normalized.customerName, "Private Customer");
   assert.equal(normalized.paymentMethodRaw, "مدى");
   assert.equal(normalized.paymentTypeGroup, "Mada");

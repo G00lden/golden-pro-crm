@@ -79,6 +79,7 @@ export type StoreWebhookOrder = {
   eventType: string;
   eventId: string;
   orderId: string;
+  checkoutId?: string;
   orderNumber: string;
   status: string;
   customerName: string;
@@ -890,6 +891,7 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
   const isRead = optionalBoolean(order.is_read, order.read, metadata.is_read);
   const isUnread = optionalBoolean(order.unread, metadata.unread);
   const projectionExtras = {
+    checkout_id: truncate(firstText(order.checkout_id, order.checkoutId, data.checkout_id, body.checkout_id), 100) || null,
     order_created_at: created?.createdAt || null,
     order_date: created?.orderDate || null,
     order_timezone: created?.timezone || null,
@@ -980,6 +982,7 @@ export function normalizeStorePayload(req: Request, rawBody: Buffer): StoreWebho
     eventType,
     eventId,
     orderId,
+    checkoutId: truncate(firstText(order.checkout_id, order.checkoutId, data.checkout_id, body.checkout_id), 100) || undefined,
     orderNumber,
     status: truncate(firstDisplayValue(order.status, body.status, "new"), 40),
     customerName,
@@ -1808,6 +1811,7 @@ async function importStoreOrder(
     provider: order.provider,
     event_type: order.eventType,
     order_id: order.orderId,
+    checkout_id: order.checkoutId || existingOrder.checkout_id || null,
     order_number: order.orderNumber,
     status: order.status,
     journey_status: journeyStatus,
@@ -3175,6 +3179,11 @@ export async function processStoreWebhook(req: RawBodyRequest) {
   const { authMode, rawBody } = verifyStoreWebhook(req);
   const order = normalizeStorePayload(req, rawBody);
 
+  if (order.checkoutId) {
+    const { closeStorefrontAttributionClaim } = await import("./storefrontAttribution");
+    await closeStorefrontAttributionClaim(ownerUid, order.checkoutId, order.orderId);
+  }
+
   if (localStoreFallbackEnabled()) {
     return localProcessStoreWebhook(ownerUid, authMode, rawBody, order, req.body);
   }
@@ -3217,10 +3226,15 @@ export async function processStoreWebhook(req: RawBodyRequest) {
       sync_origin: "store_webhook",
     });
     const orderDocId = getStoreOrderDocId(ownerUid, order.provider, order.orderId);
-    const analytics = await deliverOrderAnalytics(ownerUid, orderDocId, order).catch((analyticsError) => ({
-      status: "failed" as const,
-      error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
-    }));
+    const analytics = await deliverOrderAnalytics(ownerUid, orderDocId, order);
+    if (analytics.status === "retry_pending" || analytics.status === "failed") {
+      throw httpError(
+        503,
+        analytics.status === "retry_pending"
+          ? "Order analytics delivery is already in progress; retry this webhook."
+          : `Order analytics delivery failed; retry this webhook. ${analytics.error || ""}`.trim(),
+      );
+    }
     const processedAt = new Date().toISOString();
     await eventRef.set({
       createdBy: ownerUid,
@@ -3252,7 +3266,10 @@ export async function processStoreWebhook(req: RawBodyRequest) {
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    await eventRef.set({
+    await compareAndSetDocument(eventRef, {
+      status: "processing",
+      received_at: now,
+    }, {
       createdBy: ownerUid,
       provider: order.provider,
       event_type: order.eventType,
@@ -3264,7 +3281,7 @@ export async function processStoreWebhook(req: RawBodyRequest) {
       status: "failed",
       processed_at: new Date().toISOString(),
       error: errorMessage,
-    }, { merge: true });
+    });
     throw error;
   }
 }

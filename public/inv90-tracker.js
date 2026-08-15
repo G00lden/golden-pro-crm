@@ -2,7 +2,9 @@
   "use strict";
 
   var endpoint = "https://crm.breexe-pro.com/api/storefront/order-attribution";
+  var claimEndpoint = "https://crm.breexe-pro.com/api/storefront/attribution-claim";
   var storagePrefix = "inv90_attribution_";
+  var pendingClaims = {};
 
   function cookie(name) {
     var prefix = name + "=";
@@ -53,16 +55,23 @@
     return true;
   }
 
-  function payloadForOrder(payload) {
+  function attributionPayload(checkoutId) {
     var clientId = gaClientId();
-    var total = payload && Number(payload.total);
-    var currency = payload && String(payload.currency || "").trim().toUpperCase();
-    if (!clientId || !payload || !payload.order_id || !Number.isFinite(total) || total <= 0 || currency !== "SAR") return null;
+    if (!clientId || !checkoutId) return null;
+    var nonceKey = "claim_nonce_" + checkoutId;
+    var claimNonce = safeSessionGet(nonceKey);
+    if (!claimNonce) {
+      if (!window.crypto || typeof window.crypto.getRandomValues !== "function") return null;
+      var bytes = new Uint8Array(24);
+      window.crypto.getRandomValues(bytes);
+      claimNonce = Array.prototype.map.call(bytes, function (value) {
+        return value.toString(16).padStart(2, "0");
+      }).join("");
+      safeSessionSet(nonceKey, claimNonce);
+    }
     return {
-      order_id: String(payload.order_id).slice(0, 80),
-      checkout_id: payload.checkout_id ? String(payload.checkout_id).slice(0, 100) : undefined,
-      total: Math.round(total * 100) / 100,
-      currency: currency,
+      checkout_id: String(checkoutId).slice(0, 100),
+      claim_nonce: claimNonce,
       client_id: clientId,
       session_id: gaSessionId() || undefined,
       gclid: safeSessionGet("gclid") || undefined,
@@ -73,6 +82,49 @@
       utm_campaign: safeSessionGet("utm_campaign") || undefined,
       utm_content: safeSessionGet("utm_content") || undefined,
       utm_term: safeSessionGet("utm_term") || undefined
+    };
+  }
+
+  function claimForCheckout(checkoutId) {
+    var normalized = checkoutId ? String(checkoutId).slice(0, 100) : "";
+    if (!normalized) return Promise.reject(new Error("Checkout identifier is missing."));
+    var tokenKey = "claim_token_" + normalized;
+    var storedToken = safeSessionGet(tokenKey);
+    if (storedToken) return Promise.resolve(storedToken);
+    if (pendingClaims[normalized]) return pendingClaims[normalized];
+    var claim = attributionPayload(normalized);
+    if (!claim) return Promise.reject(new Error("Consented attribution is unavailable."));
+    pendingClaims[normalized] = window.fetch(claimEndpoint, {
+      method: "POST",
+      mode: "cors",
+      credentials: "omit",
+      keepalive: true,
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify(claim)
+    }).then(function (response) {
+      if (!response.ok) throw new Error("Attribution claim was rejected.");
+      return response.json();
+    }).then(function (result) {
+      var token = result && String(result.claim_token || "");
+      if (!token) throw new Error("Attribution claim token is missing.");
+      safeSessionSet(tokenKey, token);
+      return token;
+    }).finally(function () {
+      delete pendingClaims[normalized];
+    });
+    return pendingClaims[normalized];
+  }
+
+  function payloadForOrder(payload, claimToken) {
+    var total = payload && Number(payload.total);
+    var currency = payload && String(payload.currency || "").trim().toUpperCase();
+    if (!payload || !payload.order_id || !payload.checkout_id || !claimToken || !Number.isFinite(total) || total <= 0 || currency !== "SAR") return null;
+    return {
+      order_id: String(payload.order_id).slice(0, 80),
+      checkout_id: String(payload.checkout_id).slice(0, 100),
+      claim_token: claimToken,
+      total: Math.round(total * 100) / 100,
+      currency: currency
     };
   }
 
@@ -114,9 +166,16 @@
     window.Salla.analytics.registerTracker({
       name: "GoldenProINV90",
       track: function (eventName, payload) {
-        if (eventName !== "Order Completed") return;
-        var data = payloadForOrder(payload);
-        if (data) postAttribution(data, 0);
+        var checkoutId = payload && payload.checkout_id;
+        if (eventName === "Checkout Step Viewed" || eventName === "Checkout Step Completed" || eventName === "Payment Info Entered") {
+          if (checkoutId) claimForCheckout(checkoutId).catch(function () { /* retry on the next checkout event */ });
+          return;
+        }
+        if (eventName !== "Order Completed" || !checkoutId) return;
+        claimForCheckout(checkoutId).then(function (claimToken) {
+          var data = payloadForOrder(payload, claimToken);
+          if (data) postAttribution(data, 0);
+        }).catch(function () { /* fail closed: never post an unsigned order */ });
       }
     });
   });
