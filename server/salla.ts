@@ -2557,6 +2557,7 @@ async function applySignedSallaOrderPatch(
   remoteOrderId: string,
   remoteOrder: Record<string, any>,
   eventType: string,
+  eventId: string,
   occurredAt: string,
   attempt = 0,
 ) {
@@ -2594,8 +2595,31 @@ async function applySignedSallaOrderPatch(
     updatedAt,
   });
   if (!changed) {
-    if (attempt < 2) return applySignedSallaOrderPatch(currentUid, remoteOrderId, remoteOrder, eventType, occurredAt, attempt + 1);
+    if (attempt < 2) return applySignedSallaOrderPatch(currentUid, remoteOrderId, remoteOrder, eventType, eventId, occurredAt, attempt + 1);
     throw new Error(`Salla order ${orderDocId} changed concurrently while applying webhook status.`);
+  }
+  const analytics = await deliverOrderAnalytics(currentUid, orderDocId, {
+    eventType,
+    eventId,
+    orderId: remoteOrderId,
+    orderNumber: firstText(current.order_number, current.orderNumber, remoteOrderId),
+    status: status.name || status.slug || firstText(current.status, "new"),
+    paymentStatus: firstText(current.payment_status, current.paymentStatus) || undefined,
+    paymentTypeGroup: firstText(current.payment_type_group, current.paymentTypeGroup) || undefined,
+    currency: firstText(current.currency, "SAR"),
+    items: [],
+  }).catch((analyticsError) => ({
+    status: "failed" as const,
+    error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
+  }));
+  if (analytics.status === "retry_pending" || analytics.status === "failed") {
+    const error = new Error(
+      analytics.status === "retry_pending"
+        ? "Order analytics delivery is already in progress; retry this Salla webhook."
+        : `Order analytics delivery failed; retry this Salla webhook. ${analytics.error || ""}`.trim(),
+    ) as Error & { status?: number };
+    error.status = 503;
+    throw error;
   }
   publishStoreOrderChange(currentUid, {
     type: eventType === "order.created" || eventType === "order.deleted" ? eventType : "order.updated",
@@ -2613,7 +2637,7 @@ async function applySignedSallaOrderPatch(
         deliveredAt: occurredAt,
       })
     : null;
-  return { orderDocId, existed: true, stale: false, status, deliveryReview };
+  return { orderDocId, existed: true, stale: false, status, analytics, deliveryReview };
 }
 
 function remoteOrderProjectionExtras(remoteOrder: Record<string, any>, origin: "salla_webhook" | "salla_command") {
@@ -3516,6 +3540,7 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
         remoteOrderId,
         signedOrder,
         event,
+        signedEventId,
         observedAt,
       );
       if (patched) return { ...patched, fallback: "signed_webhook_patch" };

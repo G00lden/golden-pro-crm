@@ -44,6 +44,10 @@
     try { window.sessionStorage.setItem(storagePrefix + key, value); } catch (_) { /* no-op */ }
   }
 
+  function safeSessionRemove(key) {
+    try { window.sessionStorage.removeItem(storagePrefix + key); } catch (_) { /* no-op */ }
+  }
+
   function captureCampaign() {
     if (!gaClientId()) return false;
     var params = new URLSearchParams(window.location.search || "");
@@ -85,16 +89,22 @@
     };
   }
 
-  function claimForCheckout(checkoutId) {
-    var normalized = checkoutId ? String(checkoutId).slice(0, 100) : "";
-    if (!normalized) return Promise.reject(new Error("Checkout identifier is missing."));
-    var tokenKey = "claim_token_" + normalized;
-    var storedToken = safeSessionGet(tokenKey);
-    if (storedToken) return Promise.resolve(storedToken);
-    if (pendingClaims[normalized]) return pendingClaims[normalized];
-    var claim = attributionPayload(normalized);
-    if (!claim) return Promise.reject(new Error("Consented attribution is unavailable."));
-    pendingClaims[normalized] = window.fetch(claimEndpoint, {
+  function reusableClaim(tokenKey) {
+    var raw = safeSessionGet(tokenKey);
+    if (!raw) return "";
+    try {
+      var saved = JSON.parse(raw);
+      var expiresAt = Date.parse(String(saved.expires_at || ""));
+      if (saved.token && Number.isFinite(expiresAt) && expiresAt > Date.now() + 30000) {
+        return String(saved.token);
+      }
+    } catch (_) { /* Legacy plaintext tokens are deliberately renewed. */ }
+    safeSessionRemove(tokenKey);
+    return "";
+  }
+
+  function requestClaim(claim, tokenKey, attempt) {
+    return window.fetch(claimEndpoint, {
       method: "POST",
       mode: "cors",
       credentials: "omit",
@@ -102,14 +112,46 @@
       headers: { "Content-Type": "text/plain;charset=UTF-8" },
       body: JSON.stringify(claim)
     }).then(function (response) {
-      if (!response.ok) throw new Error("Attribution claim was rejected.");
-      return response.json();
-    }).then(function (result) {
-      var token = result && String(result.claim_token || "");
-      if (!token) throw new Error("Attribution claim token is missing.");
-      safeSessionSet(tokenKey, token);
-      return token;
-    }).finally(function () {
+      if (!response.ok) {
+        if (attempt < 5 && (response.status === 429 || response.status >= 500)) {
+          return new Promise(function (resolve) {
+            window.setTimeout(resolve, Math.pow(2, attempt) * 1000);
+          }).then(function () { return requestClaim(claim, tokenKey, attempt + 1); });
+        }
+        var rejected = new Error("Attribution claim was rejected.");
+        rejected.noRetry = true;
+        throw rejected;
+      }
+      return response.json().then(function (result) {
+        var token = result && String(result.claim_token || "");
+        if (!token) {
+          var invalid = new Error("Attribution claim token is missing.");
+          invalid.noRetry = true;
+          throw invalid;
+        }
+        safeSessionSet(tokenKey, JSON.stringify({ token: token, expires_at: String(result.expires_at || "") }));
+        return token;
+      });
+    }).catch(function (error) {
+      if (attempt < 5 && !(error && error.noRetry)) {
+        return new Promise(function (resolve) {
+          window.setTimeout(resolve, Math.pow(2, attempt) * 1000);
+        }).then(function () { return requestClaim(claim, tokenKey, attempt + 1); });
+      }
+      throw error;
+    });
+  }
+
+  function claimForCheckout(checkoutId) {
+    var normalized = checkoutId ? String(checkoutId).slice(0, 100) : "";
+    if (!normalized) return Promise.reject(new Error("Checkout identifier is missing."));
+    var tokenKey = "claim_token_" + normalized;
+    var storedToken = reusableClaim(tokenKey);
+    if (storedToken) return Promise.resolve(storedToken);
+    if (pendingClaims[normalized]) return pendingClaims[normalized];
+    var claim = attributionPayload(normalized);
+    if (!claim) return Promise.reject(new Error("Consented attribution is unavailable."));
+    pendingClaims[normalized] = requestClaim(claim, tokenKey, 0).finally(function () {
       delete pendingClaims[normalized];
     });
     return pendingClaims[normalized];

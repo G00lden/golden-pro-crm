@@ -287,7 +287,38 @@ export async function issueStorefrontAttributionClaim(
     expiresAt = String(saved.expires_at || expiresAt);
     const expiresAtMs = Date.parse(expiresAt);
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
-      throw new StorefrontAttributionError(410, "The checkout attribution claim has expired.");
+      // A checkout can remain open longer than the claim TTL. Renew only the
+      // exact same, still-unclosed claim so a stale browser token can be
+      // replaced without allowing attribution to be changed after checkout.
+      const renewedIssuedAt = new Date(nowMs).toISOString();
+      const renewedExpiresAt = new Date(nowMs + claimTtlSeconds(env) * 1_000).toISOString();
+      const renewed = await compareAndSetDocument(claimRef, {
+        status: "issued",
+        claim_nonce_hash: saved.claim_nonce_hash,
+        attribution_hash: saved.attribution_hash,
+        expires_at: saved.expires_at,
+      }, {
+        issued_at: renewedIssuedAt,
+        expires_at: renewedExpiresAt,
+        updatedAt: renewedIssuedAt,
+      });
+      if (renewed) {
+        issuedAt = renewedIssuedAt;
+        expiresAt = renewedExpiresAt;
+      } else {
+        const refreshed = await claimRef.get();
+        const latest = refreshed.exists ? refreshed.data() || {} : {};
+        if (
+          String(latest.status || "") !== "issued" ||
+          String(latest.claim_nonce_hash || "") !== nonceHash ||
+          String(latest.attribution_hash || "") !== attributionHash ||
+          Date.parse(String(latest.expires_at || "")) <= nowMs
+        ) {
+          throw new StorefrontAttributionError(409, "The checkout attribution claim changed while it was being renewed.");
+        }
+        issuedAt = String(latest.issued_at || renewedIssuedAt);
+        expiresAt = String(latest.expires_at || renewedExpiresAt);
+      }
     }
   }
 
