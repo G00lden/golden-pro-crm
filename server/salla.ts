@@ -1905,6 +1905,18 @@ function sallaAttribution(remoteOrder: Record<string, any>) {
   return Object.keys(compact).length ? compact : undefined;
 }
 
+function sallaCheckoutId(remoteOrder: Record<string, any>) {
+  const checkout = asRecord(remoteOrder.checkout);
+  const metadata = asRecord(remoteOrder.metadata || remoteOrder.meta);
+  return truncate(firstText(
+    remoteOrder.checkout_id,
+    remoteOrder.checkoutId,
+    checkout.id,
+    checkout.checkout_id,
+    metadata.checkout_id,
+  ), 100) || undefined;
+}
+
 async function relinkDirectProductReferences(
   uid: string,
   replacements: ReadonlyMap<string, ProductReplacement>,
@@ -2328,6 +2340,7 @@ function mapSallaOrder(remoteOrder: Record<string, any>): StoreWebhookOrder | nu
     eventType: "salla.api.sync",
     eventId: `salla:sync:${orderId}:${versionStamp}`,
     orderId: truncate(orderId, 80),
+    checkoutId: sallaCheckoutId(remoteOrder),
     orderNumber: truncate(firstText(remoteOrder.reference_id, remoteOrder.number, orderId), 80),
     status: truncate(firstText(statusRecord.name, statusRecord.slug, remoteOrder.status, "new"), 40),
     customerName: truncate(
@@ -2652,12 +2665,25 @@ async function persistAuthoritativeSallaOrder(
     : await projectStoreOrderForUser(currentUid, normalized, extras);
   if (imported.booking_ids.length) queueFieldTechSync("salla_webhook_booking_ready");
   const orderDocId = getStoreOrderDocId(currentUid, "salla", normalized.orderId);
+  if (options.origin === "salla_webhook" && normalized.checkoutId) {
+    const { closeStorefrontAttributionClaim } = await import("./storefrontAttribution");
+    await closeStorefrontAttributionClaim(currentUid, normalized.checkoutId, normalized.orderId);
+  }
   const analytics = options.origin === "salla_webhook"
     ? await deliverOrderAnalytics(currentUid, orderDocId, normalized).catch((analyticsError) => ({
         status: "failed" as const,
         error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
       }))
     : { status: "not_applicable" as const };
+  if (analytics.status === "retry_pending" || analytics.status === "failed") {
+    const error = new Error(
+      analytics.status === "retry_pending"
+        ? "Order analytics delivery is already in progress; retry this Salla webhook."
+        : `Order analytics delivery failed; retry this Salla webhook. ${analytics.error || ""}`.trim(),
+    ) as Error & { status?: number };
+    error.status = 503;
+    throw error;
+  }
   const status = sallaRemoteStatus(remoteOrder);
   const deliveryReview = isDeliveredSallaStatus(status.slug)
     ? queueDeliveryReview({
@@ -3457,6 +3483,10 @@ export async function handleSallaAppWebhook(req: Request & { rawBody?: Buffer })
       // failure must never be mistaken for a Salla connectivity failure (most
       // importantly, it must not turn an order into a deleted order).
       if (remoteOrder) {
+        const signedCheckoutId = sallaCheckoutId(signedOrder);
+        if (signedCheckoutId && !sallaCheckoutId(remoteOrder)) {
+          remoteOrder = { ...remoteOrder, checkout_id: signedCheckoutId };
+        }
         return persistAuthoritativeSallaOrder(uid, remoteOrder, {
           operationalCreate: event === "order.created",
           origin: "salla_webhook",

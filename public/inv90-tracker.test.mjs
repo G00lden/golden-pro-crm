@@ -57,3 +57,52 @@ test("extracts a GA4 GS2 session id from the current cookie format", async () =>
   assert.equal(posted.checkout_id, "checkout-123");
   assert.equal(posted.client_id, undefined);
 });
+
+test("retries order attribution when the signed Salla webhook has not closed the claim yet", async () => {
+  const source = await readFile(new URL("./inv90-tracker.js", import.meta.url), "utf8");
+  const storage = new Map();
+  let tracker;
+  let attributionAttempts = 0;
+  const window = {
+    location: { search: "" },
+    sessionStorage: {
+      getItem: (key) => storage.get(key) || null,
+      setItem: (key, value) => storage.set(key, String(value)),
+    },
+    crypto: { getRandomValues: (bytes) => bytes.fill(8) },
+    fetch: async (url) => {
+      if (String(url).endsWith("/attribution-claim")) {
+        return new Response(JSON.stringify({ claim_token: "signedPayload.signedValue" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      attributionAttempts += 1;
+      return new Response(null, { status: attributionAttempts === 1 ? 404 : 204 });
+    },
+    setTimeout: (callback) => queueMicrotask(callback),
+    clearInterval,
+    setInterval,
+    Salla: {
+      onReady: (callback) => callback(),
+      analytics: { registerTracker: (value) => { tracker = value; } },
+    },
+  };
+  vm.runInNewContext(source, {
+    window,
+    document: { cookie: "_ga=GA1.1.123456789.987654321" },
+    URLSearchParams,
+    Response,
+    Number,
+    JSON,
+    decodeURIComponent,
+  });
+
+  tracker.track("Checkout Step Viewed", { checkout_id: "checkout-race" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  tracker.track("Order Completed", { order_id: "SALLA-RACE", checkout_id: "checkout-race", total: 199, currency: "SAR" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(attributionAttempts, 2);
+  assert.equal(storage.get("inv90_attribution_sent_SALLA-RACE"), "1");
+});

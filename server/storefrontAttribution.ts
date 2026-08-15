@@ -346,11 +346,17 @@ async function verifiedClaim(
   const claim = snapshot.data() || {};
   if (String(claim.createdBy || claim.owner_uid || "") !== ownerUid ||
       String(claim.checkout_id || "") !== input.checkoutId ||
-      String(claim.authoritative_order_id || "") !== input.orderId ||
       String(claim.claim_nonce_hash || "") !== String(payload.nonce_hash || "") ||
       String(claim.expires_at || "") !== tokenExpiresAt ||
       String(claim.claim_token_hash || "") !== digest(input.claimToken) ||
       !["issued", "consumed"].includes(String(claim.status || ""))) {
+    throw new StorefrontAttributionError(401, "The checkout attribution claim does not match this order.");
+  }
+  const authoritativeOrderId = String(claim.authoritative_order_id || "");
+  if (!authoritativeOrderId) {
+    throw new StorefrontAttributionError(404, "The signed Salla order is not ready for attribution yet.");
+  }
+  if (authoritativeOrderId !== input.orderId) {
     throw new StorefrontAttributionError(401, "The checkout attribution claim does not match this order.");
   }
   return { claimId, claimRef, claim };
