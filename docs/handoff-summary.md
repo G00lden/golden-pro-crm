@@ -700,3 +700,11 @@ https://github.com/G00lden/golden-pro-crm/pull/new/hermes/legal-and-copy
 - Supply-chain overrides moved `nanoid` to `3.3.18` and `dompurify` to `3.4.13`; a full `npm audit` now reports zero known vulnerabilities.
 - Verification passed: `467/467` unit tests, `14/14` analytics tests, TypeScript lint, production build, JavaScript syntax, diff whitespace, and source security audit with zero secret findings.
 - Production remains intentionally unpublished until an independent PR review completes, the GA4 Measurement Protocol secret and Salla App Snippet are configured, and a real low-value order plus refund proves one purchase, SKU/value parity, and no PII leakage before any Google Ads campaign is enabled.
+
+## 2026-08-15 - INV90 production measurement hardening [Codex]
+
+- Accepted both direct and `properties`-wrapped Salla Device Mode payloads for checkout claim acquisition and `Order Completed` attribution, without adding duplicate browser-side GA4 funnel events alongside Salla's official Google Analytics integration.
+- Confirmed server-side single-flight delivery reservations, stable `transaction_id` purchase deduplication, full-refund deduplication, retryable signed and generic refund webhooks, and stale-refund delivery without rolling the CRM order status backward.
+- Reconciliation now exposes purchase delivery and refund delivery independently. Purchase ranges use the order date, while `refunds` and `refund_range` use the refund attempt/detection date so a newly refunded historical order appears in the current refund totals.
+- Configured the production GA4 stream and Measurement Protocol secret locally in strict `validate` mode; no secret is committed. A GTM loader tag and Window Loaded trigger are saved as unpublished workspace changes pending deployment of the reviewed tracker.
+- Verification passed at this handoff: `478/478` unit tests, `31/31` analytics tests, TypeScript lint, production build, source security audit with zero warnings, and `npm audit` with zero vulnerabilities. Paid INV90 campaigns remain unlaunched until one controlled purchase and refund pass the <=5% reconciliation gate.
