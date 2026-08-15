@@ -36,6 +36,7 @@ export type AnalyticsDeliveryResult = {
   http_status?: number;
   error?: string;
   retry_after_ms?: number;
+  manual_reconciliation_required?: boolean;
 };
 
 const DEFAULT_ANALYTICS_RESERVATION_TTL_MS = 5 * 60 * 1_000;
@@ -227,14 +228,80 @@ export async function deliverOrderAnalytics(
   }
 
   const currentReservation = String(saved.analytics_reservation_token || "");
-  if (currentReservation && !reservationIsStale(saved.analytics_reservation_at)) {
-    return {
-      status: "retry_pending" as const,
-      in_flight: true,
-      event_name: preview.name,
-      transaction_id: String(preview.params.transaction_id || ""),
-      retry_after_ms: analyticsReservationTtlMs(),
-    };
+  if (currentReservation) {
+    if (!reservationIsStale(saved.analytics_reservation_at)) {
+      return {
+        status: "retry_pending" as const,
+        in_flight: true,
+        event_name: preview.name,
+        transaction_id: String(preview.params.transaction_id || ""),
+        retry_after_ms: analyticsReservationTtlMs(),
+      };
+    }
+
+    const reservationMode = configuredMode(saved.analytics_reservation_mode || config.mode);
+    if (reservationMode === "collect") {
+      // A collect request may have reached Google before the worker stopped.
+      // Never reclaim and resend that lease automatically: record an explicit
+      // ambiguous state for private reconciliation, then let a different event
+      // (for example a later refund) acquire its own reservation.
+      const staleKey = String(saved.analytics_reservation_key || key);
+      const detectedAt = new Date().toISOString();
+      const ambiguousResult: AnalyticsDeliveryResult = {
+        status: "delivery_unknown",
+        mode: "collect",
+        event_name: staleKey === "refund_full" ? "refund" : "purchase",
+        transaction_id: String(preview.params.transaction_id || ""),
+        error: "A stale GA4 collect reservation may already have been accepted. Automatic resend is blocked; reconcile this order manually.",
+        manual_reconciliation_required: true,
+      };
+      const staleAnalytics: Record<string, unknown> = {
+        ...analytics,
+        [staleKey]: {
+          ...ambiguousResult,
+          attempted_at: saved.analytics_reservation_at || detectedAt,
+          detected_at: detectedAt,
+          pii_sent: false,
+        },
+      };
+      const googleAdsMatch = buildGoogleAdsMatchRecord(effectiveOrder);
+      if (googleAdsMatch) {
+        staleAnalytics.google_ads = {
+          ...googleAdsMatch,
+          updated_at: detectedAt,
+          pii_sent: false,
+        };
+      }
+      const markedAmbiguous = await compareAndSetDocument(
+        orderRef,
+        {
+          analytics_reservation_token: saved.analytics_reservation_token,
+          analytics_reservation_key: saved.analytics_reservation_key ?? null,
+          analytics_reservation_at: saved.analytics_reservation_at ?? null,
+          analytics_reservation_mode: saved.analytics_reservation_mode ?? null,
+        },
+        {
+          analytics: staleAnalytics,
+          analytics_delivery_reconciliation_required: true,
+          analytics_reservation_token: null,
+          analytics_reservation_key: null,
+          analytics_reservation_at: null,
+          analytics_reservation_mode: null,
+          updatedAt: detectedAt,
+        },
+      );
+      if (!markedAmbiguous) {
+        return {
+          status: "retry_pending" as const,
+          in_flight: true,
+          event_name: preview.name,
+          transaction_id: String(preview.params.transaction_id || ""),
+          retry_after_ms: analyticsReservationTtlMs(),
+        };
+      }
+      if (staleKey === key) return ambiguousResult;
+      return deliverOrderAnalytics(uid, orderDocId, order, config, fetchImpl, orderRef);
+    }
   }
 
   const reservationToken = randomUUID();

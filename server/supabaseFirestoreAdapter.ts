@@ -427,6 +427,7 @@ class SupabaseCollectionRef {
   private sorts: Sort[] = [];
   private maxRows?: number;
   private startOffset = 0;
+  private offsetRequested = false;
 
   constructor(public table: string) {}
 
@@ -461,6 +462,7 @@ class SupabaseCollectionRef {
   offset(count: number) {
     const next = this.clone();
     next.startOffset = Math.max(0, Math.trunc(count || 0));
+    next.offsetRequested = true;
     return next;
   }
 
@@ -506,7 +508,7 @@ class SupabaseCollectionRef {
       }
     } else {
       const params = new URLSearchParams(baseParams);
-      if (this.startOffset) {
+      if (this.offsetRequested) {
         const order = params.get("order");
         if (!order) {
           params.set("order", `${primaryKey}.asc`);
@@ -530,6 +532,7 @@ class SupabaseCollectionRef {
     next.sorts = [...this.sorts];
     next.maxRows = this.maxRows;
     next.startOffset = this.startOffset;
+    next.offsetRequested = this.offsetRequested;
     return next;
   }
 }

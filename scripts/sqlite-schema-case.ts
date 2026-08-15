@@ -289,6 +289,7 @@ for (const required of [
   "analytics_reservation_key",
   "analytics_reservation_at",
   "analytics_reservation_mode",
+  "analytics_delivery_reconciliation_required",
   "attribution_claim_id",
   "attribution_claimed_at",
 ]) {

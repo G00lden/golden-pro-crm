@@ -541,6 +541,7 @@ class SqliteCollectionRef {
   private sorts: Sort[] = [];
   private maxRows?: number;
   private startOffset = 0;
+  private offsetRequested = false;
 
   constructor(public table: string) {}
 
@@ -584,6 +585,7 @@ class SqliteCollectionRef {
   offset(count: number) {
     const next = this.clone();
     next.startOffset = Math.max(0, Math.trunc(count || 0));
+    next.offsetRequested = true;
     return next;
   }
 
@@ -613,7 +615,7 @@ class SqliteCollectionRef {
 
     const primaryKey = primaryKeyByTable[this.table] || "id";
     const effectiveSorts = [...this.sorts];
-    if (this.startOffset && !effectiveSorts.some((sort) => mapToColumn(sort.field) === primaryKey)) {
+    if (this.offsetRequested && !effectiveSorts.some((sort) => mapToColumn(sort.field) === primaryKey)) {
       effectiveSorts.push({ field: primaryKey, direction: "asc" });
     }
     if (effectiveSorts.length > 0) {
@@ -646,6 +648,7 @@ class SqliteCollectionRef {
     next.sorts = [...this.sorts];
     next.maxRows = this.maxRows;
     next.startOffset = this.startOffset;
+    next.offsetRequested = this.offsetRequested;
     return next;
   }
 }

@@ -2889,6 +2889,10 @@ export async function getStoreReconciliationForUser(
       attribution: order.attribution || {},
       ga4_status: purchase.status || "not_attempted",
       ga4_transaction_id: purchase.transaction_id || null,
+      ga4_manual_reconciliation_required: Boolean(
+        order.analytics_delivery_reconciliation_required
+        || purchase.manual_reconciliation_required,
+      ),
       google_ads_status: googleAds.status || "not_matched",
       google_ads_transaction_id: googleAds.transaction_id || null,
       items: Array.isArray(order.items) ? order.items.map((item: any) => ({
@@ -2918,6 +2922,7 @@ export async function getStoreReconciliationForUser(
       ga4_sent_merchandise_value: ga4Value,
       google_ads_matched_order_count: orders.filter((order) => order.google_ads_status !== "not_matched").length,
       blocked_missing_client_id_count: orders.filter((order) => order.ga4_status === "blocked_missing_client_id").length,
+      ga4_manual_reconciliation_count: orders.filter((order) => order.ga4_manual_reconciliation_required).length,
     },
     orders,
   };
@@ -3179,13 +3184,13 @@ export async function processStoreWebhook(req: RawBodyRequest) {
   const { authMode, rawBody } = verifyStoreWebhook(req);
   const order = normalizeStorePayload(req, rawBody);
 
+  if (localStoreFallbackEnabled()) {
+    return localProcessStoreWebhook(ownerUid, authMode, rawBody, order, req.body);
+  }
+
   if (order.checkoutId) {
     const { closeStorefrontAttributionClaim } = await import("./storefrontAttribution");
     await closeStorefrontAttributionClaim(ownerUid, order.checkoutId, order.orderId);
-  }
-
-  if (localStoreFallbackEnabled()) {
-    return localProcessStoreWebhook(ownerUid, authMode, rawBody, order, req.body);
   }
 
   const eventKey = `evt_${hash(`${ownerUid}:${order.eventId}`)}`;

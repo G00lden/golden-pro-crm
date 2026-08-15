@@ -1,6 +1,7 @@
 alter table public.store_orders
   add column if not exists checkout_id text,
   add column if not exists analytics_reservation_mode text,
+  add column if not exists analytics_delivery_reconciliation_required boolean not null default false,
   add column if not exists attribution_claim_id text,
   add column if not exists attribution_claimed_at timestamptz;
 

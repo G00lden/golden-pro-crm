@@ -133,6 +133,7 @@ for (const col of [
   ["analytics_reservation_key", "TEXT"],
   ["analytics_reservation_at", "TEXT"],
   ["analytics_reservation_mode", "TEXT"],
+  ["analytics_delivery_reconciliation_required", "INTEGER DEFAULT 0"],
   ["attribution_claim_id", "TEXT"],
   ["attribution_claimed_at", "TEXT"],
   ["provider", "TEXT DEFAULT 'salla'"],

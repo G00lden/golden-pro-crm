@@ -85,6 +85,19 @@ test("Supabase adapter applies caller offsets to bounded queries", async () => {
   });
 });
 
+test("Supabase adapter applies the primary-key tie-breaker to offset zero", async () => {
+  await withMockedSupabase(2_000, async (calls) => {
+    await createSupabaseFirestoreAdapter()
+      .collection("customers")
+      .orderBy("name")
+      .offset(0)
+      .limit(500)
+      .get();
+
+    assert.equal(calls[0].searchParams.get("order"), "name.asc,id.asc");
+  });
+});
+
 test("Supabase adapter allocates invoice counters through the atomic RPC", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.SUPABASE_URL;

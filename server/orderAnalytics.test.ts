@@ -135,7 +135,7 @@ test("keeps a refund retryable while a purchase lease is active", async () => {
   assert.equal(calls, 1);
 });
 
-test("reclaims a stale analytics lease instead of suppressing delivery forever", async () => {
+test("marks a stale collect lease ambiguous and never resends it automatically", async () => {
   const ref = fakeOrderRef({
     analytics_reservation_token: "abandoned-token",
     analytics_reservation_key: "purchase",
@@ -147,9 +147,54 @@ test("reclaims a stale analytics lease instead of suppressing delivery forever",
     calls += 1;
     return new Response(null, { status: 204 });
   }, ref);
-  assert.equal(result.status, "sent");
+  assert.equal(result.status, "delivery_unknown");
+  assert.equal(result.manual_reconciliation_required, true);
+  assert.equal(calls, 0);
+  assert.equal(ref.data().analytics_reservation_token, null);
+  assert.equal(ref.data().analytics_delivery_reconciliation_required, true);
+  assert.equal((ref.data().analytics as any).purchase.status, "delivery_unknown");
+});
+
+test("can reclaim a stale validate lease because it cannot record a production conversion", async () => {
+  const ref = fakeOrderRef({
+    analytics_reservation_token: "abandoned-validation-token",
+    analytics_reservation_key: "purchase",
+    analytics_reservation_at: "2020-01-01T00:00:00.000Z",
+    analytics_reservation_mode: "validate",
+  });
+  let calls = 0;
+  const result = await deliverOrderAnalytics("owner-a", "order-1", sample, configured, async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ validationMessages: [] }), { status: 200 });
+  }, ref);
+  assert.equal(result.status, "validated");
   assert.equal(calls, 1);
   assert.equal(ref.data().analytics_reservation_token, null);
+});
+
+test("marks a stale purchase ambiguous before delivering a different refund event", async () => {
+  const ref = fakeOrderRef({
+    analytics_reservation_token: "abandoned-purchase-token",
+    analytics_reservation_key: "purchase",
+    analytics_reservation_at: "2020-01-01T00:00:00.000Z",
+    analytics_reservation_mode: "collect",
+  });
+  let calls = 0;
+  const result = await deliverOrderAnalytics(
+    "owner-a",
+    "order-1",
+    { ...sample, eventType: "order.refunded", eventId: "refund-after-stale-purchase" },
+    collect,
+    async () => {
+      calls += 1;
+      return new Response(null, { status: 204 });
+    },
+    ref,
+  );
+  assert.equal(result.status, "sent");
+  assert.equal(calls, 1);
+  assert.equal((ref.data().analytics as any).purchase.status, "delivery_unknown");
+  assert.equal((ref.data().analytics as any).refund_full.status, "sent");
 });
 
 test("deduplicates a full refund across cancelled and refunded webhooks", async () => {
