@@ -73,6 +73,8 @@ test("maps cancellations and refunds to refund but ignores failed purchases", ()
   assert.equal(classifyGa4CommerceEvent(order({ eventType: "order.refunded" })), "refund");
   assert.equal(classifyGa4CommerceEvent(order({ paymentStatus: "failed" })), null);
   assert.equal(classifyGa4CommerceEvent(order({ eventType: "order.updated", paymentStatus: "paid" })), "purchase");
+  assert.equal(classifyGa4CommerceEvent(order({ eventType: "order.updated", paymentStatus: "unpaid" })), null);
+  assert.equal(classifyGa4CommerceEvent(order({ eventType: "order.payment.updated", paymentStatus: "غير مدفوع" })), null);
 });
 
 test("builds a private Ads matching record only when a click id exists", () => {

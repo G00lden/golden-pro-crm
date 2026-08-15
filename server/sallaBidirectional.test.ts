@@ -464,7 +464,7 @@ test("retryable GA4 failure keeps the signed Salla event retryable until deliver
   }
 });
 
-test("renews an expired unclosed storefront claim without changing its attribution", async () => {
+test("renews an unclosed storefront claim inside the browser expiry buffer without changing its attribution", async () => {
   const uid = "test-owner";
   const checkoutId = "checkout-renew-6301";
   const envKeys = ["STORE_ATTRIBUTION_SIGNING_SECRET", "STORE_ATTRIBUTION_CLAIM_TTL_SECONDS"] as const;
@@ -485,7 +485,7 @@ test("renews an expired unclosed storefront claim without changing its attributi
       .get();
     const claimRef = claims.docs[0]?.ref;
     assert.ok(claimRef);
-    await claimRef.set({ expires_at: new Date(Date.now() - 60_000).toISOString() }, { merge: true });
+    await claimRef.set({ expires_at: new Date(Date.now() + 20_000).toISOString() }, { merge: true });
 
     const renewed = await issueStorefrontAttributionClaim(uid, input);
     assert.notEqual(renewed.claim_token, original.claim_token);
@@ -513,7 +513,6 @@ test("signed refund fallback delivers analytics when the Salla detail API is una
     currency: "SAR",
     total: 199,
     subtotal: 199,
-    attribution: { clientId: "123456789.987654321", gclid: "test-click-refund" },
     items: [{
       name: "INV90 replacement kit",
       sku: "BP-000392",
@@ -548,18 +547,28 @@ test("signed refund fallback delivers analytics when the Salla detail API is una
       data: { id: orderId, status: { name: "refunded", slug: "refunded" } },
     };
 
+    await assert.rejects(
+      () => handleSallaAppWebhook(webhookRequest(body) as never),
+      (error: unknown) => Number((error as { status?: unknown })?.status) === 503,
+    );
+    assert.equal(gaCalls, 0);
+    const failedInbox = await adminDb.collection("salla_order_inbox")
+      .where("ownerUid", "==", uid)
+      .where("remoteOrderId", "==", orderId)
+      .limit(1)
+      .get();
+    assert.equal(failedInbox.docs[0]?.data().status, "failed");
+
+    await adminDb.collection("store_orders").doc(localId).set({
+      attribution: { clientId: "123456789.987654321", gclid: "test-click-refund" },
+    }, { merge: true });
     const result = await handleSallaAppWebhook(webhookRequest(body) as never);
     assert.equal(result.duplicate, false);
     assert.equal(gaCalls, 1);
     const stored = (await adminDb.collection("store_orders").doc(localId).get()).data() || {};
     assert.deepEqual(Object.keys(stored.analytics || {}).sort(), ["google_ads", "refund_full"]);
     assert.equal(stored.analytics.refund_full.status, "sent");
-    const inbox = await adminDb.collection("salla_order_inbox")
-      .where("ownerUid", "==", uid)
-      .where("remoteOrderId", "==", orderId)
-      .limit(1)
-      .get();
-    assert.equal(inbox.docs[0]?.data().status, "processed");
+    assert.equal(failedInbox.docs[0]?.ref ? (await failedInbox.docs[0].ref.get()).data()?.status : null, "processed");
   } finally {
     for (const key of envKeys) {
       if (previousEnv[key] === undefined) delete process.env[key];

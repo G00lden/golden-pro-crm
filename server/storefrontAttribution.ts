@@ -286,7 +286,7 @@ export async function issueStorefrontAttributionClaim(
     issuedAt = String(saved.issued_at || issuedAt);
     expiresAt = String(saved.expires_at || expiresAt);
     const expiresAtMs = Date.parse(expiresAt);
-    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs + 30_000) {
       // A checkout can remain open longer than the claim TTL. Renew only the
       // exact same, still-unclosed claim so a stale browser token can be
       // replaced without allowing attribution to be changed after checkout.

@@ -2552,6 +2552,15 @@ function signedWebhookHasCompleteOrder(remoteOrder: Record<string, any>) {
   );
 }
 
+function sallaAnalyticsNeedsRetry(eventType: string, status: string) {
+  if (status === "retry_pending" || status === "failed") return true;
+  return status === "blocked_missing_client_id" && [
+    "order.cancelled",
+    "order.canceled",
+    "order.refunded",
+  ].includes(eventType.toLocaleLowerCase("en-US"));
+}
+
 async function applySignedSallaOrderPatch(
   currentUid: string,
   remoteOrderId: string,
@@ -2612,11 +2621,13 @@ async function applySignedSallaOrderPatch(
     status: "failed" as const,
     error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
   }));
-  if (analytics.status === "retry_pending" || analytics.status === "failed") {
+  if (sallaAnalyticsNeedsRetry(eventType, analytics.status)) {
     const error = new Error(
       analytics.status === "retry_pending"
         ? "Order analytics delivery is already in progress; retry this Salla webhook."
-        : `Order analytics delivery failed; retry this Salla webhook. ${analytics.error || ""}`.trim(),
+        : analytics.status === "blocked_missing_client_id"
+          ? "Refund analytics is waiting for the signed storefront attribution; retry this Salla webhook."
+        : `Order analytics delivery failed; retry this Salla webhook. ${"error" in analytics ? analytics.error || "" : ""}`.trim(),
     ) as Error & { status?: number };
     error.status = 503;
     throw error;
@@ -2699,11 +2710,13 @@ async function persistAuthoritativeSallaOrder(
         error: analyticsError instanceof Error ? analyticsError.message.slice(0, 500) : "Analytics delivery failed.",
       }))
     : { status: "not_applicable" as const };
-  if (analytics.status === "retry_pending" || analytics.status === "failed") {
+  if (sallaAnalyticsNeedsRetry(normalized.eventType, analytics.status)) {
     const error = new Error(
       analytics.status === "retry_pending"
         ? "Order analytics delivery is already in progress; retry this Salla webhook."
-        : `Order analytics delivery failed; retry this Salla webhook. ${analytics.error || ""}`.trim(),
+        : analytics.status === "blocked_missing_client_id"
+          ? "Refund analytics is waiting for the signed storefront attribution; retry this Salla webhook."
+        : `Order analytics delivery failed; retry this Salla webhook. ${"error" in analytics ? analytics.error || "" : ""}`.trim(),
     ) as Error & { status?: number };
     error.status = 503;
     throw error;

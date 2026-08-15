@@ -108,7 +108,9 @@ export function classifyGa4CommerceEvent(order: AnalyticsOrder): Ga4CommerceEven
   }
 
   if (eventType === "order.payment.updated" || eventType === "order.updated") {
-    return isConfirmedPaymentStatus(order.paymentStatus || order.status) ? "purchase" : null;
+    const status = order.paymentStatus || order.status;
+    if (isRejectedPaymentStatus(status)) return null;
+    return isConfirmedPaymentStatus(status) ? "purchase" : null;
   }
 
   return null;
